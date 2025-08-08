@@ -12,7 +12,6 @@ use reqwest::redirect::Policy;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-
 // --- Model downloader: list & download ggml models from Hugging Face ---
 
 #[derive(Debug, Deserialize)]
@@ -159,9 +158,7 @@ fn fill_meta_via_head(repo: &str, name: &str) -> (Option<u64>, Option<String>) {
         Ok(c) => c,
         Err(_) => return (None, None),
     };
-    let url = format!(
-        "https://huggingface.co/{repo}/resolve/main/ggml-{name}.bin"
-    );
+    let url = format!("https://huggingface.co/{repo}/resolve/main/ggml-{name}.bin");
     let resp = match head_client
         .head(url)
         .send()
@@ -206,9 +203,7 @@ fn hf_fetch_repo_models(client: &Client, repo: &'static str) -> Result<Vec<Model
         ilog!("Fetching online data: listing models from {}...", repo);
     }
     // Prefer the tree endpoint for reliable size/hash metadata, then fall back to model metadata
-    let tree_url = format!(
-        "https://huggingface.co/api/models/{repo}/tree/main?recursive=1"
-    );
+    let tree_url = format!("https://huggingface.co/api/models/{repo}/tree/main?recursive=1");
     let mut out: Vec<ModelEntry> = Vec::new();
 
     match client
@@ -452,12 +447,12 @@ fn prompt_select_models_two_stage(models: &[ModelEntry]) -> Result<Vec<ModelEntr
             let filtered: Vec<ModelEntry> =
                 models.iter().filter(|m| m.base == base).cloned().collect();
             if filtered.is_empty() {
-                eprintln!("No models found for base '{}'.", base);
+                eprintln!("No models found for base '{base}'.");
                 continue;
             }
             // Reuse the formatter but only for the chosen base list
             let listing = format_model_list(&filtered);
-            eprint!("{}", listing);
+            eprint!("{listing}");
 
             // Build index map for filtered list
             let mut index_map: Vec<usize> = Vec::with_capacity(filtered.len());
@@ -482,7 +477,7 @@ fn prompt_select_models_two_stage(models: &[ModelEntry]) -> Result<Vec<ModelEntr
                 if s2 == "all" || s2 == "*" {
                     selected = (1..idx).collect();
                 } else if !s2.is_empty() {
-                    for part in s2.split(|c| c == ',' || c == ' ' || c == ';') {
+                    for part in s2.split([',', ' ', ';']) {
                         let part = part.trim();
                         if part.is_empty() {
                             continue;
@@ -759,9 +754,9 @@ pub fn update_local_models() -> Result<()> {
     let models: Vec<ModelEntry> = if let Ok(manifest_path) = env::var("POLYSCRIBE_MODELS_MANIFEST")
     {
         let data = std::fs::read_to_string(&manifest_path)
-            .with_context(|| format!("Failed to read manifest at {}", manifest_path))?;
+            .with_context(|| format!("Failed to read manifest at {manifest_path}"))?;
         let mut list: Vec<ModelEntry> = serde_json::from_str(&data)
-            .with_context(|| format!("Invalid JSON manifest: {}", manifest_path))?;
+            .with_context(|| format!("Invalid JSON manifest: {manifest_path}"))?;
         // sort for stability
         list.sort_by(|a, b| a.name.cmp(&b.name));
         list
@@ -855,9 +850,16 @@ pub fn pick_best_local_model(models_dir: &Path) -> Option<std::path::PathBuf> {
     let rd = std::fs::read_dir(models_dir).ok()?;
     for entry in rd.flatten() {
         let path = entry.path();
-        if !path.is_file() { continue; }
-        let fname = match path.file_name().and_then(|s| s.to_str()) { Some(s) => s.to_string(), None => continue };
-        if !fname.starts_with("ggml-") || !fname.ends_with(".bin") { continue; }
+        if !path.is_file() {
+            continue;
+        }
+        let fname = match path.file_name().and_then(|s| s.to_str()) {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
+        if !fname.starts_with("ggml-") || !fname.ends_with(".bin") {
+            continue;
+        }
         let size = std::fs::metadata(&path).ok()?.len();
         match &mut best {
             None => best = Some((size, fname, path.clone())),
@@ -881,7 +883,7 @@ pub fn ensure_model_available_noninteractive(model_name: &str) -> Result<std::pa
     if !models_dir.exists() {
         create_dir_all(models_dir).context("Failed to create models directory")?;
     }
-    let final_path = models_dir.join(format!("ggml-{}.bin", model_name));
+    let final_path = models_dir.join(format!("ggml-{model_name}.bin"));
     if final_path.exists() {
         return Ok(final_path);
     }

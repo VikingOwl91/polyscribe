@@ -100,7 +100,9 @@ impl CpuBackend {
     }
 }
 impl Default for CpuBackend {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 impl CudaBackend {
     /// Create a new CUDA backend instance.
@@ -109,7 +111,9 @@ impl CudaBackend {
     }
 }
 impl Default for CudaBackend {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 impl HipBackend {
     /// Create a new HIP backend instance.
@@ -118,7 +122,9 @@ impl HipBackend {
     }
 }
 impl Default for HipBackend {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 impl VulkanBackend {
     /// Create a new Vulkan backend instance.
@@ -127,7 +133,9 @@ impl VulkanBackend {
     }
 }
 impl Default for VulkanBackend {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TranscribeBackend for CpuBackend {

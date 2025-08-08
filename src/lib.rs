@@ -73,7 +73,13 @@ impl StderrSilencer {
     /// Activate stderr silencing if quiet is set and on Unix; otherwise returns a no-op guard.
     pub fn activate_if_quiet() -> Self {
         if !is_quiet() {
-            return Self { active: false, #[cfg(unix)] old_stderr_fd: -1, #[cfg(unix)] devnull_fd: -1 };
+            return Self {
+                active: false,
+                #[cfg(unix)]
+                old_stderr_fd: -1,
+                #[cfg(unix)]
+                devnull_fd: -1,
+            };
         }
         Self::activate()
     }
@@ -85,7 +91,11 @@ impl StderrSilencer {
             // Duplicate current stderr (fd 2)
             let old_fd = dup(2);
             if old_fd < 0 {
-                return Self { active: false, old_stderr_fd: -1, devnull_fd: -1 };
+                return Self {
+                    active: false,
+                    old_stderr_fd: -1,
+                    devnull_fd: -1,
+                };
             }
             // Open /dev/null for writing
             let devnull_cstr = std::ffi::CString::new("/dev/null").unwrap();
@@ -93,15 +103,27 @@ impl StderrSilencer {
             if dn < 0 {
                 // failed to open devnull; restore and bail
                 close(old_fd);
-                return Self { active: false, old_stderr_fd: -1, devnull_fd: -1 };
+                return Self {
+                    active: false,
+                    old_stderr_fd: -1,
+                    devnull_fd: -1,
+                };
             }
             // Redirect fd 2 to devnull
             if dup2(dn, 2) < 0 {
                 close(dn);
                 close(old_fd);
-                return Self { active: false, old_stderr_fd: -1, devnull_fd: -1 };
+                return Self {
+                    active: false,
+                    old_stderr_fd: -1,
+                    devnull_fd: -1,
+                };
             }
-            Self { active: true, old_stderr_fd: old_fd, devnull_fd: dn }
+            Self {
+                active: true,
+                old_stderr_fd: old_fd,
+                devnull_fd: dn,
+            }
         }
         #[cfg(not(unix))]
         {
@@ -195,7 +217,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[cfg(unix)]
-use libc::{close, dup, dup2, open, O_WRONLY};
+use libc::{O_WRONLY, close, dup, dup2, open};
 
 /// Re-export backend module (GPU/CPU selection and transcription).
 pub mod backend;
@@ -225,12 +247,12 @@ pub fn date_prefix() -> String {
 /// Format a floating-point number of seconds as SRT timestamp (HH:MM:SS,mmm).
 pub fn format_srt_time(seconds: f64) -> String {
     let total_ms = (seconds * 1000.0).round() as i64;
-    let ms = (total_ms % 1000) as i64;
+    let ms = total_ms % 1000;
     let total_secs = total_ms / 1000;
-    let s = (total_secs % 60) as i64;
-    let m = ((total_secs / 60) % 60) as i64;
-    let h = (total_secs / 3600) as i64;
-    format!("{:02}:{:02}:{:02},{:03}", h, m, s, ms)
+    let s = total_secs % 60;
+    let m = (total_secs / 60) % 60;
+    let h = total_secs / 3600;
+    format!("{h:02}:{m:02}:{s:02},{ms:03}")
 }
 
 /// Render a list of transcript entries to SRT format.
@@ -238,7 +260,7 @@ pub fn render_srt(items: &[OutputEntry]) -> String {
     let mut out = String::new();
     for (i, e) in items.iter().enumerate() {
         let idx = i + 1;
-        out.push_str(&format!("{}\n", idx));
+        out.push_str(&format!("{idx}\n"));
         out.push_str(&format!(
             "{} --> {}\n",
             format_srt_time(e.start),
@@ -410,10 +432,13 @@ pub fn find_model_file() -> Result<PathBuf> {
 
     if candidates.is_empty() {
         // No models found: prompt interactively (TTY only)
-        wlog!("{}", format!(
-            "No Whisper model files (*.bin) found in {}.",
-            models_dir.display()
-        ));
+        wlog!(
+            "{}",
+            format!(
+                "No Whisper model files (*.bin) found in {}.",
+                models_dir.display()
+            )
+        );
         if crate::is_no_interaction() || !crate::stdin_is_tty() {
             return Err(anyhow!(
                 "No models available and interactive mode is disabled. Please set WHISPER_MODEL or run with --download-models."
@@ -468,12 +493,10 @@ pub fn find_model_file() -> Result<PathBuf> {
         let prev = prev.trim();
         if !prev.is_empty() {
             let p = PathBuf::from(prev);
-            if p.is_file() {
-                if candidates.iter().any(|c| c == &p) {
-                    // Previously printed: INFO about using previously selected model.
-                    // Suppress this to avoid duplicate/noisy messages; per-file progress will be shown elsewhere.
-                    return Ok(p);
-                }
+            if p.is_file() && candidates.iter().any(|c| c == &p) {
+                // Previously printed: INFO about using previously selected model.
+                // Suppress this to avoid duplicate/noisy messages; per-file progress will be shown elsewhere.
+                return Ok(p);
             }
         }
     }

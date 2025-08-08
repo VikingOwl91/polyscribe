@@ -10,7 +10,6 @@ use serde::{Deserialize, Serialize};
 // whisper-rs is used from the library crate
 use polyscribe::backend::{BackendKind, select_backend};
 
-
 #[derive(Subcommand, Debug, Clone)]
 enum AuxCommands {
     /// Generate shell completion script to stdout
@@ -141,8 +140,7 @@ fn prompt_speaker_name_for_path(path: &Path, default_name: &str, enabled: bool) 
         .map(|s| s.to_string())
         .unwrap_or_else(|| path.to_string_lossy().to_string());
     eprint!(
-        "Enter speaker name for {} [default: {}]: ",
-        display_owned, default_name
+        "Enter speaker name for {display_owned} [default: {default_name}]: "
     );
     io::stderr().flush().ok();
     let mut buf = String::new();
@@ -347,12 +345,8 @@ fn run() -> Result<()> {
                 // Progress log to stderr (suppressed by -q); avoid partial lines
                 polyscribe::ilog!("Processing file: {} ...", path.display());
                 let res = with_quiet_stdio_if_needed(args.quiet, || {
-                    sel.backend.transcribe(
-                        path,
-                        &speaker,
-                        lang_hint.as_deref(),
-                        args.gpu_layers,
-                    )
+                    sel.backend
+                        .transcribe(path, &speaker, lang_hint.as_deref(), args.gpu_layers)
                 });
                 match res {
                     Ok(items) => {
@@ -360,7 +354,7 @@ fn run() -> Result<()> {
                         entries.extend(items.into_iter());
                     }
                     Err(e) => {
-                        if !(polyscribe::is_no_interaction() || !polyscribe::stdin_is_tty()) {
+                        if !polyscribe::is_no_interaction() && polyscribe::stdin_is_tty() {
                             polyscribe::elog!("{:#}", e);
                         }
                         return Err(e);
@@ -369,11 +363,11 @@ fn run() -> Result<()> {
             } else if is_json_file(path) {
                 let mut buf = String::new();
                 File::open(path)
-                    .with_context(|| format!("Failed to open: {}", input_path))?
+                    .with_context(|| format!("Failed to open: {input_path}"))?
                     .read_to_string(&mut buf)
-                    .with_context(|| format!("Failed to read: {}", input_path))?;
+                    .with_context(|| format!("Failed to read: {input_path}"))?;
                 let root: InputRoot = serde_json::from_str(&buf).with_context(|| {
-                    format!("Invalid JSON transcript parsed from {}", input_path)
+                    format!("Invalid JSON transcript parsed from {input_path}")
                 })?;
                 for seg in root.segments {
                     entries.push(OutputEntry {
@@ -414,7 +408,7 @@ fn run() -> Result<()> {
                 .and_then(|s| s.to_str())
                 .unwrap_or("output");
             let date = date_prefix();
-            let base_name = format!("{}_{}", date, stem);
+            let base_name = format!("{date}_{stem}");
             let json_path = out_dir.join(format!("{}.json", &base_name));
             let toml_path = out_dir.join(format!("{}.toml", &base_name));
             let srt_path = out_dir.join(format!("{}.srt", &base_name));
@@ -461,7 +455,7 @@ fn run() -> Result<()> {
         };
 
         let date = date_prefix();
-        let merged_base = format!("{}_merged", date);
+        let merged_base = format!("{date}_merged");
         let m_json = out_dir.join(format!("{}.json", &merged_base));
         let m_toml = out_dir.join(format!("{}.toml", &merged_base));
         let m_srt = out_dir.join(format!("{}.srt", &merged_base));
@@ -502,12 +496,8 @@ fn run() -> Result<()> {
                 // Progress log to stderr (suppressed by -q)
                 polyscribe::ilog!("Processing file: {} ...", path.display());
                 let res = with_quiet_stdio_if_needed(args.quiet, || {
-                    sel.backend.transcribe(
-                        path,
-                        &speaker,
-                        lang_hint.as_deref(),
-                        args.gpu_layers,
-                    )
+                    sel.backend
+                        .transcribe(path, &speaker, lang_hint.as_deref(), args.gpu_layers)
                 });
                 match res {
                     Ok(items) => {
@@ -625,7 +615,7 @@ fn run() -> Result<()> {
         }
 
         // If output_path is provided, treat it as a directory. Create it.
-        let out_dir: Option<PathBuf> = output_path.as_ref().map(|p| PathBuf::from(p));
+        let out_dir: Option<PathBuf> = output_path.as_ref().map(PathBuf::from);
         if let Some(dir) = &out_dir {
             if !dir.as_os_str().is_empty() {
                 create_dir_all(dir).with_context(|| {
@@ -650,12 +640,8 @@ fn run() -> Result<()> {
                 // Progress log to stderr (suppressed by -q)
                 polyscribe::ilog!("Processing file: {} ...", path.display());
                 let res = with_quiet_stdio_if_needed(args.quiet, || {
-                    sel.backend.transcribe(
-                        path,
-                        &speaker,
-                        lang_hint.as_deref(),
-                        args.gpu_layers,
-                    )
+                    sel.backend
+                        .transcribe(path, &speaker, lang_hint.as_deref(), args.gpu_layers)
                 });
                 match res {
                     Ok(items) => {
@@ -663,7 +649,7 @@ fn run() -> Result<()> {
                         entries.extend(items);
                     }
                     Err(e) => {
-                        if !(polyscribe::is_no_interaction() || !polyscribe::stdin_is_tty()) {
+                        if !polyscribe::is_no_interaction() && polyscribe::stdin_is_tty() {
                             polyscribe::elog!("{:#}", e);
                         }
                         return Err(e);
@@ -672,11 +658,11 @@ fn run() -> Result<()> {
             } else if is_json_file(path) {
                 let mut buf = String::new();
                 File::open(path)
-                    .with_context(|| format!("Failed to open: {}", input_path))?
+                    .with_context(|| format!("Failed to open: {input_path}"))?
                     .read_to_string(&mut buf)
-                    .with_context(|| format!("Failed to read: {}", input_path))?;
+                    .with_context(|| format!("Failed to read: {input_path}"))?;
                 let root: InputRoot = serde_json::from_str(&buf).with_context(|| {
-                    format!("Invalid JSON transcript parsed from {}", input_path)
+                    format!("Invalid JSON transcript parsed from {input_path}")
                 })?;
                 for seg in root.segments {
                     entries.push(OutputEntry {
