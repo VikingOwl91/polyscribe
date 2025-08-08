@@ -1078,6 +1078,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "clap_mangen",
+ "libloading",
  "reqwest",
  "serde",
  "serde_json",

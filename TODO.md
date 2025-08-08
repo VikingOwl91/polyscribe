@@ -12,6 +12,7 @@
 - [x] refactor into proper cli app
 - [x] add support for video files -> use ffmpeg to extract audio
 - detect gpus and use them
+- refactor project
 - add error handling
 - add verbose flag (--verbose | -v) + add logging
 - add documentation
