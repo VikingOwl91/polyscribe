@@ -1,6 +1,7 @@
 use std::fs::{File, create_dir_all};
 use std::io::{self, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
@@ -77,6 +78,92 @@ fn render_srt(items: &[OutputEntry]) -> String {
     out
 }
 
+// --- Helpers for audio transcription via openai-whisper ---
+fn is_json_file(path: &Path) -> bool {
+    matches!(path.extension().and_then(|s| s.to_str()).map(|s| s.to_lowercase()), Some(ext) if ext == "json")
+}
+
+fn is_audio_file(path: &Path) -> bool {
+    if let Some(ext) = path.extension().and_then(|s| s.to_str()).map(|s| s.to_lowercase()) {
+        let exts = [
+            "mp3","wav","m4a","mp4","aac","flac","ogg","wma","webm","mkv","mov","avi","m4b","3gp","opus","aiff","alac"
+        ];
+        return exts.contains(&ext.as_str());
+    }
+    false
+}
+
+fn ensure_whisper_venv() -> Result<PathBuf> {
+    let venv_dir = Path::new(".venv");
+    let bin_dir = venv_dir.join("bin");
+    let python_bin = bin_dir.join("python");
+    // Create venv if needed
+    if !python_bin.exists() {
+        let status = Command::new("python")
+            .arg("-m").arg("venv").arg(".venv")
+            .status()
+            .with_context(|| "Failed to execute: python -m venv .venv")?;
+        if !status.success() {
+            return Err(anyhow!("Creating virtual environment failed (python -m venv .venv)"));
+        }
+    }
+    // Install openai-whisper if needed
+    let whisper_bin = bin_dir.join("whisper");
+    if !whisper_bin.exists() {
+        let status = Command::new(&python_bin)
+            .arg("-m").arg("pip").arg("install").arg("-U").arg("openai-whisper")
+            .status()
+            .with_context(|| "Failed to execute: .venv/bin/python -m pip install -U openai-whisper")?;
+        if !status.success() {
+            return Err(anyhow!("Installing openai-whisper failed"));
+        }
+    }
+    Ok(whisper_bin)
+}
+
+fn run_whisper(audio_path: &Path, out_dir: &Path, whisper_bin: &Path) -> Result<PathBuf> {
+    create_dir_all(out_dir).with_context(|| format!("Failed to create whisper output dir: {}", out_dir.display()))?;
+    let out_dir_str = out_dir.to_string_lossy().to_string();
+
+    // Try with -o first (as per requested command)
+    let attempt = |use_short_o: bool| -> Result<()> {
+        let mut cmd = Command::new(whisper_bin);
+        cmd.arg(audio_path)
+            .arg("--model").arg("turbo")
+            .arg("--output_format").arg("json");
+        if use_short_o {
+            cmd.arg("-o").arg(&out_dir_str);
+        } else {
+            cmd.arg("--output_dir").arg(&out_dir_str);
+        }
+        let output = cmd.output()
+            .with_context(|| format!("Failed to execute whisper for {}", audio_path.display()))?;
+        if !output.status.success() {
+            return Err(anyhow!(
+                "Whisper transcription failed for {}: {}",
+                audio_path.display(),
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        Ok(())
+    };
+
+    if let Err(_e) = attempt(true) {
+        // Fallback to --output_dir if -o not supported by CLI installed
+        attempt(false)?;
+    }
+
+    // Try to locate the resulting JSON file
+    let stem = audio_path.file_stem().and_then(|s| s.to_str()).unwrap_or("transcript");
+    let cand1 = out_dir.join(format!("{}.json", stem));
+    if cand1.exists() { return Ok(cand1); }
+    if let Some(file_name) = audio_path.file_name().and_then(|s| s.to_str()) {
+        let cand2 = out_dir.join(format!("{}.json", file_name));
+        if cand2.exists() { return Ok(cand2); }
+    }
+    Err(anyhow!("Could not find whisper JSON output in {} for input {}", out_dir.display(), audio_path.display()))
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
 
@@ -95,23 +182,56 @@ fn main() -> Result<()> {
         return Err(anyhow!("No input files provided"));
     }
 
+    // Determine directory for intermediate Whisper transcriptions
+    let transcripts_dir: PathBuf = if let Some(ref out_path) = output_path {
+        let base_path = Path::new(out_path);
+        if let Some(parent) = base_path.parent() {
+            if parent.as_os_str().is_empty() {
+                PathBuf::from("output").join("transcripts")
+            } else {
+                parent.join("transcripts")
+            }
+        } else {
+            PathBuf::from("output").join("transcripts")
+        }
+    } else {
+        PathBuf::from("output").join("transcripts")
+    };
+    let mut whisper_bin_opt: Option<PathBuf> = None;
+
     let mut entries: Vec<OutputEntry> = Vec::new();
 
     for input_path in &inputs {
-        let speaker = Path::new(input_path)
+        let path = Path::new(input_path);
+        let speaker = path
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("speaker")
             .to_string();
 
         let mut buf = String::new();
-        File::open(input_path)
-            .with_context(|| format!("Failed to open: {}", input_path))?
-            .read_to_string(&mut buf)
-            .with_context(|| format!("Failed to read: {}", input_path))?;
+        if is_audio_file(path) {
+            // Ensure whisper is available
+            if whisper_bin_opt.is_none() {
+                whisper_bin_opt = Some(ensure_whisper_venv()?);
+            }
+            let whisper_bin = whisper_bin_opt.as_ref().unwrap();
+            let json_path = run_whisper(path, &transcripts_dir, whisper_bin)?;
+            File::open(&json_path)
+                .with_context(|| format!("Failed to open Whisper JSON: {}", json_path.display()))?
+                .read_to_string(&mut buf)
+                .with_context(|| format!("Failed to read Whisper JSON: {}", json_path.display()))?;
+        } else if is_json_file(path) {
+            File::open(path)
+                .with_context(|| format!("Failed to open: {}", input_path))?
+                .read_to_string(&mut buf)
+                .with_context(|| format!("Failed to read: {}", input_path))?;
+        } else {
+            return Err(anyhow!(format!("Unsupported input type (expected .json or audio media): {}", input_path)));
+        }
 
         let root: InputRoot = serde_json::from_str(&buf)
-            .with_context(|| format!("Invalid JSON: {}", input_path))?;
+            .with_context(|| format!("Invalid JSON transcript parsed from {}", input_path))?;
 
         for seg in root.segments {
             entries.push(OutputEntry {
