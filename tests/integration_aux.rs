@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025 <COPYRIGHT HOLDER>. All rights reserved.
+
 use std::process::Command;
 
 fn bin() -> &'static str {

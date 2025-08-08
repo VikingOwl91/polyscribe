@@ -75,3 +75,8 @@ See the examples/ directory for copy-paste scripts:
 - examples/transcribe_file.sh
 - examples/update_models.sh
 - examples/download_models_interactive.sh
+
+License
+-------
+
+This project is licensed under the MIT License — see the LICENSE file for details.

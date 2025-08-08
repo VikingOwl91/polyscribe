@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 <COPYRIGHT HOLDER>. All rights reserved.
 set -euo pipefail
 
 # Transcribe an audio/video file to JSON and SRT into ./output

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025 <COPYRIGHT HOLDER>. All rights reserved.
+
 //! Model discovery, selection, and downloading logic for PolyScribe.
 use std::collections::BTreeMap;
 use std::env;

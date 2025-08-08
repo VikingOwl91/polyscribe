@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025 <COPYRIGHT HOLDER>. All rights reserved.
+
 //! Transcription backend selection and implementations (CPU/GPU) used by PolyScribe.
 use crate::OutputEntry;
 use crate::{decode_audio_to_pcm_f32_ffmpeg, find_model_file};

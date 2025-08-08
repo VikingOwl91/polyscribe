@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025 <COPYRIGHT HOLDER>. All rights reserved.
+
 use std::fs::{File, create_dir_all};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};

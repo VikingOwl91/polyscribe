@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025 <COPYRIGHT HOLDER>. All rights reserved.
+
 fn main() {
     // Only run special build steps when gpu-vulkan feature is enabled.
     let vulkan_enabled = std::env::var("CARGO_FEATURE_GPU_VULKAN").is_ok();

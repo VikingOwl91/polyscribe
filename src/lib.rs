@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025 <COPYRIGHT HOLDER>. All rights reserved.
+
 #![forbid(elided_lifetimes_in_paths)]
 #![forbid(unused_must_use)]
 #![deny(missing_docs)]
