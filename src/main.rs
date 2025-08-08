@@ -23,7 +23,11 @@ fn models_dir_path() -> PathBuf {
             return pb;
         }
     }
-    PathBuf::from("models")
+    if cfg!(debug_assertions) {
+        PathBuf::from("models")
+    } else {
+        PathBuf::from("/usr/share/polyscribe/models")
+    }
 }
 
 #[derive(Parser, Debug)]
@@ -632,5 +636,26 @@ mod tests {
         assert!(bytes[5].is_ascii_digit() && bytes[6].is_ascii_digit());
         assert_eq!(bytes[7], b'-');
         assert!(bytes[8].is_ascii_digit() && bytes[9].is_ascii_digit());
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn test_models_dir_path_default_debug_and_env_override() {
+        // clear override
+        unsafe { std_env::remove_var("POLYSCRIBE_MODELS_DIR"); }
+        assert_eq!(models_dir_path(), PathBuf::from("models"));
+        // override
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std_env::set_var("POLYSCRIBE_MODELS_DIR", tmp.path()); }
+        assert_eq!(models_dir_path(), tmp.path().to_path_buf());
+        // cleanup
+        unsafe { std_env::remove_var("POLYSCRIBE_MODELS_DIR"); }
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn test_models_dir_path_default_release() {
+        unsafe { std_env::remove_var("POLYSCRIBE_MODELS_DIR"); }
+        assert_eq!(models_dir_path(), PathBuf::from("/usr/share/polyscribe/models"));
     }
 }

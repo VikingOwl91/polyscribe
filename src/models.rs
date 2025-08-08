@@ -345,7 +345,11 @@ fn models_dir_path() -> std::path::PathBuf {
         let pb = std::path::PathBuf::from(p);
         if !pb.as_os_str().is_empty() { return pb; }
     }
-    std::path::PathBuf::from("models")
+    if cfg!(debug_assertions) {
+        std::path::PathBuf::from("models")
+    } else {
+        std::path::PathBuf::from("/usr/share/polyscribe/models")
+    }
 }
 
 pub fn run_interactive_model_downloader() -> Result<()> {
@@ -665,5 +669,26 @@ mod tests {
         // Verify local file equals source content
         let got = fs::read(&local_path).unwrap();
         assert_eq!(got, new_content);
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn test_models_dir_path_default_debug_and_env_override_models_mod() {
+        // clear override
+        unsafe { std::env::remove_var("POLYSCRIBE_MODELS_DIR"); }
+        assert_eq!(super::models_dir_path(), std::path::PathBuf::from("models"));
+        // override
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("POLYSCRIBE_MODELS_DIR", tmp.path()); }
+        assert_eq!(super::models_dir_path(), tmp.path().to_path_buf());
+        // cleanup
+        unsafe { std::env::remove_var("POLYSCRIBE_MODELS_DIR"); }
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn test_models_dir_path_default_release_models_mod() {
+        unsafe { std::env::remove_var("POLYSCRIBE_MODELS_DIR"); }
+        assert_eq!(super::models_dir_path(), std::path::PathBuf::from("/usr/share/polyscribe/models"));
     }
 }
