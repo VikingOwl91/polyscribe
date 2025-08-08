@@ -40,6 +40,10 @@ struct Args {
     #[arg(short, long, value_name = "FILE")]
     output: Option<String>,
 
+    /// Merge all inputs into a single output; if not set, each input is written as a separate output
+    #[arg(short = 'm', long = "merge")]
+    merge: bool,
+
     /// Language code to use for transcription (e.g., en, de). No auto-detection.
     #[arg(short, long, value_name = "LANG")]
     language: Option<String>,
@@ -426,119 +430,174 @@ fn main() -> Result<()> {
         return Err(anyhow!("Please specify --language (e.g., --language en). Language detection was removed."));
     }
 
-    let mut entries: Vec<OutputEntry> = Vec::new();
+    if args.merge {
+        // MERGED MODE (previous default)
+        let mut entries: Vec<OutputEntry> = Vec::new();
+        for input_path in &inputs {
+            let path = Path::new(input_path);
+            let speaker = sanitize_speaker_name(
+                path.file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("speaker")
+            );
 
-    for input_path in &inputs {
-        let path = Path::new(input_path);
-        let speaker = sanitize_speaker_name(
-            path.file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("speaker")
-        );
-
-        let mut buf = String::new();
-        if is_audio_file(path) {
-            let items = transcribe_native(path, &speaker, lang_hint.as_deref())?;
-            for e in items {
-                entries.push(e);
+            let mut buf = String::new();
+            if is_audio_file(path) {
+                let items = transcribe_native(path, &speaker, lang_hint.as_deref())?;
+                for e in items { entries.push(e); }
+                continue;
+            } else if is_json_file(path) {
+                File::open(path)
+                    .with_context(|| format!("Failed to open: {}", input_path))?
+                    .read_to_string(&mut buf)
+                    .with_context(|| format!("Failed to read: {}", input_path))?;
+            } else {
+                return Err(anyhow!(format!("Unsupported input type (expected .json or audio media): {}", input_path)));
             }
-            continue;
-        } else if is_json_file(path) {
-            File::open(path)
-                .with_context(|| format!("Failed to open: {}", input_path))?
-                .read_to_string(&mut buf)
-                .with_context(|| format!("Failed to read: {}", input_path))?;
+
+            let root: InputRoot = serde_json::from_str(&buf)
+                .with_context(|| format!("Invalid JSON transcript parsed from {}", input_path))?;
+
+            for seg in root.segments {
+                entries.push(OutputEntry {
+                    id: 0,
+                    speaker: speaker.clone(),
+                    start: seg.start,
+                    end: seg.end,
+                    text: seg.text,
+                });
+            }
+        }
+
+        // Sort globally by (start, end)
+        entries.sort_by(|a, b| {
+            match a.start.partial_cmp(&b.start) {
+                Some(std::cmp::Ordering::Equal) | None => {}
+                Some(o) => return o,
+            }
+            a.end
+                .partial_cmp(&b.end)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        for (i, e) in entries.iter_mut().enumerate() { e.id = i as u64; }
+        let out = OutputRoot { items: entries };
+
+        if let Some(path) = output_path {
+            let base_path = Path::new(&path);
+            let parent_opt = base_path.parent();
+            if let Some(parent) = parent_opt {
+                if !parent.as_os_str().is_empty() {
+                    create_dir_all(parent).with_context(|| {
+                        format!("Failed to create parent directory for output: {}", parent.display())
+                    })?;
+                }
+            }
+            let stem = base_path.file_stem().and_then(|s| s.to_str()).unwrap_or("output");
+            let date = date_prefix();
+            let base_name = format!("{}_{}", date, stem);
+            let dir = parent_opt.unwrap_or(Path::new(""));
+            let json_path = dir.join(format!("{}.json", &base_name));
+            let toml_path = dir.join(format!("{}.toml", &base_name));
+            let srt_path = dir.join(format!("{}.srt", &base_name));
+
+            let mut json_file = File::create(&json_path)
+                .with_context(|| format!("Failed to create output file: {}", json_path.display()))?;
+            serde_json::to_writer_pretty(&mut json_file, &out)?; writeln!(&mut json_file)?;
+
+            let toml_str = toml::to_string_pretty(&out)?;
+            let mut toml_file = File::create(&toml_path)
+                .with_context(|| format!("Failed to create output file: {}", toml_path.display()))?;
+            toml_file.write_all(toml_str.as_bytes())?; if !toml_str.ends_with('\n') { writeln!(&mut toml_file)?; }
+
+            let srt_str = render_srt(&out.items);
+            let mut srt_file = File::create(&srt_path)
+                .with_context(|| format!("Failed to create output file: {}", srt_path.display()))?;
+            srt_file.write_all(srt_str.as_bytes())?;
         } else {
-            return Err(anyhow!(format!("Unsupported input type (expected .json or audio media): {}", input_path)));
+            let stdout = io::stdout();
+            let mut handle = stdout.lock();
+            serde_json::to_writer_pretty(&mut handle, &out)?; writeln!(&mut handle)?;
+        }
+    } else {
+        // SEPARATE MODE (default now)
+        // If writing to stdout with multiple inputs, not supported
+        if output_path.is_none() && inputs.len() > 1 {
+            return Err(anyhow!("Multiple inputs without --merge require -o OUTPUT_DIR to write separate files"));
         }
 
-        let root: InputRoot = serde_json::from_str(&buf)
-            .with_context(|| format!("Invalid JSON transcript parsed from {}", input_path))?;
-
-        for seg in root.segments {
-            entries.push(OutputEntry {
-                id: 0, // will be reassigned after sorting
-                speaker: speaker.clone(),
-                start: seg.start,
-                end: seg.end,
-                text: seg.text,
-            });
-        }
-    }
-
-    // Sort globally by (start, end)
-    entries.sort_by(|a, b| {
-        match a.start.partial_cmp(&b.start) {
-            Some(std::cmp::Ordering::Equal) | None => {}
-            Some(o) => return o,
-        }
-        a.end
-            .partial_cmp(&b.end)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-
-    // Reassign contiguous ids by chronological order
-    for (i, e) in entries.iter_mut().enumerate() {
-        e.id = i as u64;
-    }
-
-    // Output as an object containing the array (valid JSON)
-    // Schema equivalent to:
-    // {
-    //   [
-    //     id: number,
-    //     speaker: string,
-    //     start: number,
-    //     end: number,
-    //     text: string
-    //   ], ...
-    // }
-    let out = OutputRoot { items: entries };
-
-    if let Some(path) = output_path {
-        let base_path = Path::new(&path);
-        let parent_opt = base_path.parent();
-        if let Some(parent) = parent_opt {
-            if !parent.as_os_str().is_empty() {
-                create_dir_all(parent).with_context(|| {
-                    format!("Failed to create parent directory for output: {}", parent.display())
-                })?;
+        // If output_path is provided, treat it as a directory. Create it.
+        let out_dir: Option<PathBuf> = output_path.as_ref().map(|p| PathBuf::from(p));
+        if let Some(dir) = &out_dir {
+            if !dir.as_os_str().is_empty() {
+                create_dir_all(dir).with_context(|| format!("Failed to create output directory: {}", dir.display()))?;
             }
         }
-        let stem = base_path.file_stem().and_then(|s| s.to_str()).unwrap_or("output");
-        let date = date_prefix();
-        let base_name = format!("{}_{}", date, stem);
-        let dir = parent_opt.unwrap_or(Path::new(""));
-        let json_path = dir.join(format!("{}.json", &base_name));
-        let toml_path = dir.join(format!("{}.toml", &base_name));
-        let srt_path = dir.join(format!("{}.srt", &base_name));
 
-        // JSON
-        let mut json_file = File::create(&json_path)
-            .with_context(|| format!("Failed to create output file: {}", json_path.display()))?;
-        serde_json::to_writer_pretty(&mut json_file, &out)?;
-        writeln!(&mut json_file)?;
+        for input_path in &inputs {
+            let path = Path::new(input_path);
+            let speaker = sanitize_speaker_name(
+                path.file_stem().and_then(|s| s.to_str()).unwrap_or("speaker")
+            );
 
-        // TOML
-        let toml_str = toml::to_string_pretty(&out)?;
-        let mut toml_file = File::create(&toml_path)
-            .with_context(|| format!("Failed to create output file: {}", toml_path.display()))?;
-        toml_file.write_all(toml_str.as_bytes())?;
-        if !toml_str.ends_with('\n') {
-            writeln!(&mut toml_file)?;
+            // Collect entries per file
+            let mut entries: Vec<OutputEntry> = Vec::new();
+            if is_audio_file(path) {
+                let items = transcribe_native(path, &speaker, lang_hint.as_deref())?;
+                entries.extend(items);
+            } else if is_json_file(path) {
+                let mut buf = String::new();
+                File::open(path)
+                    .with_context(|| format!("Failed to open: {}", input_path))?
+                    .read_to_string(&mut buf)
+                    .with_context(|| format!("Failed to read: {}", input_path))?;
+                let root: InputRoot = serde_json::from_str(&buf)
+                    .with_context(|| format!("Invalid JSON transcript parsed from {}", input_path))?;
+                for seg in root.segments {
+                    entries.push(OutputEntry { id: 0, speaker: speaker.clone(), start: seg.start, end: seg.end, text: seg.text });
+                }
+            } else {
+                return Err(anyhow!(format!("Unsupported input type (expected .json or audio media): {}", input_path)));
+            }
+
+            // Sort and reassign ids per file
+            entries.sort_by(|a, b| {
+                match a.start.partial_cmp(&b.start) { Some(std::cmp::Ordering::Equal) | None => {} Some(o) => return o }
+                a.end.partial_cmp(&b.end).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            for (i, e) in entries.iter_mut().enumerate() { e.id = i as u64; }
+            let out = OutputRoot { items: entries };
+
+            if let Some(dir) = &out_dir {
+                // Build file names using input stem
+                let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("output");
+                let date = date_prefix();
+                let base_name = format!("{}_{}", date, stem);
+                let json_path = dir.join(format!("{}.json", &base_name));
+                let toml_path = dir.join(format!("{}.toml", &base_name));
+                let srt_path = dir.join(format!("{}.srt", &base_name));
+
+                let mut json_file = File::create(&json_path)
+                    .with_context(|| format!("Failed to create output file: {}", json_path.display()))?;
+                serde_json::to_writer_pretty(&mut json_file, &out)?; writeln!(&mut json_file)?;
+
+                let toml_str = toml::to_string_pretty(&out)?;
+                let mut toml_file = File::create(&toml_path)
+                    .with_context(|| format!("Failed to create output file: {}", toml_path.display()))?;
+                toml_file.write_all(toml_str.as_bytes())?; if !toml_str.ends_with('\n') { writeln!(&mut toml_file)?; }
+
+                let srt_str = render_srt(&out.items);
+                let mut srt_file = File::create(&srt_path)
+                    .with_context(|| format!("Failed to create output file: {}", srt_path.display()))?;
+                srt_file.write_all(srt_str.as_bytes())?;
+            } else {
+                // stdout (only single input reaches here)
+                let stdout = io::stdout();
+                let mut handle = stdout.lock();
+                serde_json::to_writer_pretty(&mut handle, &out)?; writeln!(&mut handle)?;
+            }
         }
-
-        // SRT
-        let srt_str = render_srt(&out.items);
-        let mut srt_file = File::create(&srt_path)
-            .with_context(|| format!("Failed to create output file: {}", srt_path.display()))?;
-        srt_file.write_all(srt_str.as_bytes())?;
-    } else {
-        let stdout = io::stdout();
-        let mut handle = stdout.lock();
-        serde_json::to_writer_pretty(&mut handle, &out)?;
-        writeln!(&mut handle)?;
     }
+
     Ok(())
 }
 
