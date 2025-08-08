@@ -1,3 +1,12 @@
+- refactor into multiple files
+
+- fix cli output for model display
+
+- update the project to no more use features
+
+- rename project to "PolyScribe"
+
+- update local models using hashes (--update-models)
 - create folder models/ if not present -> use /usr/share/polyscribe/models/ for release version, use ./models/ for development version
 - create missing folders for output files
 
@@ -12,10 +21,6 @@
 - add tests
 
 - add verbose flag (--verbose | -v) + add logging
-
-- refactor into multiple files
-
-- rename project to "PolyScribe"
 
 - add documentation
 - package into executable
