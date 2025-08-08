@@ -17,17 +17,34 @@ mod models;
 static LAST_MODEL_WRITTEN: AtomicBool = AtomicBool::new(false);
 
 fn models_dir_path() -> PathBuf {
+    // Highest priority: explicit override
     if let Ok(p) = env::var("POLYSCRIBE_MODELS_DIR") {
         let pb = PathBuf::from(p);
         if !pb.as_os_str().is_empty() {
             return pb;
         }
     }
+    // In debug builds, keep local ./models for convenience
     if cfg!(debug_assertions) {
-        PathBuf::from("models")
-    } else {
-        PathBuf::from("/usr/share/polyscribe/models")
+        return PathBuf::from("models");
     }
+    // In release builds, choose a user-writable data directory
+    if let Ok(xdg) = env::var("XDG_DATA_HOME") {
+        if !xdg.is_empty() {
+            return PathBuf::from(xdg).join("polyscribe").join("models");
+        }
+    }
+    if let Ok(home) = env::var("HOME") {
+        if !home.is_empty() {
+            return PathBuf::from(home)
+                .join(".local")
+                .join("share")
+                .join("polyscribe")
+                .join("models");
+        }
+    }
+    // Last resort fallback
+    PathBuf::from("models")
 }
 
 #[derive(Parser, Debug)]
@@ -714,7 +731,26 @@ mod tests {
     #[test]
     #[cfg(not(debug_assertions))]
     fn test_models_dir_path_default_release() {
+        // Ensure override is cleared
         unsafe { std_env::remove_var("POLYSCRIBE_MODELS_DIR"); }
-        assert_eq!(models_dir_path(), PathBuf::from("/usr/share/polyscribe/models"));
+        // Prefer XDG_DATA_HOME when set
+        let tmp_xdg = tempfile::tempdir().unwrap();
+        unsafe {
+            std_env::set_var("XDG_DATA_HOME", tmp_xdg.path());
+            std_env::remove_var("HOME");
+        }
+        assert_eq!(models_dir_path(), tmp_xdg.path().join("polyscribe").join("models"));
+        // Else fall back to HOME/.local/share
+        let tmp_home = tempfile::tempdir().unwrap();
+        unsafe {
+            std_env::remove_var("XDG_DATA_HOME");
+            std_env::set_var("HOME", tmp_home.path());
+        }
+        assert_eq!(models_dir_path(), tmp_home.path().join(".local").join("share").join("polyscribe").join("models"));
+        // Cleanup
+        unsafe {
+            std_env::remove_var("XDG_DATA_HOME");
+            std_env::remove_var("HOME");
+        }
     }
 }
