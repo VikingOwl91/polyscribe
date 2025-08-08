@@ -33,6 +33,10 @@ struct Args {
     /// Launch interactive model downloader (list HF models, multi-select and download)
     #[arg(long)]
     download_models: bool,
+
+    /// Update local Whisper models by comparing hashes/sizes with remote manifest
+    #[arg(long)]
+    update_models: bool,
 }
 
 #[derive(Debug, Deserialize)]
