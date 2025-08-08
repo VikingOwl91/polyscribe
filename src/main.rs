@@ -61,6 +61,10 @@ struct Args {
     #[arg(short = 'm', long = "merge")]
     merge: bool,
 
+    /// Merge and also write separate outputs per input; requires -o OUTPUT_DIR
+    #[arg(long = "merge-and-separate")]
+    merge_and_separate: bool,
+
     /// Language code to use for transcription (e.g., en, de). No auto-detection.
     #[arg(short, long, value_name = "LANG")]
     language: Option<String>,
@@ -88,7 +92,7 @@ struct InputSegment {
     // other fields are ignored
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 struct OutputEntry {
     id: u64,
     speaker: String,
@@ -447,7 +451,108 @@ fn main() -> Result<()> {
         return Err(anyhow!("Please specify --language (e.g., --language en). Language detection was removed."));
     }
 
-    if args.merge {
+    if args.merge_and_separate {
+        // Combined mode: write separate outputs per input and also a merged output set
+        // Require an output directory
+        let out_dir = match output_path.as_ref() {
+            Some(p) => PathBuf::from(p),
+            None => return Err(anyhow!("--merge-and-separate requires -o OUTPUT_DIR")),
+        };
+        if !out_dir.as_os_str().is_empty() {
+            create_dir_all(&out_dir)
+                .with_context(|| format!("Failed to create output directory: {}", out_dir.display()))?;
+        }
+
+        let mut merged_entries: Vec<OutputEntry> = Vec::new();
+
+        for input_path in &inputs {
+            let path = Path::new(input_path);
+            let speaker = sanitize_speaker_name(
+                path.file_stem().and_then(|s| s.to_str()).unwrap_or("speaker")
+            );
+
+            // Collect entries per file and extend merged
+            let mut entries: Vec<OutputEntry> = Vec::new();
+            if is_audio_file(path) {
+                let items = transcribe_native(path, &speaker, lang_hint.as_deref())?;
+                entries.extend(items.into_iter());
+            } else if is_json_file(path) {
+                let mut buf = String::new();
+                File::open(path)
+                    .with_context(|| format!("Failed to open: {}", input_path))?
+                    .read_to_string(&mut buf)
+                    .with_context(|| format!("Failed to read: {}", input_path))?;
+                let root: InputRoot = serde_json::from_str(&buf)
+                    .with_context(|| format!("Invalid JSON transcript parsed from {}", input_path))?;
+                for seg in root.segments {
+                    entries.push(OutputEntry { id: 0, speaker: speaker.clone(), start: seg.start, end: seg.end, text: seg.text });
+                }
+            } else {
+                return Err(anyhow!(format!("Unsupported input type (expected .json or audio media): {}", input_path)));
+            }
+
+            // Sort and reassign ids per file
+            entries.sort_by(|a, b| {
+                match a.start.partial_cmp(&b.start) { Some(std::cmp::Ordering::Equal) | None => {} Some(o) => return o }
+                a.end.partial_cmp(&b.end).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            for (i, e) in entries.iter_mut().enumerate() { e.id = i as u64; }
+
+            // Write separate outputs to out_dir
+            let out = OutputRoot { items: entries.clone() };
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("output");
+            let date = date_prefix();
+            let base_name = format!("{}_{}", date, stem);
+            let json_path = out_dir.join(format!("{}.json", &base_name));
+            let toml_path = out_dir.join(format!("{}.toml", &base_name));
+            let srt_path = out_dir.join(format!("{}.srt", &base_name));
+
+            let mut json_file = File::create(&json_path)
+                .with_context(|| format!("Failed to create output file: {}", json_path.display()))?;
+            serde_json::to_writer_pretty(&mut json_file, &out)?; writeln!(&mut json_file)?;
+
+            let toml_str = toml::to_string_pretty(&out)?;
+            let mut toml_file = File::create(&toml_path)
+                .with_context(|| format!("Failed to create output file: {}", toml_path.display()))?;
+            toml_file.write_all(toml_str.as_bytes())?; if !toml_str.ends_with('\n') { writeln!(&mut toml_file)?; }
+
+            let srt_str = render_srt(&out.items);
+            let mut srt_file = File::create(&srt_path)
+                .with_context(|| format!("Failed to create output file: {}", srt_path.display()))?;
+            srt_file.write_all(srt_str.as_bytes())?;
+
+            // Extend merged with per-file entries
+            merged_entries.extend(out.items.into_iter());
+        }
+
+        // Now write merged output set into out_dir
+        merged_entries.sort_by(|a, b| {
+            match a.start.partial_cmp(&b.start) { Some(std::cmp::Ordering::Equal) | None => {} Some(o) => return o }
+            a.end.partial_cmp(&b.end).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        for (i, e) in merged_entries.iter_mut().enumerate() { e.id = i as u64; }
+        let merged_out = OutputRoot { items: merged_entries };
+
+        let date = date_prefix();
+        let merged_base = format!("{}_merged", date);
+        let m_json = out_dir.join(format!("{}.json", &merged_base));
+        let m_toml = out_dir.join(format!("{}.toml", &merged_base));
+        let m_srt = out_dir.join(format!("{}.srt", &merged_base));
+
+        let mut mj = File::create(&m_json)
+            .with_context(|| format!("Failed to create output file: {}", m_json.display()))?;
+        serde_json::to_writer_pretty(&mut mj, &merged_out)?; writeln!(&mut mj)?;
+
+        let m_toml_str = toml::to_string_pretty(&merged_out)?;
+        let mut mt = File::create(&m_toml)
+            .with_context(|| format!("Failed to create output file: {}", m_toml.display()))?;
+        mt.write_all(m_toml_str.as_bytes())?; if !m_toml_str.ends_with('\n') { writeln!(&mut mt)?; }
+
+        let m_srt_str = render_srt(&merged_out.items);
+        let mut ms = File::create(&m_srt)
+            .with_context(|| format!("Failed to create output file: {}", m_srt.display()))?;
+        ms.write_all(m_srt_str.as_bytes())?;
+    } else if args.merge {
         // MERGED MODE (previous default)
         let mut entries: Vec<OutputEntry> = Vec::new();
         for input_path in &inputs {
