@@ -1,4 +1,4 @@
-- update the project to no more use features
+- [x] update the project to no more use features
 - update last_model to be only used during one run
 
 - rename project to "PolyScribe"

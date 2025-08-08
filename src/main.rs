@@ -9,7 +9,6 @@ use clap::Parser;
 use serde::{Deserialize, Serialize};
 use chrono::Local;
 
-#[cfg(feature = "native-whisper")]
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
 mod models;
@@ -138,7 +137,6 @@ fn normalize_lang_code(input: &str) -> Option<String> {
 
 
 
-#[cfg(feature = "native-whisper")]
 fn find_model_file() -> Result<PathBuf> {
     let models_dir = Path::new("models");
     if !models_dir.exists() {
@@ -245,7 +243,6 @@ fn find_model_file() -> Result<PathBuf> {
     Ok(chosen)
 }
 
-#[cfg(feature = "native-whisper")]
 fn decode_audio_to_pcm_f32_ffmpeg(audio_path: &Path) -> Result<Vec<f32>> {
     let output = Command::new("ffmpeg")
         .arg("-i").arg(audio_path)
@@ -282,7 +279,6 @@ fn decode_audio_to_pcm_f32_ffmpeg(audio_path: &Path) -> Result<Vec<f32>> {
     }
 }
 
-#[cfg(feature = "native-whisper")]
 fn transcribe_native(audio_path: &Path, speaker: &str, lang_opt: Option<&str>) -> Result<Vec<OutputEntry>> {
     let pcm = decode_audio_to_pcm_f32_ffmpeg(audio_path)?;
     let model = find_model_file()?;
@@ -389,18 +385,11 @@ fn main() -> Result<()> {
 
         let mut buf = String::new();
         if is_audio_file(path) {
-            #[cfg(feature = "native-whisper")]
-            {
-                let items = transcribe_native(path, &speaker, lang_hint.as_deref())?;
-                for e in items {
-                    entries.push(e);
-                }
-                continue;
+            let items = transcribe_native(path, &speaker, lang_hint.as_deref())?;
+            for e in items {
+                entries.push(e);
             }
-            #[cfg(not(feature = "native-whisper"))]
-            {
-                return Err(anyhow!("Python transcription has been removed. Please build with --features native-whisper to transcribe audio."));
-            }
+            continue;
         } else if is_json_file(path) {
             File::open(path)
                 .with_context(|| format!("Failed to open: {}", input_path))?
