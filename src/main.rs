@@ -8,10 +8,13 @@ use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 use chrono::Local;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
 mod models;
+
+static LAST_MODEL_WRITTEN: AtomicBool = AtomicBool::new(false);
 
 #[derive(Parser, Debug)]
 #[command(name = "merge_transcripts", version, about = "Merge multiple JSON transcripts into one or transcribe audio using native whisper")]
@@ -149,6 +152,7 @@ fn find_model_file() -> Result<PathBuf> {
         if p.is_file() {
             // persist selection
             let _ = std::fs::write(models_dir.join(".last_model"), p.display().to_string());
+            LAST_MODEL_WRITTEN.store(true, Ordering::Relaxed);
             return Ok(p);
         }
     }
@@ -206,6 +210,7 @@ fn find_model_file() -> Result<PathBuf> {
     if candidates.len() == 1 {
         let only = candidates.remove(0);
         let _ = std::fs::write(models_dir.join(".last_model"), only.display().to_string());
+        LAST_MODEL_WRITTEN.store(true, Ordering::Relaxed);
         return Ok(only);
     }
 
@@ -240,6 +245,7 @@ fn find_model_file() -> Result<PathBuf> {
     }
     let chosen = candidates.swap_remove(sel - 1);
     let _ = std::fs::write(models_dir.join(".last_model"), chosen.display().to_string());
+    LAST_MODEL_WRITTEN.store(true, Ordering::Relaxed);
     Ok(chosen)
 }
 
@@ -339,18 +345,18 @@ struct LastModelCleanup {
 }
 impl Drop for LastModelCleanup {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        if LAST_MODEL_WRITTEN.load(Ordering::Relaxed) {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    // Remove stale last_model from previous runs and set up cleanup on exit
+    // Defer cleanup of .last_model until program exit (after all runs within this process)
     let models_dir = Path::new("models");
     let last_model_path = models_dir.join(".last_model");
-    // Best-effort cleanup at start
-    let _ = std::fs::remove_file(&last_model_path);
     // Ensure cleanup at end of program, regardless of exit path
     let _last_model_cleanup = LastModelCleanup { path: last_model_path.clone() };
 
