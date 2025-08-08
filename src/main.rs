@@ -960,4 +960,14 @@ mod tests {
             std_env::remove_var("HOME");
         }
     }
+
+    #[test]
+    fn test_is_audio_file_includes_video_extensions() {
+        use std::path::Path;
+        assert!(is_audio_file(Path::new("video.mp4")));
+        assert!(is_audio_file(Path::new("clip.WEBM")));
+        assert!(is_audio_file(Path::new("movie.mkv")));
+        assert!(is_audio_file(Path::new("trailer.MOV")));
+        assert!(is_audio_file(Path::new("animation.avi")));
+    }
 }

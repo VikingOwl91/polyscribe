@@ -10,7 +10,7 @@
 - [x] set speaker-names per input-file -> prompt user for each file if flag is set (--set-speaker-names)
 - [x] fix cli output for model display
 - [x] refactor into proper cli app
-- add support for video files -> use ffmpeg to extract audio
+- [x] add support for video files -> use ffmpeg to extract audio
 - detect gpus and use them
 - add error handling
 - add verbose flag (--verbose | -v) + add logging
