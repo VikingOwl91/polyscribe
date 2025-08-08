@@ -1,8 +1,6 @@
 use crate::OutputEntry;
 use crate::{decode_audio_to_pcm_f32_ffmpeg, find_model_file};
 use anyhow::{Context, Result, anyhow};
-#[cfg(not(test))]
-use libloading::Library;
 use std::env;
 use std::path::Path;
 
@@ -52,15 +50,8 @@ fn check_lib(names: &[&str]) -> bool {
     }
     #[cfg(not(test))]
     {
-        if std::env::var("POLYSCRIBE_DISABLE_DLOPEN").ok().as_deref() == Some("1") {
-            return false;
-        }
-        for n in names {
-            // Attempt to dlopen; ignore errors
-            if let Ok(_lib) = unsafe { Library::new(n) } {
-                return true;
-            }
-        }
+        // Disabled runtime dlopen probing to avoid loader instability; rely on environment overrides.
+        let _ = names;
         false
     }
 }

@@ -302,7 +302,7 @@ pub fn find_model_file() -> Result<PathBuf> {
 
 /// Decode an input media file to 16kHz mono f32 PCM using ffmpeg available on PATH.
 pub fn decode_audio_to_pcm_f32_ffmpeg(audio_path: &Path) -> Result<Vec<f32>> {
-    let output = Command::new("ffmpeg")
+    let output = match Command::new("ffmpeg")
         .arg("-i")
         .arg(audio_path)
         .arg("-f")
@@ -313,7 +313,22 @@ pub fn decode_audio_to_pcm_f32_ffmpeg(audio_path: &Path) -> Result<Vec<f32>> {
         .arg("16000")
         .arg("pipe:1")
         .output()
-        .with_context(|| format!("Failed to execute ffmpeg for {}", audio_path.display()))?;
+    {
+        Ok(o) => o,
+        Err(e) => {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                return Err(anyhow!(
+                    "ffmpeg not found on PATH. Please install ffmpeg and ensure it is available."
+                ));
+            } else {
+                return Err(anyhow!(
+                    "Failed to execute ffmpeg for {}: {}",
+                    audio_path.display(),
+                    e
+                ));
+            }
+        }
+    };
     if !output.status.success() {
         return Err(anyhow!(
             "ffmpeg failed for {}: {}",

@@ -159,11 +159,15 @@ fn prompt_speaker_name_for_path(path: &Path, default_name: &str, enabled: bool) 
     let mut buf = String::new();
     match io::stdin().read_line(&mut buf) {
         Ok(_) => {
-            let s = buf.trim();
-            if s.is_empty() {
+            let raw = buf.trim();
+            if raw.is_empty() {
+                return default_name.to_string();
+            }
+            let sanitized = sanitize_speaker_name(raw);
+            if sanitized.is_empty() {
                 default_name.to_string()
             } else {
-                s.to_string()
+                sanitized
             }
         }
         Err(_) => default_name.to_string(),
@@ -196,11 +200,16 @@ struct LastModelCleanup {
 impl Drop for LastModelCleanup {
     fn drop(&mut self) {
         // Ensure .last_model does not persist across program runs
-        let _ = std::fs::remove_file(&self.path);
+        if let Err(e) = std::fs::remove_file(&self.path) {
+            // Best-effort cleanup; ignore missing file; warn for other errors
+            if e.kind() != std::io::ErrorKind::NotFound {
+                warnlog!("Failed to remove {}: {}", self.path.display(), e);
+            }
+        }
     }
 }
 
-fn main() -> Result<()> {
+fn run() -> Result<()> {
     // Parse CLI
     let args = Args::parse();
 
@@ -690,6 +699,20 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn main() {
+    if let Err(e) = run() {
+        errorlog!("{}", e);
+        if VERBOSE.load(Ordering::Relaxed) >= 1 {
+            let mut src = e.source();
+            while let Some(s) = src {
+                errorlog!("caused by: {}", s);
+                src = s.source();
+            }
+        }
+        std::process::exit(1);
+    }
 }
 
 #[cfg(test)]
