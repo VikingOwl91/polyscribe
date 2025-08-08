@@ -9,7 +9,7 @@
 - [x] for merge + separate output -> if present, treat each file as separate output and also output a merged version (--merge-and-separate)
 - [x] set speaker-names per input-file -> prompt user for each file if flag is set (--set-speaker-names)
 - [x] fix cli output for model display
-- refactor into proper cli app
+- [x] refactor into proper cli app
 - add support for video files -> use ffmpeg to extract audio
 - detect gpus and use them
 - add error handling

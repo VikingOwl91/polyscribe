@@ -11,6 +11,13 @@ use reqwest::blocking::Client;
 use reqwest::redirect::Policy;
 use sha2::{Digest, Sha256};
 
+// Print to stderr only when not in quiet mode
+macro_rules! qlog {
+    ($($arg:tt)*) => {
+        eprintln!($($arg)*);
+    };
+}
+
 // --- Model downloader: list & download ggml models from Hugging Face ---
 
 #[derive(Debug, Deserialize)]
@@ -170,7 +177,7 @@ fn fill_meta_via_head(repo: &str, name: &str) -> (Option<u64>, Option<String>) {
 }
 
 fn hf_fetch_repo_models(client: &Client, repo: &'static str) -> Result<Vec<ModelEntry>> {
-    eprintln!("Fetching online data: listing models from {}...", repo);
+    qlog!("Fetching online data: listing models from {}...", repo);
     // Prefer the tree endpoint for reliable size/hash metadata, then fall back to model metadata
     let tree_url = format!("https://huggingface.co/api/models/{}/tree/main?recursive=1", repo);
     let mut out: Vec<ModelEntry> = Vec::new();
@@ -220,7 +227,7 @@ fn hf_fetch_repo_models(client: &Client, repo: &'static str) -> Result<Vec<Model
 
     // Fill missing metadata (size/hash) via HEAD request if necessary
     if out.iter().any(|m| m.size == 0 || m.sha256.is_none()) {
-        eprintln!("Fetching online data: completing metadata checks for models in {}...", repo);
+        qlog!("Fetching online data: completing metadata checks for models in {}...", repo);
     }
     for m in out.iter_mut() {
         if m.size == 0 || m.sha256.is_none() {
@@ -240,14 +247,14 @@ fn hf_fetch_repo_models(client: &Client, repo: &'static str) -> Result<Vec<Model
 }
 
 fn fetch_all_models(client: &Client) -> Result<Vec<ModelEntry>> {
-    eprintln!("Fetching online data: aggregating available models from Hugging Face...");
+    qlog!("Fetching online data: aggregating available models from Hugging Face...");
     let mut v1 = hf_fetch_repo_models(client, "ggerganov/whisper.cpp")?; // main repo must succeed
 
     // Optional tinydiarize repo; ignore errors but log to stderr
     let mut v2: Vec<ModelEntry> = match hf_fetch_repo_models(client, "akashmjn/tinydiarize-whisper.cpp") {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("Warning: failed to fetch optional repo akashmjn/tinydiarize-whisper.cpp: {:#}", e);
+            qlog!("Warning: failed to fetch optional repo akashmjn/tinydiarize-whisper.cpp: {:#}", e);
             Vec::new()
         }
     };
@@ -451,19 +458,19 @@ pub fn run_interactive_model_downloader() -> Result<()> {
         .build()
         .context("Failed to build HTTP client")?;
 
-    eprintln!("Fetching online data: contacting Hugging Face to retrieve available models (this may take a moment)...");
+    qlog!("Fetching online data: contacting Hugging Face to retrieve available models (this may take a moment)...");
     let models = fetch_all_models(&client)?;
     if models.is_empty() {
-        eprintln!("No models found on Hugging Face listing. Please try again later.");
+        qlog!("No models found on Hugging Face listing. Please try again later.");
         return Ok(());
     }
     let selected = prompt_select_models_two_stage(&models)?;
     if selected.is_empty() {
-        eprintln!("No selection. Aborting download.");
+        qlog!("No selection. Aborting download.");
         return Ok(());
     }
     for m in selected {
-        if let Err(e) = download_one_model(&client, models_dir, &m) { eprintln!("Error: {:#}", e); }
+        if let Err(e) = download_one_model(&client, models_dir, &m) { qlog!("Error: {:#}", e); }
     }
     Ok(())
 }
@@ -477,10 +484,10 @@ pub fn download_one_model(client: &Client, models_dir: &Path, entry: &ModelEntry
             match compute_file_sha256_hex(&final_path) {
                 Ok(local_hash) => {
                     if local_hash.eq_ignore_ascii_case(expected) {
-                        eprintln!("Model {} is up-to-date (hash match).", final_path.display());
+                        qlog!("Model {} is up-to-date (hash match).", final_path.display());
                         return Ok(());
                     } else {
-                        eprintln!(
+                        qlog!(
                             "Local model {} hash differs from online (local {}.., online {}..). Updating...",
                             final_path.display(),
                             &local_hash[..std::cmp::min(8, local_hash.len())],
@@ -489,37 +496,37 @@ pub fn download_one_model(client: &Client, models_dir: &Path, entry: &ModelEntry
                     }
                 }
                 Err(e) => {
-                    eprintln!(
-                        "Warning: failed to hash existing {}: {}. Will re-download to ensure correctness.",
-                        final_path.display(), e
-                    );
+                    qlog!(
+                    "Warning: failed to hash existing {}: {}. Will re-download to ensure correctness.",
+                    final_path.display(), e
+                );
                 }
             }
         } else if entry.size > 0 {
             match std::fs::metadata(&final_path) {
                 Ok(md) => {
                     if md.len() == entry.size {
-                        eprintln!(
+                        qlog!(
                             "Model {} appears up-to-date by size ({}).",
                             final_path.display(), entry.size
                         );
                         return Ok(());
                     } else {
-                        eprintln!(
+                        qlog!(
                             "Local model {} size ({}) differs from online ({}). Updating...",
                             final_path.display(), md.len(), entry.size
                         );
                     }
                 }
                 Err(e) => {
-                    eprintln!(
+                    qlog!(
                         "Warning: failed to stat existing {}: {}. Will re-download to ensure correctness.",
                         final_path.display(), e
                     );
                 }
             }
         } else {
-            eprintln!(
+            qlog!(
                 "Model {} exists but remote hash/size not available; will download to verify contents.",
                 final_path.display()
             );
@@ -531,7 +538,7 @@ pub fn download_one_model(client: &Client, models_dir: &Path, entry: &ModelEntry
     if let Ok(base_dir) = env::var("POLYSCRIBE_MODELS_BASE_COPY_DIR") {
         let src_path = std::path::Path::new(&base_dir).join(format!("ggml-{}.bin", entry.name));
         if src_path.exists() {
-            eprintln!("Copying {} from {}...", entry.name, src_path.display());
+            qlog!("Copying {} from {}...", entry.name, src_path.display());
             let tmp_path = models_dir.join(format!("ggml-{}.bin.part", entry.name));
             if tmp_path.exists() { let _ = std::fs::remove_file(&tmp_path); }
             std::fs::copy(&src_path, &tmp_path)
@@ -551,13 +558,13 @@ pub fn download_one_model(client: &Client, models_dir: &Path, entry: &ModelEntry
             if final_path.exists() { let _ = std::fs::remove_file(&final_path); }
             std::fs::rename(&tmp_path, &final_path)
                 .with_context(|| format!("Failed to move into place: {}", final_path.display()))?;
-            eprintln!("Saved: {}", final_path.display());
+            qlog!("Saved: {}", final_path.display());
             return Ok(());
         }
     }
 
     let url = format!("https://huggingface.co/{}/resolve/main/ggml-{}.bin", entry.repo, entry.name);
-    eprintln!("Downloading {} ({} | {})...", entry.name, human_size(entry.size), url);
+    qlog!("Downloading {} ({} | {})...", entry.name, human_size(entry.size), url);
     let mut resp = client
         .get(url)
         .send()
@@ -593,7 +600,7 @@ pub fn download_one_model(client: &Client, models_dir: &Path, entry: &ModelEntry
             ));
         }
     } else {
-        eprintln!("Warning: no SHA-256 available for {}. Skipping verification.", entry.name);
+        qlog!("Warning: no SHA-256 available for {}. Skipping verification.", entry.name);
     }
     // Replace existing file safely
     if final_path.exists() {
@@ -601,7 +608,7 @@ pub fn download_one_model(client: &Client, models_dir: &Path, entry: &ModelEntry
     }
     std::fs::rename(&tmp_path, &final_path)
         .with_context(|| format!("Failed to move into place: {}", final_path.display()))?;
-    eprintln!("Saved: {}", final_path.display());
+    qlog!("Saved: {}", final_path.display());
     Ok(())
 }
 
@@ -653,42 +660,42 @@ pub fn update_local_models() -> Result<()> {
                 match compute_file_sha256_hex(&path) {
                     Ok(local_hash) => {
                         if local_hash.eq_ignore_ascii_case(expected) {
-                            eprintln!("{} is up-to-date.", fname);
+                            qlog!("{} is up-to-date.", fname);
                             continue;
                         } else {
-                            eprintln!(
-                                "{} hash differs (local {}.. != remote {}..). Updating...",
-                                fname,
-                                &local_hash[..std::cmp::min(8, local_hash.len())],
-                                &expected[..std::cmp::min(8, expected.len())]
-                            );
+                            qlog!(
+                            "{} hash differs (local {}.. != remote {}..). Updating...",
+                            fname,
+                            &local_hash[..std::cmp::min(8, local_hash.len())],
+                            &expected[..std::cmp::min(8, expected.len())]
+                        );
                         }
                     }
                     Err(e) => {
-                        eprintln!("Warning: failed hashing {}: {}. Re-downloading.", fname, e);
+                        qlog!("Warning: failed hashing {}: {}. Re-downloading.", fname, e);
                     }
                 }
                 download_one_model(&client, models_dir, remote)?;
             } else if remote.size > 0 {
                 match std::fs::metadata(&path) {
                     Ok(md) if md.len() == remote.size => {
-                        eprintln!("{} appears up-to-date by size ({}).", fname, remote.size);
+                        qlog!("{} appears up-to-date by size ({}).", fname, remote.size);
                         continue;
                     }
                     Ok(md) => {
-                        eprintln!("{} size {} differs from remote {}. Updating...", fname, md.len(), remote.size);
+                        qlog!("{} size {} differs from remote {}. Updating...", fname, md.len(), remote.size);
                         download_one_model(&client, models_dir, remote)?;
                     }
                     Err(e) => {
-                        eprintln!("Warning: stat failed for {}: {}. Updating...", fname, e);
+                        qlog!("Warning: stat failed for {}: {}. Updating...", fname, e);
                         download_one_model(&client, models_dir, remote)?;
                     }
                 }
             } else {
-                eprintln!("No remote hash/size for {}. Skipping.", fname);
+                qlog!("No remote hash/size for {}. Skipping.", fname);
             }
         } else {
-            eprintln!("No remote metadata for {}. Skipping.", fname);
+            qlog!("No remote metadata for {}. Skipping.", fname);
         }
     }
 

@@ -5,16 +5,38 @@ use std::process::Command;
 use std::env;
 
 use anyhow::{anyhow, Context, Result};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use chrono::Local;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use clap_complete::Shell;
 
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
 mod models;
 
 static LAST_MODEL_WRITTEN: AtomicBool = AtomicBool::new(false);
+static VERBOSE: AtomicU8 = AtomicU8::new(0);
+
+macro_rules! vlog {
+    ($lvl:expr, $($arg:tt)*) => {
+        let v = VERBOSE.load(Ordering::Relaxed);
+        let needed = match $lvl { 0u8 => true, 1u8 => v >= 1, 2u8 => v >= 2, _ => true };
+        if needed { eprintln!("INFO: {}", format!($($arg)*)); }
+    }
+}
+
+macro_rules! warnlog {
+    ($($arg:tt)*) => {
+        eprintln!("WARN: {}", format!($($arg)*));
+    }
+}
+
+macro_rules! errorlog {
+    ($($arg:tt)*) => {
+        eprintln!("ERROR: {}", format!($($arg)*));
+    }
+}
 
 fn models_dir_path() -> PathBuf {
     // Highest priority: explicit override
@@ -47,9 +69,30 @@ fn models_dir_path() -> PathBuf {
     PathBuf::from("models")
 }
 
+
+#[derive(Subcommand, Debug, Clone)]
+enum AuxCommands {
+    /// Generate shell completion script to stdout
+    Completions {
+        /// Shell to generate completions for
+        #[arg(value_enum)]
+        shell: Shell,
+    },
+    /// Generate a man page to stdout
+    Man,
+}
+
 #[derive(Parser, Debug)]
-#[command(name = "PolyScribe", version, about = "Merge multiple JSON transcripts into one or transcribe audio using native whisper")]
+#[command(name = "PolyScribe", bin_name = "polyscribe", version, about = "Merge JSON transcripts or transcribe audio using native whisper")]
 struct Args {
+    /// Increase verbosity (-v, -vv). Logs go to stderr.
+    #[arg(short = 'v', long = "verbose", action = clap::ArgAction::Count, global = true)]
+    verbose: u8,
+
+    /// Optional auxiliary subcommands (completions, man)
+    #[command(subcommand)]
+    aux: Option<AuxCommands>,
+
     /// Input .json transcript files or audio files to merge/transcribe
     inputs: Vec<String>,
 
@@ -243,7 +286,8 @@ fn find_model_file() -> Result<PathBuf> {
     }
 
     if candidates.is_empty() {
-        eprintln!("No Whisper model files (*.bin) found in {}.", models_dir.display());
+        // In quiet mode we still prompt for models; suppress only non-essential logs
+        warnlog!("No Whisper model files (*.bin) found in {}.", models_dir.display());
         eprint!("Would you like to download models now? [Y/n]: ");
         io::stderr().flush().ok();
         let mut input = String::new();
@@ -251,7 +295,7 @@ fn find_model_file() -> Result<PathBuf> {
         let ans = input.trim().to_lowercase();
         if ans.is_empty() || ans == "y" || ans == "yes" {
             if let Err(e) = models::run_interactive_model_downloader() {
-                eprintln!("Downloader failed: {:#}", e);
+                errorlog!("Downloader failed: {:#}", e);
             }
             // Re-scan
             candidates.clear();
@@ -292,7 +336,7 @@ fn find_model_file() -> Result<PathBuf> {
             if p.is_file() {
                 // Also ensure it's one of the candidates (same dir)
                 if candidates.iter().any(|c| c == &p) {
-                    eprintln!("Using previously selected model: {}", p.display());
+                    vlog!(0, "Using previously selected model: {}", p.display());
                     return Ok(p);
                 }
             }
@@ -419,8 +463,34 @@ impl Drop for LastModelCleanup {
     }
 }
 
+
 fn main() -> Result<()> {
-    let args = Args::parse();
+    // Parse CLI
+    let mut args = Args::parse();
+
+    // Initialize verbosity
+    VERBOSE.store(args.verbose, Ordering::Relaxed);
+
+    // Handle auxiliary subcommands that write to stdout and exit early
+    if let Some(aux) = &args.aux {
+        use clap::CommandFactory;
+        match aux {
+            AuxCommands::Completions { shell } => {
+                let mut cmd = Args::command();
+                let bin_name = cmd.get_name().to_string();
+                clap_complete::generate(*shell, &mut cmd, bin_name, &mut io::stdout());
+                return Ok(())
+            }
+            AuxCommands::Man => {
+                let cmd = Args::command();
+                let man = clap_mangen::Man::new(cmd);
+                let mut out = Vec::new();
+                man.render(&mut out)?;
+                io::stdout().write_all(&out)?;
+                return Ok(())
+            }
+        }
+    }
 
     // Defer cleanup of .last_model until program exit
     let models_dir_buf = models_dir_path();
@@ -431,7 +501,7 @@ fn main() -> Result<()> {
     // If requested, run the interactive model downloader first. If no inputs were provided, exit after downloading.
     if args.download_models {
         if let Err(e) = models::run_interactive_model_downloader() {
-            eprintln!("Model downloader failed: {:#}", e);
+            errorlog!("Model downloader failed: {:#}", e);
         }
         if args.inputs.is_empty() {
             return Ok(());
@@ -441,7 +511,7 @@ fn main() -> Result<()> {
     // If requested, update local models and exit unless inputs provided to continue
     if args.update_models {
         if let Err(e) = models::update_local_models() {
-            eprintln!("Model update failed: {:#}", e);
+            errorlog!("Model update failed: {:#}", e);
             return Err(e);
         }
         // if only updating models and no inputs, exit
@@ -451,6 +521,7 @@ fn main() -> Result<()> {
     }
 
     // Determine inputs and optional output path
+        vlog!(1, "Parsed {} input(s)", args.inputs.len());
     let mut inputs = args.inputs;
     let mut output_path = args.output;
     if output_path.is_none() && inputs.len() >= 2 {
@@ -477,6 +548,7 @@ fn main() -> Result<()> {
     }
 
     if args.merge_and_separate {
+            vlog!(1, "Mode: merge-and-separate; output_dir={:?}", output_path);
         // Combined mode: write separate outputs per input and also a merged output set
         // Require an output directory
         let out_dir = match output_path.as_ref() {
@@ -579,6 +651,7 @@ fn main() -> Result<()> {
             .with_context(|| format!("Failed to create output file: {}", m_srt.display()))?;
         ms.write_all(m_srt_str.as_bytes())?;
     } else if args.merge {
+            vlog!(1, "Mode: merge; output_base={:?}", output_path);
         // MERGED MODE (previous default)
         let mut entries: Vec<OutputEntry> = Vec::new();
         for input_path in &inputs {
@@ -668,6 +741,7 @@ fn main() -> Result<()> {
             serde_json::to_writer_pretty(&mut handle, &out)?; writeln!(&mut handle)?;
         }
     } else {
+        vlog!(1, "Mode: separate; output_dir={:?}", output_path);
         // SEPARATE MODE (default now)
         // If writing to stdout with multiple inputs, not supported
         if output_path.is_none() && inputs.len() > 1 {
