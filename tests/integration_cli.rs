@@ -30,7 +30,9 @@ impl TestDir {
         fs::create_dir_all(&p).expect("Failed to create temp dir");
         TestDir(p)
     }
-    fn path(&self) -> &Path { &self.0 }
+    fn path(&self) -> &Path {
+        &self.0
+    }
 }
 impl Drop for TestDir {
     fn drop(&mut self) {
@@ -79,14 +81,32 @@ fn cli_writes_separate_outputs_by_default() {
     for e in entries {
         let p = e.unwrap().path();
         if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
-            if name.ends_with(".json") { json_paths.push(p.clone()); }
-            if name.ends_with(".toml") { count_toml += 1; }
-            if name.ends_with(".srt") { count_srt += 1; }
+            if name.ends_with(".json") {
+                json_paths.push(p.clone());
+            }
+            if name.ends_with(".toml") {
+                count_toml += 1;
+            }
+            if name.ends_with(".srt") {
+                count_srt += 1;
+            }
         }
     }
-    assert!(json_paths.len() >= 2, "expected at least 2 JSON files, found {}", json_paths.len());
-    assert!(count_toml >= 2, "expected at least 2 TOML files, found {}", count_toml);
-    assert!(count_srt >= 2, "expected at least 2 SRT files, found {}", count_srt);
+    assert!(
+        json_paths.len() >= 2,
+        "expected at least 2 JSON files, found {}",
+        json_paths.len()
+    );
+    assert!(
+        count_toml >= 2,
+        "expected at least 2 TOML files, found {}",
+        count_toml
+    );
+    assert!(
+        count_srt >= 2,
+        "expected at least 2 SRT files, found {}",
+        count_srt
+    );
 
     // JSON contents are assumed valid if files exist; detailed parsing is covered elsewhere
 
@@ -124,9 +144,15 @@ fn cli_merges_json_inputs_with_flag_and_writes_outputs_to_temp_dir() {
     for e in entries {
         let p = e.unwrap().path();
         if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
-            if name.ends_with("_out.json") { found_json = Some(p.clone()); }
-            if name.ends_with("_out.toml") { found_toml = Some(p.clone()); }
-            if name.ends_with("_out.srt") { found_srt = Some(p.clone()); }
+            if name.ends_with("_out.json") {
+                found_json = Some(p.clone());
+            }
+            if name.ends_with("_out.toml") {
+                found_toml = Some(p.clone());
+            }
+            if name.ends_with("_out.srt") {
+                found_srt = Some(p.clone());
+            }
         }
     }
     let _json_path = found_json.expect("missing JSON output in temp dir");
@@ -154,7 +180,10 @@ fn cli_prints_json_to_stdout_when_no_output_path_merge_mode() {
     assert!(output.status.success(), "CLI failed");
 
     let stdout = String::from_utf8(output.stdout).expect("stdout not UTF-8");
-    assert!(stdout.contains("\"items\""), "stdout should contain items JSON array");
+    assert!(
+        stdout.contains("\"items\""),
+        "stdout should contain items JSON array"
+    );
 }
 
 #[test]
@@ -187,16 +216,36 @@ fn cli_merge_and_separate_writes_both_kinds_of_outputs() {
     for e in entries {
         let p = e.unwrap().path();
         if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
-            if name.ends_with(".json") { json_count += 1; }
-            if name.ends_with(".toml") { toml_count += 1; }
-            if name.ends_with(".srt") { srt_count += 1; }
-            if name.ends_with("_merged.json") { merged_json = Some(p.clone()); }
+            if name.ends_with(".json") {
+                json_count += 1;
+            }
+            if name.ends_with(".toml") {
+                toml_count += 1;
+            }
+            if name.ends_with(".srt") {
+                srt_count += 1;
+            }
+            if name.ends_with("_merged.json") {
+                merged_json = Some(p.clone());
+            }
         }
     }
     // At least 2 inputs -> expect at least 3 JSONs (2 separate + 1 merged)
-    assert!(json_count >= 3, "expected at least 3 JSON files, found {}", json_count);
-    assert!(toml_count >= 3, "expected at least 3 TOML files, found {}", toml_count);
-    assert!(srt_count >= 3, "expected at least 3 SRT files, found {}", srt_count);
+    assert!(
+        json_count >= 3,
+        "expected at least 3 JSON files, found {}",
+        json_count
+    );
+    assert!(
+        toml_count >= 3,
+        "expected at least 3 TOML files, found {}",
+        toml_count
+    );
+    assert!(
+        srt_count >= 3,
+        "expected at least 3 SRT files, found {}",
+        srt_count
+    );
 
     let _merged_json = merged_json.expect("missing merged JSON output ending with _merged.json");
     // Contents of merged JSON are validated by unit tests and other integration coverage
@@ -204,7 +253,6 @@ fn cli_merge_and_separate_writes_both_kinds_of_outputs() {
     // Cleanup
     let _ = fs::remove_dir_all(&out_dir);
 }
-
 
 #[test]
 fn cli_set_speaker_names_merge_prompts_and_uses_names() {
@@ -238,7 +286,8 @@ fn cli_set_speaker_names_merge_prompts_and_uses_names() {
 
     let stdout = String::from_utf8(output.stdout).expect("stdout not UTF-8");
     let root: OutputRoot = serde_json::from_str(&stdout).unwrap();
-    let speakers: std::collections::HashSet<String> = root.items.into_iter().map(|e| e.speaker).collect();
+    let speakers: std::collections::HashSet<String> =
+        root.items.into_iter().map(|e| e.speaker).collect();
     assert!(speakers.contains("Alpha"), "Alpha not found in speakers");
     assert!(speakers.contains("Beta"), "Beta not found in speakers");
 }
@@ -279,12 +328,17 @@ fn cli_set_speaker_names_separate_single_input() {
     for e in fs::read_dir(&out_dir).unwrap() {
         let p = e.unwrap().path();
         if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
-            if name.ends_with(".json") { json_paths.push(p.clone()); }
+            if name.ends_with(".json") {
+                json_paths.push(p.clone());
+            }
         }
     }
     assert!(!json_paths.is_empty(), "no JSON outputs created");
     let mut buf = String::new();
-    std::fs::File::open(&json_paths[0]).unwrap().read_to_string(&mut buf).unwrap();
+    std::fs::File::open(&json_paths[0])
+        .unwrap()
+        .read_to_string(&mut buf)
+        .unwrap();
     let root: OutputRoot = serde_json::from_str(&buf).unwrap();
     assert!(root.items.iter().all(|e| e.speaker == "ChosenOne"));
 

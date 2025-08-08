@@ -7,5 +7,7 @@ fn main() {
     // Placeholder: In a full implementation, we would invoke CMake for whisper.cpp with GGML_VULKAN=1.
     // For now, emit a helpful note. Build will proceed; runtime Vulkan backend returns an explanatory error.
     println!("cargo:rerun-if-changed=extern/whisper.cpp");
-    println!("cargo:warning=Building with gpu-vulkan: ensure Vulkan SDK/loader are installed. Future versions will compile whisper.cpp via CMake.");
+    println!(
+        "cargo:warning=Building with gpu-vulkan: ensure Vulkan SDK/loader are installed. Future versions will compile whisper.cpp via CMake."
+    );
 }
