@@ -263,8 +263,8 @@ pub fn select_backend(requested: BackendKind, verbose: bool) -> Result<Selection
     };
 
     if verbose {
-        eprintln!("INFO: Detected backends: {:?}", detected);
-        eprintln!("INFO: Selected backend: {:?}", chosen);
+        crate::dlog!(1, "Detected backends: {:?}", detected);
+        crate::dlog!(1, "Selected backend: {:?}", chosen);
     }
 
     Ok(SelectionResult {
@@ -301,12 +301,25 @@ pub(crate) fn transcribe_with_whisper_rs(
         .to_str()
         .ok_or_else(|| anyhow!("Model path not valid UTF-8: {}", model.display()))?;
 
-    let cparams = whisper_rs::WhisperContextParameters::default();
-    let ctx = whisper_rs::WhisperContext::new_with_params(model_str, cparams)
-        .with_context(|| format!("Failed to load Whisper model at {}", model.display()))?;
-    let mut state = ctx
-        .create_state()
-        .map_err(|e| anyhow!("Failed to create Whisper state: {:?}", e))?;
+    // Try to reduce native library logging via environment variables when not super-verbose.
+    if crate::verbose_level() < 2 {
+        // These env vars are recognized by ggml/whisper in many builds; harmless if unknown.
+        unsafe {
+            std::env::set_var("GGML_LOG_LEVEL", "0");
+            std::env::set_var("WHISPER_PRINT_PROGRESS", "0");
+        }
+    }
+
+    // Suppress stderr from whisper/ggml during model load and inference when quiet and not verbose.
+    let (ctx, mut state) = crate::with_suppressed_stderr(|| {
+        let cparams = whisper_rs::WhisperContextParameters::default();
+        let ctx = whisper_rs::WhisperContext::new_with_params(model_str, cparams)
+            .with_context(|| format!("Failed to load Whisper model at {}", model.display()))?;
+        let state = ctx
+            .create_state()
+            .map_err(|e| anyhow!("Failed to create Whisper state: {:?}", e))?;
+        Ok::<_, anyhow::Error>((ctx, state))
+    })?;
 
     let mut params =
         whisper_rs::FullParams::new(whisper_rs::SamplingStrategy::Greedy { best_of: 1 });
@@ -319,9 +332,11 @@ pub(crate) fn transcribe_with_whisper_rs(
         params.set_language(Some(lang));
     }
 
-    state
-        .full(params, &pcm)
-        .map_err(|e| anyhow!("Whisper full() failed: {:?}", e))?;
+    crate::with_suppressed_stderr(|| {
+        state
+            .full(params, &pcm)
+            .map_err(|e| anyhow!("Whisper full() failed: {:?}", e))
+    })?;
 
     let num_segments = state
         .full_n_segments()

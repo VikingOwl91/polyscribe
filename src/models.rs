@@ -11,12 +11,6 @@ use reqwest::redirect::Policy;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-// Print to stderr only when not in quiet mode
-macro_rules! qlog {
-    ($($arg:tt)*) => {
-        eprintln!($($arg)*);
-    };
-}
 
 // --- Model downloader: list & download ggml models from Hugging Face ---
 
@@ -208,7 +202,9 @@ fn fill_meta_via_head(repo: &str, name: &str) -> (Option<u64>, Option<String>) {
 }
 
 fn hf_fetch_repo_models(client: &Client, repo: &'static str) -> Result<Vec<ModelEntry>> {
-    qlog!("Fetching online data: listing models from {}...", repo);
+    if !(crate::is_no_interaction() && crate::verbose_level() < 2) {
+        ilog!("Fetching online data: listing models from {}...", repo);
+    }
     // Prefer the tree endpoint for reliable size/hash metadata, then fall back to model metadata
     let tree_url = format!(
         "https://huggingface.co/api/models/{}/tree/main?recursive=1",
@@ -291,10 +287,12 @@ fn hf_fetch_repo_models(client: &Client, repo: &'static str) -> Result<Vec<Model
 
     // Fill missing metadata (size/hash) via HEAD request if necessary
     if out.iter().any(|m| m.size == 0 || m.sha256.is_none()) {
-        qlog!(
-            "Fetching online data: completing metadata checks for models in {}...",
-            repo
-        );
+        if !(crate::is_no_interaction() && crate::verbose_level() < 2) {
+            ilog!(
+                "Fetching online data: completing metadata checks for models in {}...",
+                repo
+            );
+        }
     }
     for m in out.iter_mut() {
         if m.size == 0 || m.sha256.is_none() {
@@ -321,7 +319,9 @@ fn hf_fetch_repo_models(client: &Client, repo: &'static str) -> Result<Vec<Model
 }
 
 fn fetch_all_models(client: &Client) -> Result<Vec<ModelEntry>> {
-    qlog!("Fetching online data: aggregating available models from Hugging Face...");
+    if !(crate::is_no_interaction() && crate::verbose_level() < 2) {
+        ilog!("Fetching online data: aggregating available models from Hugging Face...");
+    }
     let mut v1 = hf_fetch_repo_models(client, "ggerganov/whisper.cpp")?; // main repo must succeed
 
     // Optional tinydiarize repo; ignore errors but log to stderr
@@ -329,7 +329,7 @@ fn fetch_all_models(client: &Client) -> Result<Vec<ModelEntry>> {
         match hf_fetch_repo_models(client, "akashmjn/tinydiarize-whisper.cpp") {
             Ok(v) => v,
             Err(e) => {
-                qlog!(
+                ilog!(
                     "Warning: failed to fetch optional repo akashmjn/tinydiarize-whisper.cpp: {:#}",
                     e
                 );
@@ -396,6 +396,10 @@ fn format_model_list(models: &[ModelEntry]) -> String {
 }
 
 fn prompt_select_models_two_stage(models: &[ModelEntry]) -> Result<Vec<ModelEntry>> {
+    if crate::is_no_interaction() || !crate::stdin_is_tty() {
+        // Non-interactive: do not prompt, return empty selection to skip
+        return Ok(Vec::new());
+    }
     // 1) Choose base (tiny, small, medium, etc.)
     let mut bases: Vec<String> = Vec::new();
     let mut last = String::new();
@@ -547,7 +551,7 @@ pub fn run_interactive_model_downloader() -> Result<()> {
         .build()
         .context("Failed to build HTTP client")?;
 
-    qlog!(
+    ilog!(
         "Fetching online data: contacting Hugging Face to retrieve available models (this may take a moment)..."
     );
     let models = fetch_all_models(&client)?;
@@ -562,7 +566,7 @@ pub fn run_interactive_model_downloader() -> Result<()> {
     }
     for m in selected {
         if let Err(e) = download_one_model(&client, models_dir, &m) {
-            qlog!("Error: {:#}", e);
+            elog!("Error: {:#}", e);
         }
     }
     Ok(())
@@ -846,6 +850,62 @@ pub fn update_local_models() -> Result<()> {
     Ok(())
 }
 
+/// Pick the best local ggml-*.bin model: largest by file size; tie-break by lexicographic filename.
+pub fn pick_best_local_model(models_dir: &Path) -> Option<std::path::PathBuf> {
+    let mut best: Option<(u64, String, std::path::PathBuf)> = None;
+    let rd = std::fs::read_dir(models_dir).ok()?;
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if !path.is_file() { continue; }
+        let fname = match path.file_name().and_then(|s| s.to_str()) { Some(s) => s.to_string(), None => continue };
+        if !fname.starts_with("ggml-") || !fname.ends_with(".bin") { continue; }
+        let size = std::fs::metadata(&path).ok()?.len();
+        match &mut best {
+            None => best = Some((size, fname, path.clone())),
+            Some((bsize, bname, bpath)) => {
+                if size > *bsize || (size == *bsize && fname < *bname) {
+                    *bsize = size;
+                    *bname = fname;
+                    *bpath = path.clone();
+                }
+            }
+        }
+    }
+    best.map(|(_, _, p)| p)
+}
+
+/// Ensure a specific model is available locally without any interactive prompts.
+/// If found locally, returns its path. Otherwise downloads it and returns the path.
+pub fn ensure_model_available_noninteractive(model_name: &str) -> Result<std::path::PathBuf> {
+    let models_dir_buf = crate::models_dir_path();
+    let models_dir = models_dir_buf.as_path();
+    if !models_dir.exists() {
+        create_dir_all(models_dir).context("Failed to create models directory")?;
+    }
+    let final_path = models_dir.join(format!("ggml-{}.bin", model_name));
+    if final_path.exists() {
+        return Ok(final_path);
+    }
+
+    let client = Client::builder()
+        .user_agent("PolyScribe/0.1 (+https://github.com/)")
+        .timeout(Duration::from_secs(600))
+        .redirect(Policy::limited(10))
+        .build()
+        .context("Failed to build HTTP client")?;
+
+    // Prefer fetching metadata to construct a proper ModelEntry
+    let models = fetch_all_models(&client)?;
+    if let Some(entry) = models.into_iter().find(|m| m.name == model_name) {
+        download_one_model(&client, models_dir, &entry)?;
+        return Ok(models_dir.join(format!("ggml-{}.bin", entry.name)));
+    }
+    Err(anyhow!(
+        "Model '{}' not found in remote listings; cannot download non-interactively.",
+        model_name
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -910,6 +970,36 @@ mod tests {
         }
         // Footer instruction present
         assert!(s.contains("Enter selection by indices"));
+    }
+
+    #[test]
+    fn test_format_model_list_unaffected_by_quiet_flag() {
+        let models = vec![
+            ModelEntry {
+                name: "tiny.en-q5_1".to_string(),
+                base: "tiny".to_string(),
+                subtype: "en-q5_1".to_string(),
+                size: 1024,
+                sha256: None,
+                repo: "ggerganov/whisper.cpp".to_string(),
+            },
+            ModelEntry {
+                name: "base.en-q5_1".to_string(),
+                base: "base".to_string(),
+                subtype: "en-q5_1".to_string(),
+                size: 2048,
+                sha256: None,
+                repo: "ggerganov/whisper.cpp".to_string(),
+            },
+        ];
+        // Compute with quiet off and on; the pure formatter should not depend on quiet.
+        crate::set_quiet(false);
+        let a = format_model_list(&models);
+        crate::set_quiet(true);
+        let b = format_model_list(&models);
+        assert_eq!(a, b);
+        // reset quiet for other tests
+        crate::set_quiet(false);
     }
 
     fn sha256_hex(data: &[u8]) -> String {

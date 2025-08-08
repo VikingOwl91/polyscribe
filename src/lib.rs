@@ -10,6 +10,182 @@
 //! This crate exposes the reusable parts of the PolyScribe CLI as a library.
 //! The binary entry point (main.rs) remains a thin CLI wrapper.
 
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+
+// Global runtime flags
+static QUIET: AtomicBool = AtomicBool::new(false);
+static NO_INTERACTION: AtomicBool = AtomicBool::new(false);
+static VERBOSE: AtomicU8 = AtomicU8::new(0);
+
+/// Set quiet mode: when true, non-interactive logs should be suppressed.
+pub fn set_quiet(q: bool) {
+    QUIET.store(q, Ordering::Relaxed);
+}
+/// Return current quiet mode state.
+pub fn is_quiet() -> bool {
+    QUIET.load(Ordering::Relaxed)
+}
+
+/// Set non-interactive mode: when true, interactive prompts must be skipped.
+pub fn set_no_interaction(b: bool) {
+    NO_INTERACTION.store(b, Ordering::Relaxed);
+}
+/// Return current non-interactive state.
+pub fn is_no_interaction() -> bool {
+    NO_INTERACTION.load(Ordering::Relaxed)
+}
+
+/// Set verbose level (0 = normal, 1 = verbose, 2 = super-verbose)
+pub fn set_verbose(level: u8) {
+    VERBOSE.store(level, Ordering::Relaxed);
+}
+/// Get current verbose level.
+pub fn verbose_level() -> u8 {
+    VERBOSE.load(Ordering::Relaxed)
+}
+
+/// Check whether stdin is connected to a TTY. Used to avoid blocking prompts when not interactive.
+pub fn stdin_is_tty() -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        unsafe { libc::isatty(std::io::stdin().as_raw_fd()) == 1 }
+    }
+    #[cfg(not(unix))]
+    {
+        // Best-effort on non-Unix: assume TTY when not redirected by common CI vars
+        // This avoids introducing a new dependency for atty.
+        !(std::env::var("CI").is_ok() || std::env::var("GITHUB_ACTIONS").is_ok())
+    }
+}
+
+/// A guard that temporarily redirects stderr to /dev/null on Unix when quiet mode is active.
+/// No-op on non-Unix or when quiet is disabled. Restores stderr on drop.
+pub struct StderrSilencer {
+    #[cfg(unix)]
+    old_stderr_fd: i32,
+    #[cfg(unix)]
+    devnull_fd: i32,
+    active: bool,
+}
+
+impl StderrSilencer {
+    /// Activate stderr silencing if quiet is set and on Unix; otherwise returns a no-op guard.
+    pub fn activate_if_quiet() -> Self {
+        if !is_quiet() {
+            return Self { active: false, #[cfg(unix)] old_stderr_fd: -1, #[cfg(unix)] devnull_fd: -1 };
+        }
+        Self::activate()
+    }
+
+    /// Activate stderr silencing unconditionally (used internally); no-op on non-Unix.
+    pub fn activate() -> Self {
+        #[cfg(unix)]
+        unsafe {
+            // Duplicate current stderr (fd 2)
+            let old_fd = dup(2);
+            if old_fd < 0 {
+                return Self { active: false, old_stderr_fd: -1, devnull_fd: -1 };
+            }
+            // Open /dev/null for writing
+            let devnull_cstr = std::ffi::CString::new("/dev/null").unwrap();
+            let dn = open(devnull_cstr.as_ptr(), O_WRONLY);
+            if dn < 0 {
+                // failed to open devnull; restore and bail
+                close(old_fd);
+                return Self { active: false, old_stderr_fd: -1, devnull_fd: -1 };
+            }
+            // Redirect fd 2 to devnull
+            if dup2(dn, 2) < 0 {
+                close(dn);
+                close(old_fd);
+                return Self { active: false, old_stderr_fd: -1, devnull_fd: -1 };
+            }
+            Self { active: true, old_stderr_fd: old_fd, devnull_fd: dn }
+        }
+        #[cfg(not(unix))]
+        {
+            Self { active: false }
+        }
+    }
+}
+
+impl Drop for StderrSilencer {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        #[cfg(unix)]
+        unsafe {
+            // Restore old stderr and close devnull and old copies
+            let _ = dup2(self.old_stderr_fd, 2);
+            let _ = close(self.devnull_fd);
+            let _ = close(self.old_stderr_fd);
+        }
+        self.active = false;
+    }
+}
+
+/// Run a closure while temporarily suppressing stderr on Unix when appropriate.
+/// On Windows/non-Unix, this is a no-op wrapper.
+/// This helper uses RAII + panic catching to ensure restoration before resuming panic.
+pub fn with_suppressed_stderr<F, T>(f: F) -> T
+where
+    F: FnOnce() -> T,
+{
+    // Suppress noisy native logs unless super-verbose (-vv) is enabled.
+    if verbose_level() < 2 {
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = StderrSilencer::activate();
+            f()
+        }));
+        match res {
+            Ok(v) => v,
+            Err(p) => std::panic::resume_unwind(p),
+        }
+    } else {
+        f()
+    }
+}
+
+/// Logging macros and helpers
+/// Log an error to stderr (always printed). Recommended for user-visible errors.
+#[macro_export]
+macro_rules! elog {
+    ($($arg:tt)*) => {{
+        eprintln!("ERROR: {}", format!($($arg)*));
+    }}
+}
+/// Log a warning to stderr (should generally be printed even in quiet mode).
+#[macro_export]
+macro_rules! wlog {
+    ($($arg:tt)*) => {{
+        eprintln!("WARN: {}", format!($($arg)*));
+    }}
+}
+/// Log an informational line to stderr unless quiet mode is enabled.
+#[macro_export]
+macro_rules! ilog {
+    ($($arg:tt)*) => {{
+        if !$crate::is_quiet() {
+            eprintln!("INFO: {}", format!($($arg)*));
+        }
+    }}
+}
+/// Log a debug/trace line when verbose level is at least the given level (u8).
+#[macro_export]
+macro_rules! dlog {
+    ($lvl:expr, $($arg:tt)*) => {{
+        if !$crate::is_quiet() && $crate::verbose_level() >= $lvl { eprintln!("DEBUG{}: {}", $lvl, format!($($arg)*)); }
+    }}
+}
+
+/// Backward-compatibility: map old qlog! to ilog!
+#[macro_export]
+macro_rules! qlog {
+    ($($arg:tt)*) => {{ $crate::ilog!($($arg)*); }}
+}
+
 use anyhow::{Context, Result, anyhow};
 use chrono::Local;
 use std::env;
@@ -17,6 +193,9 @@ use std::fs::create_dir_all;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+#[cfg(unix)]
+use libc::{close, dup, dup2, open, O_WRONLY};
 
 /// Re-export backend module (GPU/CPU selection and transcription).
 pub mod backend;
@@ -196,6 +375,20 @@ pub fn find_model_file() -> Result<PathBuf> {
         }
     }
 
+    // Non-interactive mode: automatic selection and optional download
+    if crate::is_no_interaction() {
+        if let Some(local) = crate::models::pick_best_local_model(models_dir) {
+            let _ = std::fs::write(models_dir.join(".last_model"), local.display().to_string());
+            return Ok(local);
+        } else {
+            ilog!("No local models found; downloading large-v3-turbo-q8_0...");
+            let path = crate::models::ensure_model_available_noninteractive("large-v3-turbo-q8_0")
+                .with_context(|| "Failed to download required model 'large-v3-turbo-q8_0'")?;
+            let _ = std::fs::write(models_dir.join(".last_model"), path.display().to_string());
+            return Ok(path);
+        }
+    }
+
     let mut candidates: Vec<PathBuf> = Vec::new();
     let rd = std::fs::read_dir(models_dir)
         .with_context(|| format!("Failed to read models directory: {}", models_dir.display()))?;
@@ -216,10 +409,16 @@ pub fn find_model_file() -> Result<PathBuf> {
     }
 
     if candidates.is_empty() {
-        eprintln!(
-            "WARN: No Whisper model files (*.bin) found in {}.",
+        // No models found: prompt interactively (TTY only)
+        wlog!("{}", format!(
+            "No Whisper model files (*.bin) found in {}.",
             models_dir.display()
-        );
+        ));
+        if crate::is_no_interaction() || !crate::stdin_is_tty() {
+            return Err(anyhow!(
+                "No models available and interactive mode is disabled. Please set WHISPER_MODEL or run with --download-models."
+            ));
+        }
         eprint!("Would you like to download models now? [Y/n]: ");
         io::stderr().flush().ok();
         let mut input = String::new();
@@ -227,7 +426,7 @@ pub fn find_model_file() -> Result<PathBuf> {
         let ans = input.trim().to_lowercase();
         if ans.is_empty() || ans == "y" || ans == "yes" {
             if let Err(e) = models::run_interactive_model_downloader() {
-                eprintln!("ERROR: Downloader failed: {:#}", e);
+                elog!("Downloader failed: {:#}", e);
             }
             candidates.clear();
             let rd2 = std::fs::read_dir(models_dir).with_context(|| {
@@ -271,7 +470,8 @@ pub fn find_model_file() -> Result<PathBuf> {
             let p = PathBuf::from(prev);
             if p.is_file() {
                 if candidates.iter().any(|c| c == &p) {
-                    eprintln!("INFO: Using previously selected model: {}", p.display());
+                    // Previously printed: INFO about using previously selected model.
+                    // Suppress this to avoid duplicate/noisy messages; per-file progress will be shown elsewhere.
                     return Ok(p);
                 }
             }

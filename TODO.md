@@ -13,8 +13,8 @@
 - [x] add support for video files -> use ffmpeg to extract audio
 - [x] detect gpus and use them
 - [x] refactor project
-- add error handling
-- add verbose flag (--verbose | -v) + add logging
+- [x] add error handling
+- [x] add verbose flag (--verbose | -v) + add logging
 - add documentation
 - refactor project
 - package into executable

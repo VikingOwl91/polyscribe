@@ -256,6 +256,7 @@ fn cli_merge_and_separate_writes_both_kinds_of_outputs() {
 
 #[test]
 fn cli_set_speaker_names_merge_prompts_and_uses_names() {
+    // Also validate that -q does not suppress prompts by running with -q
     use std::io::{Read as _, Write as _};
     use std::process::Stdio;
 
@@ -269,6 +270,7 @@ fn cli_set_speaker_names_merge_prompts_and_uses_names() {
         .arg(input2.as_os_str())
         .arg("-m")
         .arg("--set-speaker-names")
+        .arg("-q")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -290,6 +292,107 @@ fn cli_set_speaker_names_merge_prompts_and_uses_names() {
         root.items.into_iter().map(|e| e.speaker).collect();
     assert!(speakers.contains("Alpha"), "Alpha not found in speakers");
     assert!(speakers.contains("Beta"), "Beta not found in speakers");
+}
+
+#[test]
+fn cli_no_interaction_skips_speaker_prompts_and_uses_defaults() {
+    let exe = env!("CARGO_BIN_EXE_polyscribe");
+
+    let input1 = manifest_path("input/1-s0wlz.json");
+    let input2 = manifest_path("input/2-vikingowl.json");
+
+    let output = Command::new(exe)
+        .arg(input1.as_os_str())
+        .arg(input2.as_os_str())
+        .arg("-m")
+        .arg("--set-speaker-names")
+        .arg("--no-interaction")
+        .output()
+        .expect("failed to spawn polyscribe");
+
+    assert!(output.status.success(), "CLI did not exit successfully");
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout not UTF-8");
+    let root: OutputRoot = serde_json::from_str(&stdout).unwrap();
+    let speakers: std::collections::HashSet<String> =
+        root.items.into_iter().map(|e| e.speaker).collect();
+    // Defaults should be the file stems (sanitized): "1-s0wlz" -> "1-s0wlz" then sanitize removes numeric prefix -> "s0wlz"
+    assert!(speakers.contains("s0wlz"), "default s0wlz not used");
+    assert!(speakers.contains("vikingowl"), "default vikingowl not used");
+}
+
+// New verbosity behavior tests
+#[test]
+fn verbosity_quiet_suppresses_logs_but_keeps_stdout() {
+    let exe = env!("CARGO_BIN_EXE_polyscribe");
+    let input1 = manifest_path("input/1-s0wlz.json");
+    let input2 = manifest_path("input/2-vikingowl.json");
+
+    let output = Command::new(exe)
+        .arg("-q")
+        .arg("-v") // ensure -q overrides -v
+        .arg(input1.as_os_str())
+        .arg(input2.as_os_str())
+        .arg("-m")
+        .output()
+        .expect("failed to spawn polyscribe");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("\"items\""), "stdout JSON should be present in quiet mode");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.trim().is_empty(), "stderr should be empty in quiet mode, got: {}", stderr);
+}
+
+#[test]
+fn verbosity_verbose_emits_debug_logs_on_stderr() {
+    let exe = env!("CARGO_BIN_EXE_polyscribe");
+    let input1 = manifest_path("input/1-s0wlz.json");
+    let input2 = manifest_path("input/2-vikingowl.json");
+
+    let output = Command::new(exe)
+        .arg(input1.as_os_str())
+        .arg(input2.as_os_str())
+        .arg("-m")
+        .arg("-v")
+        .output()
+        .expect("failed to spawn polyscribe");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("\"items\""));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("Mode: merge"), "stderr should contain debug log with -v");
+}
+
+#[test]
+fn verbosity_flag_position_is_global() {
+    let exe = env!("CARGO_BIN_EXE_polyscribe");
+    let input1 = manifest_path("input/1-s0wlz.json");
+    let input2 = manifest_path("input/2-vikingowl.json");
+
+    // -v before args
+    let out1 = Command::new(exe)
+        .arg("-v")
+        .arg(input1.as_os_str())
+        .arg(input2.as_os_str())
+        .arg("-m")
+        .output()
+        .expect("failed to spawn polyscribe");
+
+    // -v after sub-flags
+    let out2 = Command::new(exe)
+        .arg(input1.as_os_str())
+        .arg(input2.as_os_str())
+        .arg("-m")
+        .arg("-v")
+        .output()
+        .expect("failed to spawn polyscribe");
+
+    let s1 = String::from_utf8(out1.stderr).unwrap();
+    let s2 = String::from_utf8(out2.stderr).unwrap();
+    assert!(s1.contains("Mode: merge"));
+    assert!(s2.contains("Mode: merge"));
 }
 
 #[test]
