@@ -1,8 +1,6 @@
 use std::fs::{File, create_dir_all};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-#[cfg(unix)]
-use std::os::unix::io::AsRawFd;
 
 use anyhow::{Context, Result, anyhow};
 use clap::{Parser, Subcommand};
@@ -774,7 +772,6 @@ fn main() {
 mod tests {
     use super::*;
     use clap::CommandFactory;
-    use polyscribe::backend::*;
     use polyscribe::format_srt_time;
     use std::env as std_env;
     use std::fs;

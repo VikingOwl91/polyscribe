@@ -7,6 +7,7 @@ use chrono::Local;
 use serde::Deserialize;
 
 #[derive(Deserialize)]
+#[allow(dead_code)]
 struct OutputEntry {
     id: u64,
     speaker: String,
@@ -257,7 +258,7 @@ fn cli_merge_and_separate_writes_both_kinds_of_outputs() {
 #[test]
 fn cli_set_speaker_names_merge_prompts_and_uses_names() {
     // Also validate that -q does not suppress prompts by running with -q
-    use std::io::{Read as _, Write as _};
+    use std::io::Write as _;
     use std::process::Stdio;
 
     let exe = env!("CARGO_BIN_EXE_polyscribe");

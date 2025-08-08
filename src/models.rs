@@ -81,14 +81,14 @@ fn human_size(bytes: u64) -> String {
     } else if b >= KB {
         format!("{:.2} KiB", b / KB)
     } else {
-        format!("{} B", bytes)
+        format!("{bytes} B")
     }
 }
 
 fn to_hex_lower(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
-        s.push_str(&format!("{:02x}", b));
+        s.push_str(&format!("{b:02x}"));
     }
     s
 }
@@ -159,8 +159,7 @@ fn fill_meta_via_head(repo: &str, name: &str) -> (Option<u64>, Option<String>) {
         Err(_) => return (None, None),
     };
     let url = format!(
-        "https://huggingface.co/{}/resolve/main/ggml-{}.bin",
-        repo, name
+        "https://huggingface.co/{repo}/resolve/main/ggml-{name}.bin"
     );
     let resp = match head_client
         .head(url)
@@ -207,8 +206,7 @@ fn hf_fetch_repo_models(client: &Client, repo: &'static str) -> Result<Vec<Model
     }
     // Prefer the tree endpoint for reliable size/hash metadata, then fall back to model metadata
     let tree_url = format!(
-        "https://huggingface.co/api/models/{}/tree/main?recursive=1",
-        repo
+        "https://huggingface.co/api/models/{repo}/tree/main?recursive=1"
     );
     let mut out: Vec<ModelEntry> = Vec::new();
 
@@ -249,7 +247,7 @@ fn hf_fetch_repo_models(client: &Client, repo: &'static str) -> Result<Vec<Model
     }
 
     if out.is_empty() {
-        let url = format!("https://huggingface.co/api/models/{}", repo);
+        let url = format!("https://huggingface.co/api/models/{repo}");
         let resp = client
             .get(url)
             .send()
@@ -286,13 +284,13 @@ fn hf_fetch_repo_models(client: &Client, repo: &'static str) -> Result<Vec<Model
     }
 
     // Fill missing metadata (size/hash) via HEAD request if necessary
-    if out.iter().any(|m| m.size == 0 || m.sha256.is_none()) {
-        if !(crate::is_no_interaction() && crate::verbose_level() < 2) {
-            ilog!(
-                "Fetching online data: completing metadata checks for models in {}...",
-                repo
-            );
-        }
+    if out.iter().any(|m| m.size == 0 || m.sha256.is_none())
+        && !(crate::is_no_interaction() && crate::verbose_level() < 2)
+    {
+        ilog!(
+            "Fetching online data: completing metadata checks for models in {}...",
+            repo
+        );
     }
     for m in out.iter_mut() {
         if m.size == 0 || m.sha256.is_none() {
@@ -374,8 +372,8 @@ fn format_model_list(models: &[ModelEntry]) -> String {
     for m in models.iter() {
         if m.base != current {
             current = m.base.clone();
-            out.push_str("\n");
-            out.push_str(&format!("{}:\n", current));
+            out.push('\n');
+            out.push_str(&format!("{current}:\n"));
         }
         // Format without hash and with aligned columns
         out.push_str(&format!(
@@ -406,7 +404,7 @@ fn prompt_select_models_two_stage(models: &[ModelEntry]) -> Result<Vec<ModelEntr
     for m in models.iter() {
         if m.base != last {
             // models are sorted by base; avoid duplicates while preserving order
-            if bases.last().map(|b| b == &m.base).unwrap_or(false) == false {
+            if !bases.last().map(|b| b == &m.base).unwrap_or(false) {
                 bases.push(m.base.clone());
             }
             last = m.base.clone();

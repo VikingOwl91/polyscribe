@@ -98,11 +98,17 @@ impl CpuBackend {
         CpuBackend
     }
 }
+impl Default for CpuBackend {
+    fn default() -> Self { Self::new() }
+}
 impl CudaBackend {
     /// Create a new CUDA backend instance.
     pub fn new() -> Self {
         CudaBackend
     }
+}
+impl Default for CudaBackend {
+    fn default() -> Self { Self::new() }
 }
 impl HipBackend {
     /// Create a new HIP backend instance.
@@ -110,11 +116,17 @@ impl HipBackend {
         HipBackend
     }
 }
+impl Default for HipBackend {
+    fn default() -> Self { Self::new() }
+}
 impl VulkanBackend {
     /// Create a new Vulkan backend instance.
     pub fn new() -> Self {
         VulkanBackend
     }
+}
+impl Default for VulkanBackend {
+    fn default() -> Self { Self::new() }
 }
 
 impl TranscribeBackend for CpuBackend {
@@ -311,7 +323,7 @@ pub(crate) fn transcribe_with_whisper_rs(
     }
 
     // Suppress stderr from whisper/ggml during model load and inference when quiet and not verbose.
-    let (ctx, mut state) = crate::with_suppressed_stderr(|| {
+    let (_ctx, mut state) = crate::with_suppressed_stderr(|| {
         let cparams = whisper_rs::WhisperContextParameters::default();
         let ctx = whisper_rs::WhisperContext::new_with_params(model_str, cparams)
             .with_context(|| format!("Failed to load Whisper model at {}", model.display()))?;
