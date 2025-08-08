@@ -735,6 +735,20 @@ fn download_one_model(client: &Client, models_dir: &Path, entry: &ModelEntry) ->
     Ok(())
 }
 
+// Update locally stored models by re-downloading when size or hash does not match online metadata.
+fn qlog_size_comparison(fname: &str, local: u64, remote: u64) -> bool {
+    if local == remote {
+        qlog!("{} appears up-to-date by size ({}).", fname, remote);
+        true
+    } else {
+        qlog!(
+            "{} size {} differs from remote {}. Updating...",
+            fname, local, remote
+        );
+        false
+    }
+}
+
 /// Update locally stored models by re-downloading when size or hash does not match online metadata.
 pub fn update_local_models() -> Result<()> {
     let models_dir_buf = crate::models_dir_path();
@@ -815,17 +829,10 @@ pub fn update_local_models() -> Result<()> {
                 download_one_model(&client, models_dir, remote)?;
             } else if remote.size > 0 {
                 match std::fs::metadata(&path) {
-                    Ok(md) if md.len() == remote.size => {
-                        qlog!("{} appears up-to-date by size ({}).", fname, remote.size);
-                        continue;
-                    }
                     Ok(md) => {
-                        qlog!(
-                            "{} size {} differs from remote {}. Updating...",
-                            fname,
-                            md.len(),
-                            remote.size
-                        );
+                        if qlog_size_comparison(&fname, md.len(), remote.size) {
+                            continue;
+                        }
                         download_one_model(&client, models_dir, remote)?;
                     }
                     Err(e) => {

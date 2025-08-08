@@ -41,18 +41,15 @@ pub trait TranscribeBackend {
     ) -> Result<Vec<OutputEntry>>;
 }
 
-fn check_lib(names: &[&str]) -> bool {
+fn check_lib(_names: &[&str]) -> bool {
     #[cfg(test)]
     {
         // During unit tests, avoid touching system libs to prevent loader crashes in CI.
-        // Mark parameter as used to silence warnings in test builds.
-        let _ = names;
         false
     }
     #[cfg(not(test))]
     {
         // Disabled runtime dlopen probing to avoid loader instability; rely on environment overrides.
-        let _ = names;
         false
     }
 }

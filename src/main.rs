@@ -761,6 +761,9 @@ mod tests {
     use polyscribe::format_srt_time;
     use std::env as std_env;
     use std::fs;
+    use std::sync::{Mutex, OnceLock};
+
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     #[test]
     fn test_cli_name_polyscribe() {
@@ -935,8 +938,6 @@ mod tests {
 
     #[test]
     fn test_backend_auto_order_prefers_cuda_then_hip_then_vulkan_then_cpu() {
-        use std::sync::{Mutex, OnceLock};
-        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
         // Clear overrides
         unsafe {
@@ -976,8 +977,6 @@ mod tests {
 
     #[test]
     fn test_backend_explicit_missing_errors() {
-        use std::sync::{Mutex, OnceLock};
-        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
         // Ensure all off
         unsafe {

@@ -178,27 +178,42 @@ macro_rules! elog {
         eprintln!("ERROR: {}", format!($($arg)*));
     }}
 }
-/// Log a warning to stderr (should generally be printed even in quiet mode).
+/// Internal helper macro used by other logging macros to centralize the
+/// common behavior: build formatted message, check quiet/verbose flags,
+/// and print to stderr with a label.
 #[macro_export]
-macro_rules! wlog {
-    ($($arg:tt)*) => {{
-        eprintln!("WARN: {}", format!($($arg)*));
-    }}
-}
-/// Log an informational line to stderr unless quiet mode is enabled.
-#[macro_export]
-macro_rules! ilog {
-    ($($arg:tt)*) => {{
-        if !$crate::is_quiet() {
-            eprintln!("INFO: {}", format!($($arg)*));
+macro_rules! log_with_level {
+    ($label:expr, $min_lvl:expr, $always:expr, $($arg:tt)*) => {{
+        let should_print = if $always {
+            true
+        } else if let Some(minv) = $min_lvl {
+            !$crate::is_quiet() && $crate::verbose_level() >= minv
+        } else {
+            !$crate::is_quiet()
+        };
+        if should_print {
+            eprintln!("{}: {}", $label, format!($($arg)*));
         }
     }}
 }
+
+/// Log a warning to stderr (printed even in quiet mode).
+#[macro_export]
+macro_rules! wlog {
+    ($($arg:tt)*) => {{ $crate::log_with_level!("WARN", None, true, $($arg)*); }}
+}
+
+/// Log an informational line to stderr unless quiet mode is enabled.
+#[macro_export]
+macro_rules! ilog {
+    ($($arg:tt)*) => {{ $crate::log_with_level!("INFO", None, false, $($arg)*); }}
+}
+
 /// Log a debug/trace line when verbose level is at least the given level (u8).
 #[macro_export]
 macro_rules! dlog {
     ($lvl:expr, $($arg:tt)*) => {{
-        if !$crate::is_quiet() && $crate::verbose_level() >= $lvl { eprintln!("DEBUG{}: {}", $lvl, format!($($arg)*)); }
+        $crate::log_with_level!(&format!("DEBUG{}", &$lvl), Some($lvl), false, $($arg)*);
     }}
 }
 
