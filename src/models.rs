@@ -643,6 +643,10 @@ mod tests {
 
     #[test]
     fn test_update_local_models_offline_copy_and_manifest() {
+        use std::sync::{Mutex, OnceLock};
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+
         let tmp_models = tempdir().unwrap();
         let tmp_base = tempdir().unwrap();
         let tmp_manifest = tempdir().unwrap();

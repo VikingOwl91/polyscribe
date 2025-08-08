@@ -76,6 +76,10 @@ struct Args {
     /// Update local Whisper models by comparing hashes/sizes with remote manifest
     #[arg(long)]
     update_models: bool,
+
+    /// Prompt for speaker names per input file
+    #[arg(long = "set-speaker-names")]
+    set_speaker_names: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -143,6 +147,27 @@ fn sanitize_speaker_name(raw: &str) -> String {
         }
     }
     raw.to_string()
+}
+
+fn prompt_speaker_name_for_path(path: &Path, default_name: &str, enabled: bool) -> String {
+    if !enabled {
+        return default_name.to_string();
+    }
+    let display_owned: String = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| path.to_string_lossy().to_string());
+    eprint!("Enter speaker name for {} [default: {}]: ", display_owned, default_name);
+    io::stderr().flush().ok();
+    let mut buf = String::new();
+    match io::stdin().read_line(&mut buf) {
+        Ok(_) => {
+            let s = buf.trim();
+            if s.is_empty() { default_name.to_string() } else { s.to_string() }
+        }
+        Err(_) => default_name.to_string(),
+    }
 }
 
 // --- Helpers for audio transcription ---
@@ -467,9 +492,10 @@ fn main() -> Result<()> {
 
         for input_path in &inputs {
             let path = Path::new(input_path);
-            let speaker = sanitize_speaker_name(
+            let default_speaker = sanitize_speaker_name(
                 path.file_stem().and_then(|s| s.to_str()).unwrap_or("speaker")
             );
+            let speaker = prompt_speaker_name_for_path(path, &default_speaker, args.set_speaker_names);
 
             // Collect entries per file and extend merged
             let mut entries: Vec<OutputEntry> = Vec::new();
@@ -557,11 +583,12 @@ fn main() -> Result<()> {
         let mut entries: Vec<OutputEntry> = Vec::new();
         for input_path in &inputs {
             let path = Path::new(input_path);
-            let speaker = sanitize_speaker_name(
+            let default_speaker = sanitize_speaker_name(
                 path.file_stem()
                     .and_then(|s| s.to_str())
                     .unwrap_or("speaker")
             );
+            let speaker = prompt_speaker_name_for_path(path, &default_speaker, args.set_speaker_names);
 
             let mut buf = String::new();
             if is_audio_file(path) {
@@ -657,9 +684,10 @@ fn main() -> Result<()> {
 
         for input_path in &inputs {
             let path = Path::new(input_path);
-            let speaker = sanitize_speaker_name(
+            let default_speaker = sanitize_speaker_name(
                 path.file_stem().and_then(|s| s.to_str()).unwrap_or("speaker")
             );
+            let speaker = prompt_speaker_name_for_path(path, &default_speaker, args.set_speaker_names);
 
             // Collect entries per file
             let mut entries: Vec<OutputEntry> = Vec::new();

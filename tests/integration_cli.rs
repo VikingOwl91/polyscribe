@@ -204,3 +204,89 @@ fn cli_merge_and_separate_writes_both_kinds_of_outputs() {
     // Cleanup
     let _ = fs::remove_dir_all(&out_dir);
 }
+
+
+#[test]
+fn cli_set_speaker_names_merge_prompts_and_uses_names() {
+    use std::io::{Read as _, Write as _};
+    use std::process::Stdio;
+
+    let exe = env!("CARGO_BIN_EXE_polyscribe");
+
+    let input1 = manifest_path("input/1-s0wlz.json");
+    let input2 = manifest_path("input/2-vikingowl.json");
+
+    let mut child = Command::new(exe)
+        .arg(input1.as_os_str())
+        .arg(input2.as_os_str())
+        .arg("-m")
+        .arg("--set-speaker-names")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn polyscribe");
+
+    {
+        let stdin = child.stdin.as_mut().expect("failed to open stdin");
+        // Provide two names for two files
+        writeln!(stdin, "Alpha").unwrap();
+        writeln!(stdin, "Beta").unwrap();
+    }
+
+    let output = child.wait_with_output().expect("failed to wait on child");
+    assert!(output.status.success(), "CLI did not exit successfully");
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout not UTF-8");
+    let root: OutputRoot = serde_json::from_str(&stdout).unwrap();
+    let speakers: std::collections::HashSet<String> = root.items.into_iter().map(|e| e.speaker).collect();
+    assert!(speakers.contains("Alpha"), "Alpha not found in speakers");
+    assert!(speakers.contains("Beta"), "Beta not found in speakers");
+}
+
+#[test]
+fn cli_set_speaker_names_separate_single_input() {
+    use std::io::Write as _;
+    use std::process::Stdio;
+
+    let exe = env!("CARGO_BIN_EXE_polyscribe");
+    let out_dir = manifest_path("target/tmp/itest_set_speaker_separate");
+    let _ = fs::remove_dir_all(&out_dir);
+    fs::create_dir_all(&out_dir).unwrap();
+
+    let input1 = manifest_path("input/3-schmendrizzle.json");
+
+    let mut child = Command::new(exe)
+        .arg(input1.as_os_str())
+        .arg("--set-speaker-names")
+        .arg("-o")
+        .arg(out_dir.as_os_str())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("failed to spawn polyscribe");
+
+    {
+        let stdin = child.stdin.as_mut().expect("failed to open stdin");
+        writeln!(stdin, "ChosenOne").unwrap();
+    }
+
+    let status = child.wait().expect("failed to wait on child");
+    assert!(status.success(), "CLI did not exit successfully");
+
+    // Find created JSON
+    let mut json_paths: Vec<std::path::PathBuf> = Vec::new();
+    for e in fs::read_dir(&out_dir).unwrap() {
+        let p = e.unwrap().path();
+        if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
+            if name.ends_with(".json") { json_paths.push(p.clone()); }
+        }
+    }
+    assert!(!json_paths.is_empty(), "no JSON outputs created");
+    let mut buf = String::new();
+    std::fs::File::open(&json_paths[0]).unwrap().read_to_string(&mut buf).unwrap();
+    let root: OutputRoot = serde_json::from_str(&buf).unwrap();
+    assert!(root.items.iter().all(|e| e.speaker == "ChosenOne"));
+
+    let _ = fs::remove_dir_all(&out_dir);
+}
