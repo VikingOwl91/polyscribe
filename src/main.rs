@@ -8,16 +8,23 @@ use clap::Parser;
 use serde::{Deserialize, Serialize};
 use chrono::Local;
 
+#[cfg(feature = "native-whisper")]
+use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+
 #[derive(Parser, Debug)]
-#[command(name = "merge_transcripts", version, about = "Merge multiple JSON transcripts into one")]
+#[command(name = "merge_transcripts", version, about = "Merge multiple JSON transcripts into one or transcribe audio using native whisper")]
 struct Args {
-    /// Input JSON files to merge
+    /// Input .json transcript files or audio files to merge/transcribe
     #[arg(required = true)]
     inputs: Vec<String>,
 
-    /// Output file path (if omitted, writes to stdout)
+    /// Output file path base (date prefix will be added); if omitted, writes JSON to stdout
     #[arg(short, long, value_name = "FILE")]
     output: Option<String>,
+
+    /// Language code to use for transcription (e.g., en, de). No auto-detection.
+    #[arg(short, long, value_name = "LANG")]
+    language: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -78,7 +85,7 @@ fn render_srt(items: &[OutputEntry]) -> String {
     out
 }
 
-// --- Helpers for audio transcription via openai-whisper ---
+// --- Helpers for audio transcription ---
 fn is_json_file(path: &Path) -> bool {
     matches!(path.extension().and_then(|s| s.to_str()).map(|s| s.to_lowercase()), Some(ext) if ext == "json")
 }
@@ -93,75 +100,153 @@ fn is_audio_file(path: &Path) -> bool {
     false
 }
 
-fn ensure_whisper_venv() -> Result<PathBuf> {
-    let venv_dir = Path::new(".venv");
-    let bin_dir = venv_dir.join("bin");
-    let python_bin = bin_dir.join("python");
-    // Create venv if needed
-    if !python_bin.exists() {
-        let status = Command::new("python")
-            .arg("-m").arg("venv").arg(".venv")
-            .status()
-            .with_context(|| "Failed to execute: python -m venv .venv")?;
-        if !status.success() {
-            return Err(anyhow!("Creating virtual environment failed (python -m venv .venv)"));
-        }
-    }
-    // Install openai-whisper if needed
-    let whisper_bin = bin_dir.join("whisper");
-    if !whisper_bin.exists() {
-        let status = Command::new(&python_bin)
-            .arg("-m").arg("pip").arg("install").arg("-U").arg("openai-whisper")
-            .status()
-            .with_context(|| "Failed to execute: .venv/bin/python -m pip install -U openai-whisper")?;
-        if !status.success() {
-            return Err(anyhow!("Installing openai-whisper failed"));
-        }
-    }
-    Ok(whisper_bin)
+fn normalize_lang_code(input: &str) -> Option<String> {
+    let mut s = input.trim().to_lowercase();
+    if s.is_empty() || s == "auto" || s == "c" || s == "posix" { return None; }
+    if let Some((lhs, _)) = s.split_once('.') { s = lhs.to_string(); }
+    if let Some((lhs, _)) = s.split_once('_') { s = lhs.to_string(); }
+    let code = match s.as_str() {
+        // ISO codes directly
+        "en"=>"en","de"=>"de","es"=>"es","fr"=>"fr","it"=>"it","pt"=>"pt","nl"=>"nl","ru"=>"ru","pl"=>"pl",
+        "uk"=>"uk","cs"=>"cs","sv"=>"sv","no"=>"no","da"=>"da","fi"=>"fi","hu"=>"hu","tr"=>"tr","el"=>"el",
+        "zh"=>"zh","ja"=>"ja","ko"=>"ko","ar"=>"ar","he"=>"he","hi"=>"hi","ro"=>"ro","bg"=>"bg","sk"=>"sk",
+        // Common English names
+        "english"=>"en","german"=>"de","spanish"=>"es","french"=>"fr","italian"=>"it","portuguese"=>"pt",
+        "dutch"=>"nl","russian"=>"ru","polish"=>"pl","ukrainian"=>"uk","czech"=>"cs","swedish"=>"sv",
+        "norwegian"=>"no","danish"=>"da","finnish"=>"fi","hungarian"=>"hu","turkish"=>"tr","greek"=>"el",
+        "chinese"=>"zh","japanese"=>"ja","korean"=>"ko","arabic"=>"ar","hebrew"=>"he","hindi"=>"hi",
+        "romanian"=>"ro","bulgarian"=>"bg","slovak"=>"sk",
+        _ => return None,
+    };
+    Some(code.to_string())
 }
 
-fn run_whisper(audio_path: &Path, out_dir: &Path, whisper_bin: &Path) -> Result<PathBuf> {
-    create_dir_all(out_dir).with_context(|| format!("Failed to create whisper output dir: {}", out_dir.display()))?;
-    let out_dir_str = out_dir.to_string_lossy().to_string();
 
-    // Try with -o first (as per requested command)
-    let attempt = |use_short_o: bool| -> Result<()> {
-        let mut cmd = Command::new(whisper_bin);
-        cmd.arg(audio_path)
-            .arg("--model").arg("turbo")
-            .arg("--output_format").arg("json");
-        if use_short_o {
-            cmd.arg("-o").arg(&out_dir_str);
-        } else {
-            cmd.arg("--output_dir").arg(&out_dir_str);
+
+#[cfg(feature = "native-whisper")]
+fn find_model_file() -> Result<PathBuf> {
+    let models_dir = Path::new("models");
+    if !models_dir.exists() {
+        return Err(anyhow!("No models directory found at {}", models_dir.display()));
+    }
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    let rd = std::fs::read_dir(models_dir)
+        .with_context(|| format!("Failed to read models directory: {}", models_dir.display()))?;
+    for entry in rd {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_file() {
+            if let Some(ext) = path.extension().and_then(|s| s.to_str()).map(|s| s.to_lowercase()) {
+                if ext == "bin" {
+                    candidates.push(path);
+                }
+            }
         }
-        let output = cmd.output()
-            .with_context(|| format!("Failed to execute whisper for {}", audio_path.display()))?;
-        if !output.status.success() {
+    }
+    if candidates.is_empty() {
+        return Err(anyhow!("No Whisper model files (*.bin) found in {}", models_dir.display()));
+    }
+    if candidates.len() == 1 {
+        return Ok(candidates.remove(0));
+    }
+    // Multiple models: prompt user to choose
+    eprintln!("Multiple Whisper models found in {}:", models_dir.display());
+    for (i, p) in candidates.iter().enumerate() {
+        eprintln!("  {}) {}", i + 1, p.display());
+    }
+    eprint!("Select model by number [1-{}]: ", candidates.len());
+    io::stderr().flush().ok();
+    let mut input = String::new();
+    io::stdin().read_line(&mut input).context("Failed to read selection")?;
+    let sel: usize = input.trim().parse().map_err(|_| anyhow!("Invalid selection: {}", input.trim()))?;
+    if sel == 0 || sel > candidates.len() {
+        return Err(anyhow!("Selection out of range"));
+    }
+    Ok(candidates.swap_remove(sel - 1))
+}
+
+#[cfg(feature = "native-whisper")]
+fn decode_audio_to_pcm_f32_ffmpeg(audio_path: &Path) -> Result<Vec<f32>> {
+    let output = Command::new("ffmpeg")
+        .arg("-i").arg(audio_path)
+        .arg("-f").arg("f32le")
+        .arg("-ac").arg("1")
+        .arg("-ar").arg("16000")
+        .arg("pipe:1")
+        .output()
+        .with_context(|| format!("Failed to execute ffmpeg for {}", audio_path.display()))?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "ffmpeg failed for {}: {}",
+            audio_path.display(),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let bytes = output.stdout;
+    if bytes.len() % 4 != 0 {
+        // Truncate to nearest multiple of 4 bytes to avoid partial f32
+        let truncated = bytes.len() - (bytes.len() % 4);
+        let mut v = Vec::with_capacity(truncated / 4);
+        for chunk in bytes[..truncated].chunks_exact(4) {
+            let arr = [chunk[0], chunk[1], chunk[2], chunk[3]];
+            v.push(f32::from_le_bytes(arr));
+        }
+        Ok(v)
+    } else {
+        let mut v = Vec::with_capacity(bytes.len() / 4);
+        for chunk in bytes.chunks_exact(4) {
+            let arr = [chunk[0], chunk[1], chunk[2], chunk[3]];
+            v.push(f32::from_le_bytes(arr));
+        }
+        Ok(v)
+    }
+}
+
+#[cfg(feature = "native-whisper")]
+fn transcribe_native(audio_path: &Path, speaker: &str, lang_opt: Option<&str>) -> Result<Vec<OutputEntry>> {
+    let pcm = decode_audio_to_pcm_f32_ffmpeg(audio_path)?;
+    let model = find_model_file()?;
+    let is_en_only = model
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| s.contains(".en.") || s.ends_with(".en.bin"))
+        .unwrap_or(false);
+    if let Some(lang) = lang_opt {
+        if is_en_only && lang != "en" {
             return Err(anyhow!(
-                "Whisper transcription failed for {}: {}",
-                audio_path.display(),
-                String::from_utf8_lossy(&output.stderr)
+                "Selected model is English-only ({}), but a non-English language hint '{}' was provided. Please use a multilingual model like models/ggml-base.bin or set WHISPER_MODEL accordingly.",
+                model.display(),
+                lang
             ));
         }
-        Ok(())
-    };
-
-    if let Err(_e) = attempt(true) {
-        // Fallback to --output_dir if -o not supported by CLI installed
-        attempt(false)?;
     }
+    let model_str = model.to_str().ok_or_else(|| anyhow!("Model path not valid UTF-8: {}", model.display()))?;
+    let ctx = WhisperContext::new_with_params(model_str, WhisperContextParameters::default())
+        .with_context(|| format!("Failed to load Whisper model at {}", model.display()))?;
+    let mut state = ctx.create_state()
+        .map_err(|e| anyhow!("Failed to create Whisper state: {:?}", e))?;
 
-    // Try to locate the resulting JSON file
-    let stem = audio_path.file_stem().and_then(|s| s.to_str()).unwrap_or("transcript");
-    let cand1 = out_dir.join(format!("{}.json", stem));
-    if cand1.exists() { return Ok(cand1); }
-    if let Some(file_name) = audio_path.file_name().and_then(|s| s.to_str()) {
-        let cand2 = out_dir.join(format!("{}.json", file_name));
-        if cand2.exists() { return Ok(cand2); }
+    let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+    let n_threads = std::thread::available_parallelism().map(|n| n.get() as i32).unwrap_or(1);
+    params.set_n_threads(n_threads);
+    params.set_translate(false);
+    if let Some(lang) = lang_opt { params.set_language(Some(lang)); }
+
+    state.full(params, &pcm)
+        .map_err(|e| anyhow!("Whisper full() failed: {:?}", e))?;
+
+    let num_segments = state.full_n_segments().map_err(|e| anyhow!("Failed to get segments: {:?}", e))?;
+    let mut items = Vec::new();
+    for i in 0..num_segments {
+        let text = state.full_get_segment_text(i)
+            .map_err(|e| anyhow!("Failed to get segment text: {:?}", e))?;
+        let t0 = state.full_get_segment_t0(i).map_err(|e| anyhow!("Failed to get segment t0: {:?}", e))?;
+        let t1 = state.full_get_segment_t1(i).map_err(|e| anyhow!("Failed to get segment t1: {:?}", e))?;
+        let start = (t0 as f64) * 0.01;
+        let end = (t1 as f64) * 0.01;
+        items.push(OutputEntry { id: 0, speaker: speaker.to_string(), start, end, text: text.trim().to_string() });
     }
-    Err(anyhow!("Could not find whisper JSON output in {} for input {}", out_dir.display(), audio_path.display()))
+    Ok(items)
 }
 
 fn main() -> Result<()> {
@@ -182,22 +267,16 @@ fn main() -> Result<()> {
         return Err(anyhow!("No input files provided"));
     }
 
-    // Determine directory for intermediate Whisper transcriptions
-    let transcripts_dir: PathBuf = if let Some(ref out_path) = output_path {
-        let base_path = Path::new(out_path);
-        if let Some(parent) = base_path.parent() {
-            if parent.as_os_str().is_empty() {
-                PathBuf::from("output").join("transcripts")
-            } else {
-                parent.join("transcripts")
-            }
-        } else {
-            PathBuf::from("output").join("transcripts")
-        }
+    // Language must be provided via CLI when transcribing audio (no detection from JSON/env)
+    let lang_hint: Option<String> = if let Some(ref l) = args.language {
+        normalize_lang_code(l).or_else(|| Some(l.trim().to_lowercase()))
     } else {
-        PathBuf::from("output").join("transcripts")
+        None
     };
-    let mut whisper_bin_opt: Option<PathBuf> = None;
+    let any_audio = inputs.iter().any(|p| is_audio_file(Path::new(p)));
+    if any_audio && lang_hint.is_none() {
+        return Err(anyhow!("Please specify --language (e.g., --language en). Language detection was removed."));
+    }
 
     let mut entries: Vec<OutputEntry> = Vec::new();
 
@@ -211,16 +290,18 @@ fn main() -> Result<()> {
 
         let mut buf = String::new();
         if is_audio_file(path) {
-            // Ensure whisper is available
-            if whisper_bin_opt.is_none() {
-                whisper_bin_opt = Some(ensure_whisper_venv()?);
+            #[cfg(feature = "native-whisper")]
+            {
+                let items = transcribe_native(path, &speaker, lang_hint.as_deref())?;
+                for e in items {
+                    entries.push(e);
+                }
+                continue;
             }
-            let whisper_bin = whisper_bin_opt.as_ref().unwrap();
-            let json_path = run_whisper(path, &transcripts_dir, whisper_bin)?;
-            File::open(&json_path)
-                .with_context(|| format!("Failed to open Whisper JSON: {}", json_path.display()))?
-                .read_to_string(&mut buf)
-                .with_context(|| format!("Failed to read Whisper JSON: {}", json_path.display()))?;
+            #[cfg(not(feature = "native-whisper"))]
+            {
+                return Err(anyhow!("Python transcription has been removed. Please build with --features native-whisper to transcribe audio."));
+            }
         } else if is_json_file(path) {
             File::open(path)
                 .with_context(|| format!("Failed to open: {}", input_path))?
