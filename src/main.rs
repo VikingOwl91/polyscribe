@@ -334,8 +334,25 @@ fn transcribe_native(audio_path: &Path, speaker: &str, lang_opt: Option<&str>) -
     Ok(items)
 }
 
+struct LastModelCleanup {
+    path: PathBuf,
+}
+impl Drop for LastModelCleanup {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
+
+    // Remove stale last_model from previous runs and set up cleanup on exit
+    let models_dir = Path::new("models");
+    let last_model_path = models_dir.join(".last_model");
+    // Best-effort cleanup at start
+    let _ = std::fs::remove_file(&last_model_path);
+    // Ensure cleanup at end of program, regardless of exit path
+    let _last_model_cleanup = LastModelCleanup { path: last_model_path.clone() };
 
     // If requested, run the interactive model downloader first. If no inputs were provided, exit after downloading.
     if args.download_models {
