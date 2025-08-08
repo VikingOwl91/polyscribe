@@ -17,7 +17,7 @@ mod models;
 static LAST_MODEL_WRITTEN: AtomicBool = AtomicBool::new(false);
 
 #[derive(Parser, Debug)]
-#[command(name = "merge_transcripts", version, about = "Merge multiple JSON transcripts into one or transcribe audio using native whisper")]
+#[command(name = "PolyScribe", version, about = "Merge multiple JSON transcripts into one or transcribe audio using native whisper")]
 struct Args {
     /// Input .json transcript files or audio files to merge/transcribe
     inputs: Vec<String>,

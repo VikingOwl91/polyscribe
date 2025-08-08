@@ -1,6 +1,6 @@
 - [x] update the project to no more use features
 - [x] update last_model to be only used during one run
-- rename project to "PolyScribe"
+- [x] rename project to "PolyScribe"
 - add tests
 - update local models using hashes (--update-models)
 - create folder models/ if not present -> use /usr/share/polyscribe/models/ for release version, use ./models/ for development version

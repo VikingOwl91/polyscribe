@@ -125,7 +125,7 @@ fn size_from_tree(s: &HFTreeItem) -> Option<u64> {
 
 fn fill_meta_via_head(repo: &'static str, name: &str) -> (Option<u64>, Option<String>) {
     let head_client = match Client::builder()
-        .user_agent("dialogue_merger/0.1 (+https://github.com/)")
+        .user_agent("PolyScribe/0.1 (+https://github.com/)")
         .redirect(Policy::none())
         .timeout(Duration::from_secs(30))
         .build() {
@@ -343,7 +343,7 @@ pub fn run_interactive_model_downloader() -> Result<()> {
     let models_dir = Path::new("models");
     if !models_dir.exists() { create_dir_all(models_dir).context("Failed to create models directory")?; }
     let client = Client::builder()
-        .user_agent("dialogue_merger/0.1 (+https://github.com/)")
+        .user_agent("PolyScribe/0.1 (+https://github.com/)")
         .timeout(std::time::Duration::from_secs(600))
         .build()
         .context("Failed to build HTTP client")?;

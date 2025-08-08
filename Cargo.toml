@@ -1,5 +1,5 @@
 [package]
-name = "dialogue_merger"
+name = "polyscribe"
 version = "0.1.0"
 edition = "2024"
 
