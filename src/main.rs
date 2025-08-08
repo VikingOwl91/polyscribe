@@ -16,6 +16,16 @@ mod models;
 
 static LAST_MODEL_WRITTEN: AtomicBool = AtomicBool::new(false);
 
+fn models_dir_path() -> PathBuf {
+    if let Ok(p) = env::var("POLYSCRIBE_MODELS_DIR") {
+        let pb = PathBuf::from(p);
+        if !pb.as_os_str().is_empty() {
+            return pb;
+        }
+    }
+    PathBuf::from("models")
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "PolyScribe", version, about = "Merge multiple JSON transcripts into one or transcribe audio using native whisper")]
 struct Args {
@@ -145,7 +155,8 @@ fn normalize_lang_code(input: &str) -> Option<String> {
 
 
 fn find_model_file() -> Result<PathBuf> {
-    let models_dir = Path::new("models");
+    let models_dir_buf = models_dir_path();
+    let models_dir = models_dir_buf.as_path();
     if !models_dir.exists() {
         create_dir_all(models_dir).with_context(|| format!("Failed to create models directory: {}", models_dir.display()))?;
     }
@@ -349,18 +360,17 @@ struct LastModelCleanup {
 }
 impl Drop for LastModelCleanup {
     fn drop(&mut self) {
-        if LAST_MODEL_WRITTEN.load(Ordering::Relaxed) {
-            let _ = std::fs::remove_file(&self.path);
-        }
+        // Ensure .last_model does not persist across program runs
+        let _ = std::fs::remove_file(&self.path);
     }
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    // Defer cleanup of .last_model until program exit (after all runs within this process)
-    let models_dir = Path::new("models");
-    let last_model_path = models_dir.join(".last_model");
+    // Defer cleanup of .last_model until program exit
+    let models_dir_buf = models_dir_path();
+    let last_model_path = models_dir_buf.join(".last_model");
     // Ensure cleanup at end of program, regardless of exit path
     let _last_model_cleanup = LastModelCleanup { path: last_model_path.clone() };
 
@@ -369,6 +379,18 @@ fn main() -> Result<()> {
         if let Err(e) = models::run_interactive_model_downloader() {
             eprintln!("Model downloader failed: {:#}", e);
         }
+        if args.inputs.is_empty() {
+            return Ok(());
+        }
+    }
+
+    // If requested, update local models and exit unless inputs provided to continue
+    if args.update_models {
+        if let Err(e) = models::update_local_models() {
+            eprintln!("Model update failed: {:#}", e);
+            return Err(e);
+        }
+        // if only updating models and no inputs, exit
         if args.inputs.is_empty() {
             return Ok(());
         }
@@ -520,6 +542,28 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use std::fs;
+    use std::io::Write;
+    use std::env as std_env;
+    use clap::CommandFactory;
+
+    #[test]
+    fn test_cli_name_polyscribe() {
+        let cmd = Args::command();
+        assert_eq!(cmd.get_name(), "PolyScribe");
+    }
+
+    #[test]
+    fn test_last_model_cleanup_removes_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let last = tmp.path().join(".last_model");
+        fs::write(&last, "dummy").unwrap();
+        {
+            let _cleanup = LastModelCleanup { path: last.clone() };
+        }
+        assert!(!last.exists(), ".last_model should be removed on drop");
+    }
     use super::*;
     use std::path::Path;
 
