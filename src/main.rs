@@ -512,3 +512,77 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn test_format_srt_time_basic_and_rounding() {
+        assert_eq!(format_srt_time(0.0), "00:00:00,000");
+        assert_eq!(format_srt_time(1.0), "00:00:01,000");
+        assert_eq!(format_srt_time(61.0), "00:01:01,000");
+        assert_eq!(format_srt_time(3661.789), "01:01:01,789");
+        // rounding
+        assert_eq!(format_srt_time(0.0014), "00:00:00,001");
+        assert_eq!(format_srt_time(0.0015), "00:00:00,002");
+    }
+
+    #[test]
+    fn test_render_srt_with_and_without_speaker() {
+        let items = vec![
+            OutputEntry { id: 0, speaker: "Alice".to_string(), start: 0.0, end: 1.0, text: "Hello".to_string() },
+            OutputEntry { id: 1, speaker: String::new(), start: 1.0, end: 2.0, text: "World".to_string() },
+        ];
+        let srt = render_srt(&items);
+        let expected = "1\n00:00:00,000 --> 00:00:01,000\nAlice: Hello\n\n2\n00:00:01,000 --> 00:00:02,000\nWorld\n\n";
+        assert_eq!(srt, expected);
+    }
+
+    #[test]
+    fn test_sanitize_speaker_name() {
+        assert_eq!(sanitize_speaker_name("123-bob"), "bob");
+        assert_eq!(sanitize_speaker_name("00123-alice"), "alice");
+        assert_eq!(sanitize_speaker_name("abc-bob"), "abc-bob");
+        assert_eq!(sanitize_speaker_name("123"), "123");
+        assert_eq!(sanitize_speaker_name("-bob"), "-bob");
+        assert_eq!(sanitize_speaker_name("123-"), "");
+    }
+
+    #[test]
+    fn test_is_json_file_and_is_audio_file() {
+        assert!(is_json_file(Path::new("foo.json")));
+        assert!(is_json_file(Path::new("foo.JSON")));
+        assert!(!is_json_file(Path::new("foo.txt")));
+        assert!(!is_json_file(Path::new("foo")));
+
+        assert!(is_audio_file(Path::new("a.mp3")));
+        assert!(is_audio_file(Path::new("b.WAV")));
+        assert!(is_audio_file(Path::new("c.m4a")));
+        assert!(!is_audio_file(Path::new("d.txt")));
+    }
+
+    #[test]
+    fn test_normalize_lang_code() {
+        assert_eq!(normalize_lang_code("en"), Some("en".to_string()));
+        assert_eq!(normalize_lang_code("German"), Some("de".to_string()));
+        assert_eq!(normalize_lang_code("en_US.UTF-8"), Some("en".to_string()));
+        assert_eq!(normalize_lang_code("AUTO"), None);
+        assert_eq!(normalize_lang_code("  \t  "), None);
+        assert_eq!(normalize_lang_code("zh"), Some("zh".to_string()));
+    }
+
+    #[test]
+    fn test_date_prefix_format_shape() {
+        let d = date_prefix();
+        assert_eq!(d.len(), 10);
+        let bytes = d.as_bytes();
+        assert!(bytes[0].is_ascii_digit() && bytes[1].is_ascii_digit() && bytes[2].is_ascii_digit() && bytes[3].is_ascii_digit());
+        assert_eq!(bytes[4], b'-');
+        assert!(bytes[5].is_ascii_digit() && bytes[6].is_ascii_digit());
+        assert_eq!(bytes[7], b'-');
+        assert!(bytes[8].is_ascii_digit() && bytes[9].is_ascii_digit());
+    }
+}
