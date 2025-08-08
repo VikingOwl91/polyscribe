@@ -9,18 +9,34 @@ Key features
 - GPU backend selection at runtime; auto-detects available accelerators.
 - Clean outputs (JSON and SRT), speaker naming prompts, and useful logging controls.
 
-Quickstart
-1) Install Rust (rustup) and ffmpeg, then build:
-- rustup install stable
-- rustup default stable
-- cargo build --release
+Prerequisites
+- Rust toolchain (rustup recommended)
+- ffmpeg available on PATH
+- Optional for GPU acceleration at runtime: CUDA, ROCm/HIP, or Vulkan drivers (match your build features)
 
-2) Download a model (first run can prompt you):
+Installation
+- Build from source (CPU-only by default):
+  - rustup install stable
+  - rustup default stable
+  - cargo build --release
+- Binary path: ./target/release/polyscribe
+- GPU builds (optional): build with features
+  - CUDA: cargo build --release --features gpu-cuda
+  - HIP: cargo build --release --features gpu-hip
+  - Vulkan: cargo build --release --features gpu-vulkan
+
+Quickstart
+1) Download a model (first run can prompt you):
 - ./target/release/polyscribe --download-models
 
-3) Transcribe a file:
+2) Transcribe a file:
 - ./target/release/polyscribe -v -o output my_audio.mp3
 This writes JSON and SRT into the output directory with a date prefix.
+
+Shell completions and man page
+- Completions: ./target/release/polyscribe completions <bash|zsh|fish|powershell|elvish> > polyscribe.<ext>
+  - Then install into your shell’s completion directory.
+- Man page: ./target/release/polyscribe man > polyscribe.1 (then copy to your manpath)
 
 Model locations
 - Development (debug builds): ./models next to the project.
@@ -50,21 +66,12 @@ Minimal usage examples
 - Update local models non-interactively (good for CI):
   - ./target/release/polyscribe --update-models --no-interaction -q
 
-Running tests and tools
-- cargo test
-- cargo clippy --all-targets -- -D warnings
-- cargo build (preferably without warnings)
-
-Model downloader
-- Interactive: ./target/release/polyscribe --download-models
-- Non-interactive: relies on defaults; set WHISPER_MODEL or POLYSCRIBE_MODELS_DIR when needed.
-
-Documentation index
+Troubleshooting & docs
+- docs/faq.md – common issues and solutions (missing ffmpeg, GPU selection, model paths)
 - docs/usage.md – complete CLI reference and workflows
 - docs/development.md – build, run, and contribute locally
 - docs/design.md – architecture overview and decisions
 - docs/release-packaging.md – packaging notes for distributions
-- docs/faq.md – common issues and solutions
 - docs/ci.md – minimal CI checklist and job outline
 - CONTRIBUTING.md – PR checklist and workflow
 
@@ -78,5 +85,4 @@ See the examples/ directory for copy-paste scripts:
 
 License
 -------
-
 This project is licensed under the MIT License — see the LICENSE file for details.
