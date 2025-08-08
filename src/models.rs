@@ -1,3 +1,4 @@
+//! Model discovery, selection, and downloading logic for PolyScribe.
 use std::collections::BTreeMap;
 use std::env;
 use std::fs::{File, create_dir_all};
