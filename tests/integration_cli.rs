@@ -48,7 +48,9 @@ fn manifest_path(relative: &str) -> PathBuf {
 fn cli_merges_json_inputs_and_writes_outputs_to_temp_dir() {
     let exe = env!("CARGO_BIN_EXE_polyscribe");
     let tmp = TestDir::new();
-    let base = tmp.path().join("out");
+    // Use a nested output directory to also verify auto-creation
+    let base_dir = tmp.path().join("outdir");
+    let base = base_dir.join("out");
 
     let input1 = manifest_path("input/1-s0wlz.json");
     let input2 = manifest_path("input/2-vikingowl.json");
@@ -63,16 +65,22 @@ fn cli_merges_json_inputs_and_writes_outputs_to_temp_dir() {
         .expect("failed to spawn polyscribe");
     assert!(status.success(), "CLI did not exit successfully");
 
-    // Expect files with today's date prefix
-    let date = Local::now().format("%Y-%m-%d").to_string();
-    let stem = format!("{}_{}", date, "out");
-    let json_path = tmp.path().join(format!("{}.json", stem));
-    let toml_path = tmp.path().join(format!("{}.toml", stem));
-    let srt_path = tmp.path().join(format!("{}.srt", stem));
-
-    assert!(json_path.is_file(), "missing JSON output: {}", json_path.display());
-    assert!(toml_path.is_file(), "missing TOML output: {}", toml_path.display());
-    assert!(srt_path.is_file(), "missing SRT output: {}", srt_path.display());
+    // Find the created files in the chosen output directory without depending on date prefix
+    let entries = fs::read_dir(&base_dir).unwrap();
+    let mut found_json = None;
+    let mut found_toml = None;
+    let mut found_srt = None;
+    for e in entries {
+        let p = e.unwrap().path();
+        if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
+            if name.ends_with("_out.json") { found_json = Some(p.clone()); }
+            if name.ends_with("_out.toml") { found_toml = Some(p.clone()); }
+            if name.ends_with("_out.srt") { found_srt = Some(p.clone()); }
+        }
+    }
+    let json_path = found_json.expect("missing JSON output in temp dir");
+    let toml_path = found_toml.expect("missing TOML output in temp dir");
+    let srt_path = found_srt.expect("missing SRT output in temp dir");
 
     // Parse JSON and perform sanity checks
     let mut json_str = String::new();
