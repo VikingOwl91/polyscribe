@@ -245,6 +245,9 @@ pub mod models;
 /// Progress and progress bar abstraction (TTY-aware, stderr-only)
 pub mod progress;
 
+/// UI helpers for interactive prompts (cliclack-backed)
+pub mod ui;
+
 /// Transcript entry for a single segment.
 #[derive(Debug, serde::Serialize, Clone)]
 pub struct OutputEntry {
@@ -515,11 +518,10 @@ where
                 "No models available and interactive mode is disabled. Please set WHISPER_MODEL or run with --download-models."
             ));
         }
-        printer("Would you like to download models now? [Y/n]:");
-        let mut input = String::new();
-        io::stdin().read_line(&mut input).ok();
-        let ans = input.trim().to_lowercase();
-        if ans.is_empty() || ans == "y" || ans == "yes" {
+        // Use unified cliclack confirm via UI helper
+        let download_now = crate::ui::prompt_confirm("Download models now?", true)
+            .context("prompt error during confirmation")?;
+        if download_now {
             if let Err(e) = models::run_interactive_model_downloader() {
                 elog!("Downloader failed: {:#}", e);
             }
@@ -583,20 +585,19 @@ where
     // Print a blank line and the selection prompt using the provided printer to
     // keep output synchronized with any active progress rendering.
     printer("");
-    printer(&format!("Select model by number [1-{}]:", candidates.len()));
-    let mut input = String::new();
-    io::stdin()
-        .read_line(&mut input)
+    let prompt = format!("Select model [1-{}]:", candidates.len());
+    // TODO(ui): migrate to cliclack::Select for model picking to standardize UI.
+    let sel: usize = dialoguer::Input::new()
+        .with_prompt(prompt)
+        .interact_text()
         .context("Failed to read selection")?;
-    let sel: usize = input
-        .trim()
-        .parse()
-        .map_err(|_| anyhow!("Invalid selection: {}", input.trim()))?;
     if sel == 0 || sel > candidates.len() {
         return Err(anyhow!("Selection out of range"));
     }
     let chosen = candidates.swap_remove(sel - 1);
     let _ = std::fs::write(models_dir.join(".last_model"), chosen.display().to_string());
+    // Print an empty line after selection input
+    printer("");
     Ok(chosen)
 }
 

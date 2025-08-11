@@ -144,38 +144,29 @@ fn prompt_speaker_name_for_path(path: &Path, default_name: &str, enabled: bool, 
         // Explicitly non-interactive: never prompt
         return default_name.to_string();
     }
+
     let display_owned: String = path
         .file_name()
         .and_then(|s| s.to_str())
         .map(|s| s.to_string())
         .unwrap_or_else(|| path.to_string_lossy().to_string());
 
-    // Synchronized prompt above any progress bars
+    // Render prompt above any progress bars
     pm.pause_for_prompt();
-    pm.println_above_bars(&format!(
-        "Enter speaker name for {} [default: {}]:",
-        display_owned, default_name
-    ));
-
-    let mut buf = String::new();
-    let res = io::stdin().read_line(&mut buf);
+    let answer = {
+        let prompt = format!("Enter speaker name for {} [default: {}]", display_owned, default_name);
+        match polyscribe::ui::prompt_text(&prompt, default_name) {
+            Ok(ans) => ans,
+            Err(_) => default_name.to_string(),
+        }
+    };
     pm.resume_after_prompt();
 
-    match res {
-        Ok(_) => {
-            let raw = buf.trim();
-            if raw.is_empty() {
-                return default_name.to_string();
-            }
-            let sanitized = sanitize_speaker_name(raw);
-            if sanitized.is_empty() {
-                default_name.to_string()
-            } else {
-                // Defer echoing of the chosen name; caller will print a permanent line later
-                sanitized
-            }
-        }
-        Err(_) => default_name.to_string(),
+    let sanitized = sanitize_speaker_name(&answer);
+    if sanitized.is_empty() {
+        default_name.to_string()
+    } else {
+        sanitized
     }
 }
 
