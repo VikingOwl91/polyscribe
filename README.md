@@ -46,6 +46,7 @@ Model locations
 
 Most-used CLI flags
 - -o, --output FILE_OR_DIR: Output path base (date prefix added). If omitted, JSON prints to stdout.
+- --out-format <json|toml|srt|all>: Which on-disk format(s) to write; repeatable; default all. Example: --out-format json --out-format srt
 - -m, --merge: Merge all inputs into one output; otherwise one output per input.
 - --merge-and-separate: Write both merged output and separate per-input outputs (requires -o dir).
 - --set-speaker-names: Prompt for a speaker label per input file.

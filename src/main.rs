@@ -41,6 +41,15 @@ enum GpuBackendCli {
     Vulkan,
 }
 
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+#[value(rename_all = "kebab-case")]
+enum OutFormatCli {
+    Json,
+    Toml,
+    Srt,
+    All,
+}
+
 #[derive(Parser, Debug)]
 #[command(
     name = "PolyScribe",
@@ -75,6 +84,10 @@ struct Args {
     /// Output file path base (date prefix will be added); if omitted, writes JSON to stdout
     #[arg(short, long, value_name = "FILE")]
     output: Option<String>,
+
+    /// Which output format(s) to write when writing to files: json|toml|srt|all. Repeatable. Default: all
+    #[arg(long = "out-format", value_enum, value_name = "json|toml|srt|all")]
+    out_format: Vec<OutFormatCli>,
 
     /// Merge all inputs into a single output; if not set, each input is written as a separate output
     #[arg(short = 'm', long = "merge")]
@@ -226,9 +239,27 @@ where
 }
 
 fn run() -> Result<()> {
+    // Compute selected output formats from CLI flags (default: all)
+    fn compute_output_formats(args: &Args) -> OutputFormats {
+        if args.out_format.is_empty() {
+            return OutputFormats::all();
+        }
+        let mut formats = OutputFormats { json: false, toml: false, srt: false };
+        for f in &args.out_format {
+            match f {
+                OutFormatCli::All => return OutputFormats::all(),
+                OutFormatCli::Json => formats.json = true,
+                OutFormatCli::Toml => formats.toml = true,
+                OutFormatCli::Srt => formats.srt = true,
+            }
+        }
+        formats
+    }
     use polyscribe::progress::ProgressFactory;
     // Parse CLI
     let args = Args::parse();
+    // Determine which on-disk output formats to write
+    let selected_formats = compute_output_formats(&args);
 
     // Initialize runtime flags
     polyscribe::set_verbose(args.verbose);
@@ -534,7 +565,7 @@ fn run() -> Result<()> {
             let date = date_prefix();
             let base_name = format!("{date}_{stem}");
             let base_path = out_dir.join(&base_name);
-            write_outputs(&base_path, &out, &OutputFormats::all())?;
+            write_outputs(&base_path, &out, &selected_formats)?;
 
             // Extend merged with per-file entries
             merged_entries.extend(out.items.into_iter());
@@ -569,7 +600,7 @@ fn run() -> Result<()> {
         let date = date_prefix();
         let merged_base = format!("{date}_merged");
         let base_path = out_dir.join(&merged_base);
-        write_outputs(&base_path, &merged_out, &OutputFormats::all())?;
+        write_outputs(&base_path, &merged_out, &selected_formats)?;
 
         // Final concise summary table to stderr (below progress bars)
         if !args.quiet && !summary.is_empty() {
@@ -739,7 +770,7 @@ fn run() -> Result<()> {
             let base_name = format!("{date}_{stem}");
             let dir = parent_opt.unwrap_or(Path::new(""));
             let base_path = dir.join(&base_name);
-            write_outputs(&base_path, &out, &OutputFormats::all())?;
+            write_outputs(&base_path, &out, &selected_formats)?;
         } else {
             let stdout = io::stdout();
             let mut handle = stdout.lock();
@@ -898,7 +929,7 @@ fn run() -> Result<()> {
                 let date = date_prefix();
                 let base_name = format!("{date}_{stem}");
                 let base_path = dir.join(&base_name);
-                write_outputs(&base_path, &out, &OutputFormats::all())?;
+                write_outputs(&base_path, &out, &selected_formats)?;
             } else {
                 // stdout (only single input reaches here)
                 let stdout = io::stdout();
