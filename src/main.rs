@@ -605,16 +605,8 @@ fn run() -> Result<()> {
         // Final concise summary table to stderr (below progress bars)
         if !args.quiet && !summary.is_empty() {
             progress.println_above_bars("Summary:");
-            progress.println_above_bars(&format!("{:<22} {:<18} {:<8} {:<8}", "File", "Speaker", "Status", "Time"));
-            for (file, speaker, ok, dur) in summary {
-                let status = if ok { "OK" } else { "ERR" };
-                progress.println_above_bars(&format!(
-                    "{:<22} {:<18} {:<8} {:<8}",
-                    file,
-                    speaker,
-                    status,
-                    format!("{:.2?}", dur)
-                ));
+            for line in render_summary_lines(&summary) {
+                progress.println_above_bars(&line);
             }
             // One blank line before finishing bars
             progress.println_above_bars("");
@@ -781,16 +773,8 @@ fn run() -> Result<()> {
         // Final concise summary table to stderr (below progress bars)
         if !args.quiet && !summary.is_empty() {
             progress.println_above_bars("Summary:");
-            progress.println_above_bars(&format!("{:<22} {:<18} {:<8} {:<8}", "File", "Speaker", "Status", "Time"));
-            for (file, speaker, ok, dur) in summary {
-                let status = if ok { "OK" } else { "ERR" };
-                progress.println_above_bars(&format!(
-                    "{:<22} {:<18} {:<8} {:<8}",
-                    file,
-                    speaker,
-                    status,
-                    format!("{:.2?}", dur)
-                ));
+            for line in render_summary_lines(&summary) {
+                progress.println_above_bars(&line);
             }
             // One blank line before finishing bars
             progress.println_above_bars("");
@@ -947,16 +931,8 @@ fn run() -> Result<()> {
         // Final concise summary table to stderr (below progress bars)
         if !args.quiet && !summary.is_empty() {
             progress.println_above_bars("Summary:");
-            progress.println_above_bars(&format!("{:<22} {:<18} {:<8} {:<8}", "File", "Speaker", "Status", "Time"));
-            for (file, speaker, ok, dur) in summary {
-                let status = if ok { "OK" } else { "ERR" };
-                progress.println_above_bars(&format!(
-                    "{:<22} {:<18} {:<8} {:<8}",
-                    file,
-                    speaker,
-                    status,
-                    format!("{:.2?}", dur)
-                ));
+            for line in render_summary_lines(&summary) {
+                progress.println_above_bars(&line);
             }
             // One blank line before finishing bars
             progress.println_above_bars("");
@@ -982,6 +958,37 @@ fn main() {
         }
         std::process::exit(1);
     }
+}
+
+fn render_summary_lines(summary: &[(String, String, bool, std::time::Duration)]) -> Vec<String> {
+    let file_max = summary.iter().map(|(f, _, _, _)| f.len()).max().unwrap_or(0);
+    let speaker_max = summary.iter().map(|(_, s, _, _)| s.len()).max().unwrap_or(0);
+    let file_w = std::cmp::max("File".len(), std::cmp::min(40, file_max));
+    let speaker_w = std::cmp::max("Speaker".len(), std::cmp::min(24, speaker_max));
+
+    let mut lines = Vec::with_capacity(summary.len() + 1);
+    lines.push(format!(
+        "{:<file_w$} {:<speaker_w$} {:<8} {:<8}",
+        "File",
+        "Speaker",
+        "Status",
+        "Time",
+        file_w = file_w,
+        speaker_w = speaker_w
+    ));
+    for (file, speaker, ok, dur) in summary.iter() {
+        let status = if *ok { "OK" } else { "ERR" };
+        lines.push(format!(
+            "{:<file_w$} {:<speaker_w$} {:<8} {:<8}",
+            file,
+            speaker,
+            status,
+            format!("{:.2?}", dur),
+            file_w = file_w,
+            speaker_w = speaker_w
+        ));
+    }
+    lines
 }
 
 #[cfg(test)]
@@ -1045,6 +1052,40 @@ mod tests {
         let srt = render_srt(&items);
         let expected = "1\n00:00:00,000 --> 00:00:01,000\nAlice: Hello\n\n2\n00:00:01,000 --> 00:00:02,000\nWorld\n\n";
         assert_eq!(srt, expected);
+    }
+
+    #[test]
+    fn test_render_summary_lines_dynamic_widths() {
+        use std::time::Duration;
+        let rows = vec![
+            ("short.json".to_string(), "Al".to_string(), true, Duration::from_secs_f32(1.23)),
+            ("much_longer_filename_than_usual_but_capped_at_40_chars.ext".to_string(), "VeryLongSpeakerNameThatShouldBeCapped".to_string(), false, Duration::from_secs_f32(12.0)),
+        ];
+        let lines = super::render_summary_lines(&rows);
+        // Compute expected widths: file max len= len of long name -> capped at 40; speaker max len capped at 24.
+        // Header should match those widths exactly.
+        assert_eq!(lines[0], format!(
+            "{:<40} {:<24} {:<8} {:<8}",
+            "File", "Speaker", "Status", "Time"
+        ));
+        // Row 0
+        assert_eq!(lines[1], format!(
+            "{:<40} {:<24} {:<8} {:<8}",
+            "short.json",
+            "Al",
+            "OK",
+            format!("{:.2?}", Duration::from_secs_f32(1.23))
+        ));
+        // Row 1: file truncated? We do not truncate, only cap padding width; content longer than width will expand naturally.
+        // So we expect the full file name to print (Rust doesn't truncate with smaller width), aligning speaker/status/time after a space.
+        assert_eq!(lines[2], format!(
+            "{} {} {:<8} {:<8}",
+            "much_longer_filename_than_usual_but_capped_at_40_chars.ext",
+            // one space separates columns when content exceeds the padding width
+            format!("{:<24}", "VeryLongSpeakerNameThatShouldBeCapped"),
+            "ERR",
+            format!("{:.2?}", Duration::from_secs_f32(12.0))
+        ));
     }
 
     #[test]
