@@ -57,6 +57,7 @@ Most-used CLI flags
 - -v/--verbose (repeatable): Increase log verbosity. -vv shows very detailed logs.
 - -q/--quiet: Suppress non-error logs (stderr); does not silence stdout results.
 - --no-interaction: Never prompt; suitable for CI.
+- --no-progress: Disable progress bars (also honors NO_PROGRESS=1). Progress bars render on stderr only and auto-disable when not a TTY.
 
 Minimal usage examples
 - Transcribe an audio file to JSON/SRT:

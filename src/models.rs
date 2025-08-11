@@ -746,7 +746,9 @@ fn qlog_size_comparison(fname: &str, local: u64, remote: u64) -> bool {
     } else {
         qlog!(
             "{} size {} differs from remote {}. Updating...",
-            fname, local, remote
+            fname,
+            local,
+            remote
         );
         false
     }

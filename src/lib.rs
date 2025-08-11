@@ -230,7 +230,8 @@ use anyhow::{Context, Result, anyhow};
 use chrono::Local;
 use std::env;
 use std::fs::create_dir_all;
-use std::io::{self, Write};
+use std::io;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -241,6 +242,8 @@ use libc::{O_WRONLY, close, dup, dup2, open};
 pub mod backend;
 /// Re-export models module (model listing/downloading/updating).
 pub mod models;
+/// Progress and progress bar abstraction (TTY-aware, stderr-only)
+pub mod progress;
 
 /// Transcript entry for a single segment.
 #[derive(Debug, serde::Serialize, Clone)]
@@ -396,6 +399,56 @@ pub fn normalize_lang_code(input: &str) -> Option<String> {
 
 /// Locate a Whisper model file, prompting user to download/select when necessary.
 pub fn find_model_file() -> Result<PathBuf> {
+    // Silent model resolution used during processing to avoid interfering with progress bars.
+    // Preflight prompting should be done by the caller before bars are created (use find_model_file_with_printer).
+    let models_dir_buf = models_dir_path();
+    let models_dir = models_dir_buf.as_path();
+    if !models_dir.exists() {
+        create_dir_all(models_dir).with_context(|| {
+            format!(
+                "Failed to create models directory: {}",
+                models_dir.display()
+            )
+        })?;
+    }
+    // 1) Explicit environment override
+    if let Ok(env_model) = env::var("WHISPER_MODEL") {
+        let p = PathBuf::from(env_model);
+        if p.is_file() {
+            let _ = std::fs::write(models_dir.join(".last_model"), p.display().to_string());
+            return Ok(p);
+        }
+    }
+    // 2) Previously selected model
+    let last_file = models_dir.join(".last_model");
+    if let Ok(prev) = std::fs::read_to_string(&last_file) {
+        let prev = prev.trim();
+        if !prev.is_empty() {
+            let p = PathBuf::from(prev);
+            if p.is_file() {
+                return Ok(p);
+            }
+        }
+    }
+    // 3) Best local model without prompting
+    if let Some(local) = crate::models::pick_best_local_model(models_dir) {
+        let _ = std::fs::write(models_dir.join(".last_model"), local.display().to_string());
+        return Ok(local);
+    }
+    // 4) No model available; avoid interactive prompts here to prevent progress bar redraw issues.
+    //    Callers should run find_model_file_with_printer(...) before starting progress bars to interactively select/download.
+    Err(anyhow!(
+        "No Whisper model available. Run with --download-models or ensure WHISPER_MODEL is set before processing."
+    ))
+}
+
+/// Locate a Whisper model file, prompting user to download/select when necessary.
+/// All prompts are printed using the provided printer closure (e.g., MultiProgress::println)
+/// to avoid interfering with active progress bars.
+pub fn find_model_file_with_printer<F>(printer: F) -> Result<PathBuf>
+where
+    F: Fn(&str),
+{
     let models_dir_buf = models_dir_path();
     let models_dir = models_dir_buf.as_path();
     if !models_dir.exists() {
@@ -462,8 +515,7 @@ pub fn find_model_file() -> Result<PathBuf> {
                 "No models available and interactive mode is disabled. Please set WHISPER_MODEL or run with --download-models."
             ));
         }
-        eprint!("Would you like to download models now? [Y/n]: ");
-        io::stderr().flush().ok();
+        printer("Would you like to download models now? [Y/n]:");
         let mut input = String::new();
         io::stdin().read_line(&mut input).ok();
         let ans = input.trim().to_lowercase();
@@ -519,12 +571,19 @@ pub fn find_model_file() -> Result<PathBuf> {
         }
     }
 
-    eprintln!("Multiple Whisper models found in {}:", models_dir.display());
+    printer(&"Multiple Whisper models found:".to_string());
     for (i, p) in candidates.iter().enumerate() {
-        eprintln!("  {}) {}", i + 1, p.display());
+        let name = p
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| p.display().to_string());
+        printer(&format!("  {}) {}", i + 1, name));
     }
-    eprint!("Select model by number [1-{}]: ", candidates.len());
-    io::stderr().flush().ok();
+    // Print a blank line and the selection prompt using the provided printer to
+    // keep output synchronized with any active progress rendering.
+    printer("");
+    printer(&format!("Select model by number [1-{}]:", candidates.len()));
     let mut input = String::new();
     io::stdin()
         .read_line(&mut input)
@@ -557,16 +616,16 @@ pub fn decode_audio_to_pcm_f32_ffmpeg(audio_path: &Path) -> Result<Vec<f32>> {
     {
         Ok(o) => o,
         Err(e) => {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                return Err(anyhow!(
+            return if e.kind() == std::io::ErrorKind::NotFound {
+                Err(anyhow!(
                     "ffmpeg not found on PATH. Please install ffmpeg and ensure it is available."
-                ));
+                ))
             } else {
-                return Err(anyhow!(
+                Err(anyhow!(
                     "Failed to execute ffmpeg for {}: {}",
                     audio_path.display(),
                     e
-                ));
+                ))
             }
         }
     };
