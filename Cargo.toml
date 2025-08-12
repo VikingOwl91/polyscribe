@@ -33,6 +33,7 @@ whisper-rs = { git = "https://github.com/tazz4843/whisper-rs", default-features 
 libc = "0.2"
 indicatif = "0.17"
 ctrlc = "3.4"
+dialoguer = "0.11"
 cliclack = "0.3"
 
 [dev-dependencies]

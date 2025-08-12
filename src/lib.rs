@@ -615,21 +615,27 @@ where
     }
 
     printer(&"Multiple Whisper models found:".to_string());
-    let mut display_names: Vec<String> = Vec::with_capacity(candidates.len());
     for (i, p) in candidates.iter().enumerate() {
         let name = p
             .file_name()
             .and_then(|s| s.to_str())
             .map(|s| s.to_string())
             .unwrap_or_else(|| p.display().to_string());
-        display_names.push(name.clone());
         printer(&format!("  {}) {}", i + 1, name));
     }
-    // Print a blank line before the selection prompt to keep output synchronized.
+    // Print a blank line and the selection prompt using the provided printer to
+    // keep output synchronized with any active progress rendering.
     printer("");
-    let idx = crate::ui::prompt_select_index("Select a Whisper model", &display_names)
+    let prompt = format!("Select model [1-{}]:", candidates.len());
+    // UI: using dialoguer::Input for selection for now; migration to cliclack::Select may be considered later for consistency.
+    let sel: usize = dialoguer::Input::new()
+        .with_prompt(prompt)
+        .interact_text()
         .context("Failed to read selection")?;
-    let chosen = candidates.swap_remove(idx);
+    if sel == 0 || sel > candidates.len() {
+        return Err(anyhow!("Selection out of range"));
+    }
+    let chosen = candidates.swap_remove(sel - 1);
     let _ = std::fs::write(models_dir.join(".last_model"), chosen.display().to_string());
     // Print an empty line after selection input
     printer("");
