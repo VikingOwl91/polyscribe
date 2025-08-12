@@ -1135,6 +1135,7 @@ mod tests {
 
     #[test]
     fn test_format_model_list_spacing_and_structure() {
+        use std::env as std_env;
         let models = vec![
             ModelEntry {
                 name: "tiny.en-q5_1".to_string(),
@@ -1373,6 +1374,22 @@ mod tests {
         } else {
             panic!("progress manager did not expose current state");
         }
+    }
+
+    #[test]
+    fn test_no_interaction_models_downloader_skips_prompts() {
+        // Force non-interactive; verify that no UI prompt functions are invoked
+        unsafe { std::env::set_var("NO_INTERACTION", "1"); }
+        crate::set_no_interaction(true);
+        crate::ui::testing_reset_prompt_call_counters();
+        let models = vec![
+            ModelEntry { name: "tiny.en-q5_1".to_string(), base: "tiny".to_string(), subtype: "en-q5_1".to_string(), size: 1024, sha256: None, repo: "ggerganov/whisper.cpp".to_string() },
+            ModelEntry { name: "tiny-q5_1".to_string(), base: "tiny".to_string(), subtype: "q5_1".to_string(), size: 2048, sha256: None, repo: "ggerganov/whisper.cpp".to_string() },
+        ];
+        let picked = super::prompt_select_models_two_stage(&models).unwrap();
+        assert!(picked.is_empty(), "non-interactive should not select any models by default");
+        assert_eq!(crate::ui::testing_prompt_call_count(), 0, "no prompt functions should be called in non-interactive mode");
+        unsafe { std::env::remove_var("NO_INTERACTION"); }
     }
 
     #[test]
