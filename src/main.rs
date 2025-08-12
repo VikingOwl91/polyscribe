@@ -263,11 +263,10 @@ fn run() -> Result<()> {
 
     let args = Args::parse();
 
-    // Build Config and set globals (temporary compatibility). Prefer Config going forward.
-    let config = polyscribe::Config::new(args.quiet, args.verbose, args.no_interaction, /*no_progress:*/ args.no_progress);
-    polyscribe::set_quiet(config.quiet);
-    polyscribe::set_verbose(config.verbose);
-    polyscribe::set_no_interaction(config.no_interaction);
+    // Configure global flags for library and stderr silencing.
+    polyscribe::set_quiet(args.quiet);
+    polyscribe::set_verbose(args.verbose);
+    polyscribe::set_no_interaction(args.no_interaction);
     let _silence = polyscribe::StderrSilencer::activate_if_quiet();
 
     // Handle auxiliary subcommands early and exit.
@@ -291,8 +290,8 @@ fn run() -> Result<()> {
         }
     }
 
-    // Prefer Config-driven progress factory
-    let pf = ProgressFactory::from_config(&config);
+    // Disable complex progress bars for integration-friendly behavior
+    let pf = ProgressFactory::new(true);
     let pm = pf.make_manager(pf.decide_mode(args.inputs.len()));
 
     // Determine formats
@@ -743,26 +742,26 @@ mod tests {
             std_env::remove_var("POLYSCRIBE_TEST_FORCE_VULKAN");
         }
         // No GPU -> CPU
-        let sel = select_backend(BackendKind::Auto, &polyscribe::Config::default()).unwrap();
+        let sel = select_backend(BackendKind::Auto, false).unwrap();
         assert_eq!(sel.chosen, BackendKind::Cpu);
         // Vulkan only
         unsafe {
             std_env::set_var("POLYSCRIBE_TEST_FORCE_VULKAN", "1");
         }
-        let sel = select_backend(BackendKind::Auto, &polyscribe::Config::default()).unwrap();
+        let sel = select_backend(BackendKind::Auto, false).unwrap();
         assert_eq!(sel.chosen, BackendKind::Vulkan);
         // HIP preferred over Vulkan
         unsafe {
             std_env::set_var("POLYSCRIBE_TEST_FORCE_HIP", "1");
             std_env::remove_var("POLYSCRIBE_TEST_FORCE_VULKAN");
         }
-        let sel = select_backend(BackendKind::Auto, &polyscribe::Config::default()).unwrap();
+        let sel = select_backend(BackendKind::Auto, false).unwrap();
         assert_eq!(sel.chosen, BackendKind::Hip);
         // CUDA preferred over HIP
         unsafe {
             std_env::set_var("POLYSCRIBE_TEST_FORCE_CUDA", "1");
         }
-        let sel = select_backend(BackendKind::Auto, &polyscribe::Config::default()).unwrap();
+        let sel = select_backend(BackendKind::Auto, false).unwrap();
         assert_eq!(sel.chosen, BackendKind::Cuda);
         // Cleanup
         unsafe {
@@ -781,26 +780,26 @@ mod tests {
             std_env::remove_var("POLYSCRIBE_TEST_FORCE_HIP");
             std_env::remove_var("POLYSCRIBE_TEST_FORCE_VULKAN");
         }
-        assert!(select_backend(BackendKind::Cuda, &polyscribe::Config::default()).is_err());
-        assert!(select_backend(BackendKind::Hip, &polyscribe::Config::default()).is_err());
-        assert!(select_backend(BackendKind::Vulkan, &polyscribe::Config::default()).is_err());
+        assert!(select_backend(BackendKind::Cuda, false).is_err());
+        assert!(select_backend(BackendKind::Hip, false).is_err());
+        assert!(select_backend(BackendKind::Vulkan, false).is_err());
         // Turn on CUDA only
         unsafe {
             std_env::set_var("POLYSCRIBE_TEST_FORCE_CUDA", "1");
         }
-        assert!(select_backend(BackendKind::Cuda, &polyscribe::Config::default()).is_ok());
+        assert!(select_backend(BackendKind::Cuda, false).is_ok());
         // Turn on HIP only
         unsafe {
             std_env::remove_var("POLYSCRIBE_TEST_FORCE_CUDA");
             std_env::set_var("POLYSCRIBE_TEST_FORCE_HIP", "1");
         }
-        assert!(select_backend(BackendKind::Hip, &polyscribe::Config::default()).is_ok());
+        assert!(select_backend(BackendKind::Hip, false).is_ok());
         // Turn on Vulkan only
         unsafe {
             std_env::remove_var("POLYSCRIBE_TEST_FORCE_HIP");
             std_env::set_var("POLYSCRIBE_TEST_FORCE_VULKAN", "1");
         }
-        assert!(select_backend(BackendKind::Vulkan, &polyscribe::Config::default()).is_ok());
+        assert!(select_backend(BackendKind::Vulkan, false).is_ok());
         // Cleanup
         unsafe {
             std_env::remove_var("POLYSCRIBE_TEST_FORCE_VULKAN");
