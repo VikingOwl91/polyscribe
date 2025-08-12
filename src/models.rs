@@ -393,62 +393,130 @@ fn format_model_list(models: &[ModelEntry]) -> String {
 }
 
 fn prompt_select_models_two_stage(models: &[ModelEntry]) -> Result<Vec<ModelEntry>> {
-    // Non-interactive safeguard: return empty (caller will handle as cancel/skip)
     if crate::is_no_interaction() || !crate::stdin_is_tty() {
+        // Non-interactive: do not prompt, return empty selection to skip
         return Ok(Vec::new());
     }
-
-    if models.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    // Stage 1: pick a base family; preserve order from input list
+    // 1) Choose base (tiny, small, medium, etc.)
     let mut bases: Vec<String> = Vec::new();
-    let mut seen = std::collections::BTreeSet::new();
+    let mut last = String::new();
     for m in models.iter() {
-        if !seen.contains(&m.base) {
-            seen.insert(m.base.clone());
-            bases.push(m.base.clone());
-        }
-    }
-
-    let base = if bases.len() == 1 {
-        bases[0].clone()
-    } else {
-        crate::ui::prompt_select_one("Select model family/base:", &bases)?
-    };
-
-    // Stage 2: within base, present variants
-    let mut variants: Vec<&ModelEntry> = models.iter().filter(|m| m.base == base).collect();
-    variants.sort_by_key(|m| (m.size, m.subtype.clone(), m.name.clone()));
-
-    let labels: Vec<String> = variants
-        .iter()
-        .map(|m| {
-            let size_h = human_size(m.size);
-            if let Some(sha) = &m.sha256 {
-                format!("{} ({}, {}, sha: {}…)", m.name, m.subtype, size_h, &sha[..std::cmp::min(8, sha.len())])
-            } else {
-                format!("{} ({}, {})", m.name, m.subtype, size_h)
+        if m.base != last {
+            // models are sorted by base; avoid duplicates while preserving order
+            if !bases.last().map(|b| b == &m.base).unwrap_or(false) {
+                bases.push(m.base.clone());
             }
-        })
-        .collect();
-
-    let selected_labels = crate::ui::prompt_multiselect(
-        "Select one or more variants to download:",
-        &labels,
-        &[],
-    )?;
-
-    // Map labels back to entries in stable order
-    let mut picked: Vec<ModelEntry> = Vec::new();
-    for (i, label) in labels.iter().enumerate() {
-        if selected_labels.iter().any(|s| s == label) {
-            picked.push(variants[i].clone().clone());
+            last = m.base.clone();
         }
     }
+    if bases.is_empty() {
+        return Ok(Vec::new());
+    }
 
-    Ok(picked)
+    // Print base selection on stderr
+    eprintln!("Available base model families:");
+    for (i, b) in bases.iter().enumerate() {
+        eprintln!("  {}) {}", i + 1, b);
+    }
+    loop {
+        eprint!("Select base (number or name, 'q' to cancel): ");
+        io::stderr().flush().ok();
+        let mut line = String::new();
+        io::stdin()
+            .read_line(&mut line)
+            .context("Failed to read base selection")?;
+        let s = line.trim();
+        if s.eq_ignore_ascii_case("q")
+            || s.eq_ignore_ascii_case("quit")
+            || s.eq_ignore_ascii_case("exit")
+        {
+            return Ok(Vec::new());
+        }
+        let chosen_base = if let Ok(i) = s.parse::<usize>() {
+            if i >= 1 && i <= bases.len() {
+                Some(bases[i - 1].clone())
+            } else {
+                None
+            }
+        } else if !s.is_empty() {
+            // accept exact name match (case-insensitive)
+            bases.iter().find(|b| b.eq_ignore_ascii_case(s)).cloned()
+        } else {
+            None
+        };
+
+        if let Some(base) = chosen_base {
+            // 2) Choose sub-type(s) within that base
+            let filtered: Vec<ModelEntry> =
+                models.iter().filter(|m| m.base == base).cloned().collect();
+            if filtered.is_empty() {
+                eprintln!("No models found for base '{base}'.");
+                continue;
+            }
+            // Reuse the formatter but only for the chosen base list
+            let listing = format_model_list(&filtered);
+            eprint!("{listing}");
+
+            // Build index map for filtered list
+            let mut index_map: Vec<usize> = Vec::with_capacity(filtered.len());
+            let mut idx = 1usize;
+            for (pos, _m) in filtered.iter().enumerate() {
+                index_map.push(pos);
+                idx += 1;
+            }
+            // Second prompt: sub-type selection
+            loop {
+                eprint!("Selection: ");
+                io::stderr().flush().ok();
+                let mut line2 = String::new();
+                io::stdin()
+                    .read_line(&mut line2)
+                    .context("Failed to read selection")?;
+                let s2 = line2.trim().to_lowercase();
+                if s2 == "q" || s2 == "quit" || s2 == "exit" {
+                    return Ok(Vec::new());
+                }
+                let mut selected: Vec<usize> = Vec::new();
+                if s2 == "all" || s2 == "*" {
+                    selected = (1..idx).collect();
+                } else if !s2.is_empty() {
+                    for part in s2.split([',', ' ', ';']) {
+                        let part = part.trim();
+                        if part.is_empty() {
+                            continue;
+                        }
+                        if let Some((a, b)) = part.split_once('-') {
+                            if let (Ok(ia), Ok(ib)) = (a.parse::<usize>(), b.parse::<usize>()) {
+                                if ia >= 1 && ib < idx && ia <= ib {
+                                    selected.extend(ia..=ib);
+                                }
+                            }
+                        } else if let Ok(i) = part.parse::<usize>() {
+                            if i >= 1 && i < idx {
+                                selected.push(i);
+                            }
+                        }
+                    }
+                }
+                selected.sort_unstable();
+                selected.dedup();
+                if selected.is_empty() {
+                    eprintln!("No valid selection. Please try again or 'q' to cancel.");
+                    continue;
+                }
+                let chosen: Vec<ModelEntry> = selected
+                    .into_iter()
+                    .map(|i| filtered[index_map[i - 1]].clone())
+                    .collect();
+                return Ok(chosen);
+            }
+        } else {
+            eprintln!(
+                "Invalid base selection. Please enter a number from 1-{} or a base name.",
+                bases.len()
+            );
+        }
+    }
 }
 
 fn compute_file_sha256_hex(path: &Path) -> Result<String> {

@@ -124,8 +124,6 @@ enum ProgressInner {
 
 #[derive(Debug)]
 struct SingleBars {
-    header: ProgressBar,
-    info: ProgressBar,
     current: ProgressBar,
     // keep MultiProgress alive for suspend/println behavior
     _mp: Arc<MultiProgress>,
@@ -133,14 +131,10 @@ struct SingleBars {
 
 #[derive(Debug)]
 struct MultiBars {
-    // Header row shown above bars
-    header: ProgressBar,
-    // Single info/status row shown under header and above bars
-    info: ProgressBar,
-    // Bars: current file and total
-    current: ProgressBar,
+    // Legacy bars for compatibility (used when not using per-file init)
     total: ProgressBar,
-    // Optional per-file bars and aggregated total percent bar (unused in new UX)
+    current: ProgressBar,
+    // Optional per-file bars and aggregated total percent bar
     files: Mutex<Option<Vec<ProgressBar>>>, // each length 100
     total_pct: Mutex<Option<ProgressBar>>,   // length 100
     // Metadata for aggregation
@@ -212,34 +206,24 @@ impl ProgressManager {
     }
 
     fn with_single(mp: Arc<MultiProgress>) -> Self {
-        // Order: header, info row, then current file bar
-        let header = mp.add(ProgressBar::new(0));
-        header.set_style(info_style());
-        let info = mp.add(ProgressBar::new(0));
-        info.set_style(info_style());
         let current = mp.add(ProgressBar::new(100));
-        current.set_style(current_style());
+        current.set_style(spinner_style());
         Self {
-            inner: ProgressInner::Single(Arc::new(SingleBars { header, info, current, _mp: mp })),
+            inner: ProgressInner::Single(Arc::new(SingleBars { current, _mp: mp })),
         }
     }
 
     fn with_multi(mp: Arc<MultiProgress>, total_inputs: u64) -> Self {
-        // Order: header, info row, then current file bar, then total bar at the bottom
-        let header = mp.add(ProgressBar::new(0));
-        header.set_style(info_style());
-        let info = mp.add(ProgressBar::new(0));
-        info.set_style(info_style());
+        // Add current first, then total so that total stays anchored at the bottom line
         let current = mp.add(ProgressBar::new(100));
-        current.set_style(current_style());
+        current.set_style(spinner_style());
         let total = mp.add(ProgressBar::new(total_inputs));
         total.set_style(total_style());
+        total.set_message("total");
         Self {
             inner: ProgressInner::Multi(Arc::new(MultiBars {
-                header,
-                info,
-                current,
                 total,
+                current,
                 files: Mutex::new(None),
                 total_pct: Mutex::new(None),
                 sizes: Mutex::new(None),
@@ -446,19 +430,15 @@ impl ProgressManager {
     }
 }
 
-fn current_style() -> ProgressStyle {
-    // Per-item determinate progress: show 0..100 as pos/len with a simple bar
-    ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] {pos}/{len} {bar:40.cyan/blue} {msg}")
-        .expect("invalid progress template in current_style()")
-}
-
-fn info_style() -> ProgressStyle {
-    ProgressStyle::with_template("{msg}").unwrap()
+fn spinner_style() -> ProgressStyle {
+    // Style for per-item determinate progress: 0-100% with a compact bar and message
+    ProgressStyle::with_template("{bar:24.green/green} {percent:>3}% {msg}")
+        .unwrap()
 }
 
 fn total_style() -> ProgressStyle {
-    // Bottom total bar with elapsed time
-    ProgressStyle::with_template("Total [{bar:28=> }]  {pos}/{len} [{elapsed_precise}]").unwrap()
+    // Persistent bottom bar showing total completed/total inputs
+    ProgressStyle::with_template("{bar:40.cyan/blue} {pos}/{len} {msg}").unwrap()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -535,7 +515,7 @@ impl ProgressManager {
             for (label_in, size_opt) in labels_and_sizes {
                 let label: String = label_in.into();
                 let pb = m._mp.add(ProgressBar::new(100));
-                pb.set_style(current_style());
+                pb.set_style(spinner_style());
                 let short = truncate_label(&label, NAME_WIDTH);
                 pb.set_message(format!("{:<width$}", short, width = NAME_WIDTH));
                 files.push(pb);
