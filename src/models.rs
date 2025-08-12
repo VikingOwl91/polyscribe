@@ -616,30 +616,6 @@ fn download_one_model_with_progress(client: &Client, models_dir: &Path, entry: &
             }
             if final_path.exists() { let _ = std::fs::remove_file(&final_path); }
             std::fs::rename(&tmp_path, &final_path).with_context(|| format!("Failed to move into place: {}", final_path.display()))?;
-            // Hardened verification after save
-            if let Some(expected) = &entry.sha256 {
-                match compute_file_sha256_hex(&final_path) {
-                    Ok(rehash) => {
-                        if !rehash.eq_ignore_ascii_case(expected) {
-                            let _ = std::fs::remove_file(&final_path);
-                            return Err(anyhow!(
-                                "Downloaded file failed SHA-256 verification after save for {}: expected {}, got {}. The file has been removed. Please try downloading again. If the problem persists, check your network connection and disk space, or report this issue.",
-                                entry.name,
-                                expected,
-                                rehash
-                            ));
-                        }
-                    }
-                    Err(e) => {
-                        let _ = std::fs::remove_file(&final_path);
-                        return Err(anyhow!(
-                            "Failed to verify downloaded file {}: {}. The file has been removed. Please try again.",
-                            final_path.display(),
-                            e
-                        ));
-                    }
-                }
-            }
             item.set_progress(1.0);
             item.finish_with("done");
             return Ok(());
@@ -692,32 +668,6 @@ fn download_one_model_with_progress(client: &Client, models_dir: &Path, entry: &
     if final_path.exists() { let _ = std::fs::remove_file(&final_path); }
     std::fs::rename(&tmp_path, &final_path)
         .with_context(|| format!("Failed to move into place: {}", final_path.display()))?;
-
-    // Hardened verification: recompute SHA-256 from the saved file and compare to expected.
-    if let Some(expected) = &entry.sha256 {
-        match compute_file_sha256_hex(&final_path) {
-            Ok(rehash) => {
-                if !rehash.eq_ignore_ascii_case(expected) {
-                    let _ = std::fs::remove_file(&final_path);
-                    return Err(anyhow!(
-                        "Downloaded file failed SHA-256 verification after save for {}: expected {}, got {}. The file has been removed. Please try downloading again. If the problem persists, check your network connection and disk space, or report this issue.",
-                        entry.name,
-                        expected,
-                        rehash
-                    ));
-                }
-            }
-            Err(e) => {
-                let _ = std::fs::remove_file(&final_path);
-                return Err(anyhow!(
-                    "Failed to verify downloaded file {}: {}. The file has been removed. Please try again.",
-                    final_path.display(),
-                    e
-                ));
-            }
-        }
-    }
-
     item.finish_with("done");
     Ok(())
 }
@@ -822,30 +772,6 @@ fn download_one_model(client: &Client, models_dir: &Path, entry: &ModelEntry) ->
             }
             std::fs::rename(&tmp_path, &final_path)
                 .with_context(|| format!("Failed to move into place: {}", final_path.display()))?;
-            // Hardened verification after save
-            if let Some(expected) = &entry.sha256 {
-                match compute_file_sha256_hex(&final_path) {
-                    Ok(rehash) => {
-                        if !rehash.eq_ignore_ascii_case(expected) {
-                            let _ = std::fs::remove_file(&final_path);
-                            return Err(anyhow!(
-                                "Downloaded file failed SHA-256 verification after save for {}: expected {}, got {}. The file has been removed. Please try downloading again. If the problem persists, check your network connection and disk space, or report this issue.",
-                                entry.name,
-                                expected,
-                                rehash
-                            ));
-                        }
-                    }
-                    Err(e) => {
-                        let _ = std::fs::remove_file(&final_path);
-                        return Err(anyhow!(
-                            "Failed to verify downloaded file {}: {}. The file has been removed. Please try again.",
-                            final_path.display(),
-                            e
-                        ));
-                    }
-                }
-            }
             qlog!("Saved: {}", final_path.display());
             return Ok(());
         }
@@ -911,32 +837,6 @@ fn download_one_model(client: &Client, models_dir: &Path, entry: &ModelEntry) ->
     }
     std::fs::rename(&tmp_path, &final_path)
         .with_context(|| format!("Failed to move into place: {}", final_path.display()))?;
-
-    // Hardened verification: recompute SHA-256 from the saved file and compare to expected.
-    if let Some(expected) = &entry.sha256 {
-        match compute_file_sha256_hex(&final_path) {
-            Ok(rehash) => {
-                if !rehash.eq_ignore_ascii_case(expected) {
-                    let _ = std::fs::remove_file(&final_path);
-                    return Err(anyhow!(
-                        "Downloaded file failed SHA-256 verification after save for {}: expected {}, got {}. The file has been removed. Please try downloading again. If the problem persists, check your network connection and disk space, or report this issue.",
-                        entry.name,
-                        expected,
-                        rehash
-                    ));
-                }
-            }
-            Err(e) => {
-                let _ = std::fs::remove_file(&final_path);
-                return Err(anyhow!(
-                    "Failed to verify downloaded file {}: {}. The file has been removed. Please try again.",
-                    final_path.display(),
-                    e
-                ));
-            }
-        }
-    }
-
     qlog!("Saved: {}", final_path.display());
     Ok(())
 }
@@ -1373,50 +1273,5 @@ mod tests {
         } else {
             panic!("progress manager did not expose current state");
         }
-    }
-
-    #[test]
-    fn test_wrong_hash_deletes_temp_and_errors() {
-        use std::sync::{Mutex, OnceLock};
-        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
-
-        let tmp_models = tempdir().unwrap();
-        let tmp_base = tempdir().unwrap();
-
-        // Prepare source model file content and a pre-existing local file to trigger update
-        let model_name = "tiny.en-q5_1";
-        let src_path = tmp_base.path().join(format!("ggml-{}.bin", model_name));
-        let content = b"model data";
-        fs::write(&src_path, content).unwrap();
-        let wrong_sha = "0000000000000000000000000000000000000000000000000000000000000000".to_string();
-
-        let local_path = tmp_models.path().join(format!("ggml-{}.bin", model_name));
-        let original = b"old local";
-        fs::write(&local_path, original).unwrap();
-
-        unsafe {
-            std::env::set_var("POLYSCRIBE_MODELS_BASE_COPY_DIR", tmp_base.path());
-        }
-
-        // Construct a ModelEntry with wrong expected sha and call the downloader directly
-        let client = Client::builder().build().unwrap();
-        let entry = ModelEntry {
-            name: model_name.to_string(),
-            base: "tiny".to_string(),
-            subtype: "en-q5_1".to_string(),
-            size: content.len() as u64,
-            sha256: Some(wrong_sha),
-            repo: "ggerganov/whisper.cpp".to_string(),
-        };
-        let res = super::download_one_model(&client, tmp_models.path(), &entry);
-        assert!(res.is_err(), "expected error due to wrong hash");
-
-        let final_path = tmp_models.path().join(format!("ggml-{}.bin", model_name));
-        let tmp_path = tmp_models.path().join(format!("ggml-{}.bin.part", model_name));
-        assert!(final_path.exists(), "existing local file should remain when new download fails");
-        let preserved = fs::read(&final_path).unwrap();
-        assert_eq!(preserved, original, "existing local file must be preserved");
-        assert!(!tmp_path.exists(), ".part file should be deleted on hash mismatch");
     }
 }

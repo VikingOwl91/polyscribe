@@ -313,11 +313,6 @@ fn run() -> Result<()> {
     // Route subsequent INFO/WARN/DEBUG logs through the cliclack/indicatif area
     polyscribe::progress::set_global_progress_manager(&pm);
 
-    // Show a friendly intro banner (TTY-aware via cliclack). Ignore errors.
-    if !polyscribe::is_quiet() {
-        let _ = cliclack::intro("PolyScribe");
-    }
-
     // Determine formats
     let out_formats = if args.out_format.is_empty() {
         OutputFormats::all()
@@ -490,15 +485,6 @@ fn run() -> Result<()> {
         for (_, _, ok, _) in &summary { if !ok { polyscribe::elog!("ERR"); } }
         polyscribe::ilog!("");
         if had_error { polyscribe::elog!("One or more inputs failed"); }
-    }
-
-    // Outro banner summarizing result; ignore errors.
-    if !polyscribe::is_quiet() {
-        if had_error {
-            let _ = cliclack::outro("Completed with errors. Some inputs failed.");
-        } else {
-            let _ = cliclack::outro("All done. Outputs written.");
-        }
     }
 
     if had_error { std::process::exit(2); }

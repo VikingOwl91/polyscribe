@@ -359,58 +359,13 @@ impl ProgressManager {
 
     /// Print a line above the bars safely (TTY-aware). Falls back to eprintln! when disabled.
     pub fn println_above_bars(&self, line: &str) {
-        // Try to interpret certain INFO lines as a stable title + dynamic message.
-        // Examples to match:
-        //  - "INFO: Fetching online data: listing models from ggerganov/whisper.cpp..."
-        //     -> header = "INFO: Fetching online data"; info = "listing models from ..."
-        //  - "INFO: Downloading tiny.en-q5_1 (252 MiB | https://...)..."
-        //     -> header = "INFO: Downloading"; info = rest
-        //  - "INFO: Total 1/3" (defensive): header = "INFO: Total"; info = rest
-        let parsed: Option<(String, String)> = {
-            let s = line.trim();
-            if let Some(rest) = s.strip_prefix("INFO: ") {
-                // Case A: explicit title followed by colon
-                if let Some((title, body)) = rest.split_once(':') {
-                    let title_clean = format!("INFO: {}", title.trim());
-                    let body_clean = body.trim().to_string();
-                    Some((title_clean, body_clean))
-                } else if let Some(rest2) = rest.strip_prefix("Downloading ") {
-                    Some(("INFO: Downloading".to_string(), rest2.trim().to_string()))
-                } else if let Some(rest2) = rest.strip_prefix("Total") {
-                    Some(("INFO: Total".to_string(), rest2.trim().to_string()))
-                } else {
-                    // Fallback: use first word as title, remainder as body
-                    let mut it = rest.splitn(2, ' ');
-                    let first = it.next().unwrap_or("").trim();
-                    let remainder = it.next().unwrap_or("").trim();
-                    if !first.is_empty() {
-                        Some((format!("INFO: {}", first), remainder.to_string()))
-                    } else {
-                        None
-                    }
-                }
-            } else {
-                None
-            }
-        };
-
         match &self.inner {
             ProgressInner::Noop => eprintln!("{}", line),
             ProgressInner::Single(s) => {
-                if let Some((title, body)) = parsed.as_ref() {
-                    s.header.set_message(title.clone());
-                    s.info.set_message(body.clone());
-                } else {
-                    let _ = s._mp.println(line);
-                }
+                let _ = s._mp.println(line);
             }
             ProgressInner::Multi(m) => {
-                if let Some((title, body)) = parsed.as_ref() {
-                    m.header.set_message(title.clone());
-                    m.info.set_message(body.clone());
-                } else {
-                    let _ = m._mp.println(line);
-                }
+                let _ = m._mp.println(line);
             }
         }
     }
