@@ -28,6 +28,7 @@ Installation
 Quickstart
 1) Download a model (first run can prompt you):
 - ./target/release/polyscribe --download-models
+  - In the interactive picker, use Up/Down to navigate, Space to toggle selections, and Enter to confirm. Models are grouped by base (e.g., tiny, base, small).
 
 2) Transcribe a file:
 - ./target/release/polyscribe -v -o output my_audio.mp3

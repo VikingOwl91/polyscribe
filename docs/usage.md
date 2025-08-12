@@ -32,6 +32,7 @@ CLI reference
     - Number of layers to offload to the GPU when supported.
   - --download-models
     - Launch interactive model downloader (lists Hugging Face models; multi-select to download).
+    - Controls: Use Up/Down to navigate, Space to toggle selections, and Enter to confirm. Models are grouped by base (e.g., tiny, base, small).
   - --update-models
     - Verify/update local models by comparing sizes and hashes with the upstream manifest.
   - -v, --verbose (repeatable)

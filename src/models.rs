@@ -395,122 +395,61 @@ fn format_model_list(models: &[ModelEntry]) -> String {
 }
 
 fn prompt_select_models_two_stage(models: &[ModelEntry]) -> Result<Vec<ModelEntry>> {
+    // Replaced by cliclack-based multiselect; keep function to preserve signature but delegate.
+    prompt_select_models_cliclack(models)
+}
+
+fn prompt_select_models_cliclack(models: &[ModelEntry]) -> Result<Vec<ModelEntry>> {
     if crate::is_no_interaction() || !crate::stdin_is_tty() {
         // Non-interactive: do not prompt, return empty selection to skip
         return Ok(Vec::new());
     }
-    // 1) Choose base (tiny, small, medium, etc.)
-    let mut bases: Vec<String> = Vec::new();
-    let mut last = String::new();
-    for m in models.iter() {
-        if m.base != last {
-            // models are sorted by base; avoid duplicates while preserving order
-            if !bases.last().map(|b| b == &m.base).unwrap_or(false) {
-                bases.push(m.base.clone());
+
+    // Build grouped, aligned labels for selection items (include base prefix for grouping).
+    let mut item_labels: Vec<String> = Vec::new();
+    let mut item_model_indices: Vec<usize> = Vec::new();
+
+    // Compute widths for alignment
+    let name_width = models.iter().map(|m| m.name.len()).max().unwrap_or(0);
+    let base_width = models.iter().map(|m| m.base.len()).max().unwrap_or(0);
+
+    for (i, m) in models.iter().enumerate() {
+        let label = format!(
+            "{base:<bw$}: {name:<nw$} [{repo} | {size}]",
+            base = m.base,
+            bw = base_width,
+            name = m.name,
+            nw = name_width,
+            repo = m.repo,
+            size = human_size(m.size)
+        );
+        item_labels.push(label);
+        item_model_indices.push(i);
+    }
+
+    // Use cliclack multiselect builder with (value, label, help) tuples.
+    let prompt = "Select Whisper model(s) to download (↑/↓ move, space toggle, enter confirm)";
+    let mut items: Vec<(usize, String, String)> = Vec::with_capacity(item_labels.len());
+    for (idx, label) in item_labels.iter().cloned().enumerate() {
+        items.push((item_model_indices[idx], label, String::new()));
+    }
+    match cliclack::multiselect::<usize>(prompt)
+        .items(&items)
+        .interact()
+    {
+        Ok(selected_indices) => {
+            let mut chosen: Vec<ModelEntry> = Vec::new();
+            for mi in selected_indices {
+                if let Some(m) = models.get(mi) {
+                    chosen.push(m.clone());
+                }
             }
-            last = m.base.clone();
+            Ok(chosen)
         }
-    }
-    if bases.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    // Print base selection via UI
-    crate::ui::println_above_bars("Available base model families:");
-    for (i, b) in bases.iter().enumerate() {
-        crate::ui::println_above_bars(format!("  {}) {}", i + 1, b));
-    }
-    loop {
-        let line = match crate::ui::prompt_line("Select base (number or name, 'q' to cancel): ") {
-            Ok(s) => s,
-            Err(_) => String::new(),
-        };
-        let s = line.trim();
-        if s.eq_ignore_ascii_case("q")
-            || s.eq_ignore_ascii_case("quit")
-            || s.eq_ignore_ascii_case("exit")
-        {
-            return Ok(Vec::new());
-        }
-        let chosen_base = if let Ok(i) = s.parse::<usize>() {
-            if i >= 1 && i <= bases.len() {
-                Some(bases[i - 1].clone())
-            } else {
-                None
-            }
-        } else if !s.is_empty() {
-            // accept exact name match (case-insensitive)
-            bases.iter().find(|b| b.eq_ignore_ascii_case(s)).cloned()
-        } else {
-            None
-        };
-
-        if let Some(base) = chosen_base {
-            // 2) Choose sub-type(s) within that base
-            let filtered: Vec<ModelEntry> =
-                models.iter().filter(|m| m.base == base).cloned().collect();
-            if filtered.is_empty() {
-                crate::ui::warn(format!("No models found for base '{base}'."));
-                continue;
-            }
-            // Reuse the formatter but only for the chosen base list
-            let listing = format_model_list(&filtered);
-            crate::ui::println_above_bars(listing);
-
-            // Build index map for filtered list
-            let mut index_map: Vec<usize> = Vec::with_capacity(filtered.len());
-            let mut idx = 1usize;
-            for (pos, _m) in filtered.iter().enumerate() {
-                index_map.push(pos);
-                idx += 1;
-            }
-            // Second prompt: sub-type selection
-            loop {
-                let line2 = crate::ui::prompt_line("Selection: ")
-                    .map_err(|_| anyhow!("Failed to read selection"))?;
-                let s2 = line2.trim().to_lowercase();
-                if s2 == "q" || s2 == "quit" || s2 == "exit" {
-                    return Ok(Vec::new());
-                }
-                let mut selected: Vec<usize> = Vec::new();
-                if s2 == "all" || s2 == "*" {
-                    selected = (1..idx).collect();
-                } else if !s2.is_empty() {
-                    for part in s2.split([',', ' ', ';']) {
-                        let part = part.trim();
-                        if part.is_empty() {
-                            continue;
-                        }
-                        if let Some((a, b)) = part.split_once('-') {
-                            if let (Ok(ia), Ok(ib)) = (a.parse::<usize>(), b.parse::<usize>()) {
-                                if ia >= 1 && ib < idx && ia <= ib {
-                                    selected.extend(ia..=ib);
-                                }
-                            }
-                        } else if let Ok(i) = part.parse::<usize>() {
-                            if i >= 1 && i < idx {
-                                selected.push(i);
-                            }
-                        }
-                    }
-                }
-                selected.sort_unstable();
-                selected.dedup();
-                if selected.is_empty() {
-                    crate::ui::warn("No valid selection. Please try again or 'q' to cancel.");
-                    continue;
-                }
-                let chosen: Vec<ModelEntry> = selected
-                    .into_iter()
-                    .map(|i| filtered[index_map[i - 1]].clone())
-                    .collect();
-                return Ok(chosen);
-            }
-        } else {
-            crate::ui::warn(format!(
-                "Invalid base selection. Please enter a number from 1-{} or a base name.",
-                bases.len()
-            ));
+        Err(e) => {
+            // If interaction fails (e.g., not a TTY), return empty to gracefully skip
+            wlog!("Selection canceled or failed: {}", e);
+            Ok(Vec::new())
         }
     }
 }
