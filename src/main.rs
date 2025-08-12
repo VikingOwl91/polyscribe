@@ -10,9 +10,6 @@ use clap::{Parser, Subcommand};
 use clap_complete::Shell;
 use serde::{Deserialize, Serialize};
 
-mod output;
-use output::{write_outputs, OutputFormats};
-
 use std::sync::mpsc::channel;
 // whisper-rs is used from the library crate
 use polyscribe::backend::{BackendKind, select_backend};
@@ -126,8 +123,8 @@ struct InputSegment {
 use polyscribe::{OutputEntry, date_prefix, models_dir_path, normalize_lang_code, render_srt};
 
 #[derive(Debug, Serialize)]
-pub struct OutputRoot {
-    pub items: Vec<OutputEntry>,
+struct OutputRoot {
+    items: Vec<OutputEntry>,
 }
 
 fn sanitize_speaker_name(raw: &str) -> String {
@@ -533,8 +530,29 @@ fn run() -> Result<()> {
                 .unwrap_or("output");
             let date = date_prefix();
             let base_name = format!("{date}_{stem}");
-            let base_path = out_dir.join(&base_name);
-            write_outputs(&base_path, &out, &OutputFormats::all())?;
+            let json_path = out_dir.join(format!("{}.json", &base_name));
+            let toml_path = out_dir.join(format!("{}.toml", &base_name));
+            let srt_path = out_dir.join(format!("{}.srt", &base_name));
+
+            let mut json_file = File::create(&json_path).with_context(|| {
+                format!("Failed to create output file: {}", json_path.display())
+            })?;
+            serde_json::to_writer_pretty(&mut json_file, &out)?;
+            writeln!(&mut json_file)?;
+
+            let toml_str = toml::to_string_pretty(&out)?;
+            let mut toml_file = File::create(&toml_path).with_context(|| {
+                format!("Failed to create output file: {}", toml_path.display())
+            })?;
+            toml_file.write_all(toml_str.as_bytes())?;
+            if !toml_str.ends_with('\n') {
+                writeln!(&mut toml_file)?;
+            }
+
+            let srt_str = render_srt(&out.items);
+            let mut srt_file = File::create(&srt_path)
+                .with_context(|| format!("Failed to create output file: {}", srt_path.display()))?;
+            srt_file.write_all(srt_str.as_bytes())?;
 
             // Extend merged with per-file entries
             merged_entries.extend(out.items.into_iter());
@@ -568,8 +586,27 @@ fn run() -> Result<()> {
 
         let date = date_prefix();
         let merged_base = format!("{date}_merged");
-        let base_path = out_dir.join(&merged_base);
-        write_outputs(&base_path, &merged_out, &OutputFormats::all())?;
+        let m_json = out_dir.join(format!("{}.json", &merged_base));
+        let m_toml = out_dir.join(format!("{}.toml", &merged_base));
+        let m_srt = out_dir.join(format!("{}.srt", &merged_base));
+
+        let mut mj = File::create(&m_json)
+            .with_context(|| format!("Failed to create output file: {}", m_json.display()))?;
+        serde_json::to_writer_pretty(&mut mj, &merged_out)?;
+        writeln!(&mut mj)?;
+
+        let m_toml_str = toml::to_string_pretty(&merged_out)?;
+        let mut mt = File::create(&m_toml)
+            .with_context(|| format!("Failed to create output file: {}", m_toml.display()))?;
+        mt.write_all(m_toml_str.as_bytes())?;
+        if !m_toml_str.ends_with('\n') {
+            writeln!(&mut mt)?;
+        }
+
+        let m_srt_str = render_srt(&merged_out.items);
+        let mut ms = File::create(&m_srt)
+            .with_context(|| format!("Failed to create output file: {}", m_srt.display()))?;
+        ms.write_all(m_srt_str.as_bytes())?;
 
         // Final concise summary table to stderr (below progress bars)
         if !args.quiet && !summary.is_empty() {
@@ -738,8 +775,29 @@ fn run() -> Result<()> {
             let date = date_prefix();
             let base_name = format!("{date}_{stem}");
             let dir = parent_opt.unwrap_or(Path::new(""));
-            let base_path = dir.join(&base_name);
-            write_outputs(&base_path, &out, &OutputFormats::all())?;
+            let json_path = dir.join(format!("{}.json", &base_name));
+            let toml_path = dir.join(format!("{}.toml", &base_name));
+            let srt_path = dir.join(format!("{}.srt", &base_name));
+
+            let mut json_file = File::create(&json_path).with_context(|| {
+                format!("Failed to create output file: {}", json_path.display())
+            })?;
+            serde_json::to_writer_pretty(&mut json_file, &out)?;
+            writeln!(&mut json_file)?;
+
+            let toml_str = toml::to_string_pretty(&out)?;
+            let mut toml_file = File::create(&toml_path).with_context(|| {
+                format!("Failed to create output file: {}", toml_path.display())
+            })?;
+            toml_file.write_all(toml_str.as_bytes())?;
+            if !toml_str.ends_with('\n') {
+                writeln!(&mut toml_file)?;
+            }
+
+            let srt_str = render_srt(&out.items);
+            let mut srt_file = File::create(&srt_path)
+                .with_context(|| format!("Failed to create output file: {}", srt_path.display()))?;
+            srt_file.write_all(srt_str.as_bytes())?;
         } else {
             let stdout = io::stdout();
             let mut handle = stdout.lock();
@@ -897,8 +955,30 @@ fn run() -> Result<()> {
                     .unwrap_or("output");
                 let date = date_prefix();
                 let base_name = format!("{date}_{stem}");
-                let base_path = dir.join(&base_name);
-                write_outputs(&base_path, &out, &OutputFormats::all())?;
+                let json_path = dir.join(format!("{}.json", &base_name));
+                let toml_path = dir.join(format!("{}.toml", &base_name));
+                let srt_path = dir.join(format!("{}.srt", &base_name));
+
+                let mut json_file = File::create(&json_path).with_context(|| {
+                    format!("Failed to create output file: {}", json_path.display())
+                })?;
+                serde_json::to_writer_pretty(&mut json_file, &out)?;
+                writeln!(&mut json_file)?;
+
+                let toml_str = toml::to_string_pretty(&out)?;
+                let mut toml_file = File::create(&toml_path).with_context(|| {
+                    format!("Failed to create output file: {}", toml_path.display())
+                })?;
+                toml_file.write_all(toml_str.as_bytes())?;
+                if !toml_str.ends_with('\n') {
+                    writeln!(&mut toml_file)?;
+                }
+
+                let srt_str = render_srt(&out.items);
+                let mut srt_file = File::create(&srt_path).with_context(|| {
+                    format!("Failed to create output file: {}", srt_path.display())
+                })?;
+                srt_file.write_all(srt_str.as_bytes())?;
             } else {
                 // stdout (only single input reaches here)
                 let stdout = io::stdout();
