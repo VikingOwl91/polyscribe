@@ -30,6 +30,8 @@ sha2 = "0.10"
 whisper-rs = { git = "https://github.com/tazz4843/whisper-rs" }
 libc = "0.2"
 cliclack = "0.3"
+indicatif = "0.17"
+atty = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

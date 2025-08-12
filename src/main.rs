@@ -332,6 +332,11 @@ fn run() -> Result<()> {
         })
         .collect();
 
+    // Initialize multi-file progress bars (TTY-aware); suppressed for single-file/non-TTY/quiet
+    let mut pm = polyscribe::ui::progress::ProgressManager::default_for_files(speakers.len());
+    // Use speaker names (derived from file names or prompted) as labels
+    pm.init_files(&speakers);
+
     if args.merge_and_separate {
         polyscribe::dlog!(1, "Mode: merge-and-separate; output_dir={:?}", output_path);
         // Combined mode: write separate outputs per input and also a merged output set
@@ -356,20 +361,41 @@ fn run() -> Result<()> {
             let mut entries: Vec<OutputEntry> = Vec::new();
             if is_audio_file(path) {
                 summary_audio_count += 1;
-                // Progress log to stderr (suppressed by -q); avoid partial lines
-                polyscribe::ilog!("Processing file: {} ...", path.display());
+                // Progress log only when multi-bars are not enabled
+                if !pm.is_enabled() {
+                    polyscribe::ilog!("Processing file: {} ...", path.display());
+                }
+                // Prepare per-file progress callback if multi-bars enabled
+                let mut cb_holder: Option<Box<dyn Fn(i32) + Send + Sync>> = None;
+                if let Some(pb) = pm.per_bar(idx) {
+                    let pb = pb.clone();
+                    cb_holder = Some(Box::new(move |p: i32| {
+                        let p = p.clamp(0, 100) as u64;
+                        pb.set_position(p);
+                    }));
+                }
                 let res = with_quiet_stdio_if_needed(args.quiet, || {
+                    let cb_ref = cb_holder.as_ref().map(|b| &**b as &(dyn Fn(i32) + Send + Sync));
                     sel.backend
-                        .transcribe(path, &speaker, lang_hint.as_deref(), args.gpu_layers)
+                        .transcribe(path, &speaker, lang_hint.as_deref(), args.gpu_layers, cb_ref)
                 });
                 match res {
                     Ok(items) => {
-                        polyscribe::ilog!("done");
+                        if pm.is_enabled() {
+                            pm.mark_file_done(idx);
+                        } else {
+                            polyscribe::ilog!("done");
+                        }
                         entries.extend(items.into_iter());
                     }
                     Err(e) => {
-                        if !polyscribe::is_no_interaction() && polyscribe::stdin_is_tty() {
-                            polyscribe::elog!("{:#}", e);
+                        if let Some(pb) = pm.per_bar(idx) {
+                            pb.finish_with_message("error");
+                        }
+                        if !pm.is_enabled() {
+                            if !polyscribe::is_no_interaction() && polyscribe::stdin_is_tty() {
+                                polyscribe::elog!("{:#}", e);
+                            }
                         }
                         return Err(e);
                     }
@@ -504,23 +530,44 @@ fn run() -> Result<()> {
             let mut buf = String::new();
             if is_audio_file(path) {
                 summary_audio_count += 1;
-                // Progress log to stderr (suppressed by -q)
-                polyscribe::ilog!("Processing file: {} ...", path.display());
+                // Progress log only when multi-bars are not enabled
+                if !pm.is_enabled() {
+                    polyscribe::ilog!("Processing file: {} ...", path.display());
+                }
+                // Prepare per-file progress callback if multi-bars enabled
+                let mut cb_holder: Option<Box<dyn Fn(i32) + Send + Sync>> = None;
+                if let Some(pb) = pm.per_bar(idx) {
+                    let pb = pb.clone();
+                    cb_holder = Some(Box::new(move |p: i32| {
+                        let p = p.clamp(0, 100) as u64;
+                        pb.set_position(p);
+                    }));
+                }
                 let res = with_quiet_stdio_if_needed(args.quiet, || {
+                    let cb_ref = cb_holder.as_ref().map(|b| &**b as &(dyn Fn(i32) + Send + Sync));
                     sel.backend
-                        .transcribe(path, &speaker, lang_hint.as_deref(), args.gpu_layers)
+                        .transcribe(path, &speaker, lang_hint.as_deref(), args.gpu_layers, cb_ref)
                 });
                 match res {
                     Ok(items) => {
-                        polyscribe::ilog!("done");
+                        if pm.is_enabled() {
+                            pm.mark_file_done(idx);
+                        } else {
+                            polyscribe::ilog!("done");
+                        }
                         for e in items {
                             entries.push(e);
                         }
                         continue;
                     }
                     Err(e) => {
-                        if !(polyscribe::is_no_interaction() || !polyscribe::stdin_is_tty()) {
-                            polyscribe::elog!("{:#}", e);
+                        if let Some(pb) = pm.per_bar(idx) {
+                            pb.finish_with_message("error");
+                        }
+                        if !pm.is_enabled() {
+                            if !(polyscribe::is_no_interaction() || !polyscribe::stdin_is_tty()) {
+                                polyscribe::elog!("{:#}", e);
+                            }
                         }
                         return Err(e);
                     }
@@ -645,20 +692,41 @@ fn run() -> Result<()> {
             let mut entries: Vec<OutputEntry> = Vec::new();
             if is_audio_file(path) {
                 summary_audio_count += 1;
-                // Progress log to stderr (suppressed by -q)
-                polyscribe::ilog!("Processing file: {} ...", path.display());
+                // Progress log only when multi-bars are not enabled
+                if !pm.is_enabled() {
+                    polyscribe::ilog!("Processing file: {} ...", path.display());
+                }
+                // Prepare per-file progress callback if multi-bars enabled
+                let mut cb_holder: Option<Box<dyn Fn(i32) + Send + Sync>> = None;
+                if let Some(pb) = pm.per_bar(idx) {
+                    let pb = pb.clone();
+                    cb_holder = Some(Box::new(move |p: i32| {
+                        let p = p.clamp(0, 100) as u64;
+                        pb.set_position(p);
+                    }));
+                }
                 let res = with_quiet_stdio_if_needed(args.quiet, || {
+                    let cb_ref = cb_holder.as_ref().map(|b| &**b as &(dyn Fn(i32) + Send + Sync));
                     sel.backend
-                        .transcribe(path, &speaker, lang_hint.as_deref(), args.gpu_layers)
+                        .transcribe(path, &speaker, lang_hint.as_deref(), args.gpu_layers, cb_ref)
                 });
                 match res {
                     Ok(items) => {
-                        polyscribe::ilog!("done");
+                        if pm.is_enabled() {
+                            pm.mark_file_done(idx);
+                        } else {
+                            polyscribe::ilog!("done");
+                        }
                         entries.extend(items);
                     }
                     Err(e) => {
-                        if !polyscribe::is_no_interaction() && polyscribe::stdin_is_tty() {
-                            polyscribe::elog!("{:#}", e);
+                        if let Some(pb) = pm.per_bar(idx) {
+                            pb.finish_with_message("error");
+                        }
+                        if !pm.is_enabled() {
+                            if !polyscribe::is_no_interaction() && polyscribe::stdin_is_tty() {
+                                polyscribe::elog!("{:#}", e);
+                            }
                         }
                         return Err(e);
                     }

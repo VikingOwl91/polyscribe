@@ -419,7 +419,7 @@ fn prompt_select_models_two_stage(models: &[ModelEntry]) -> Result<Vec<ModelEntr
         crate::ui::println_above_bars(format!("  {}) {}", i + 1, b));
     }
     loop {
-        let mut line = match crate::ui::prompt_line("Select base (number or name, 'q' to cancel): ") {
+        let line = match crate::ui::prompt_line("Select base (number or name, 'q' to cancel): ") {
             Ok(s) => s,
             Err(_) => String::new(),
         };

@@ -35,12 +35,14 @@ pub trait TranscribeBackend {
     /// - speaker: label to attach to all produced segments.
     /// - lang_opt: optional language hint (e.g., "en"); None means auto/multilingual model default.
     /// - gpu_layers: optional GPU layer count if applicable (ignored by some backends).
+    /// - progress_cb: optional callback receiving percentage [0..=100] updates.
     fn transcribe(
         &self,
         audio_path: &Path,
         speaker: &str,
         lang_opt: Option<&str>,
         gpu_layers: Option<u32>,
+        progress_cb: Option<&(dyn Fn(i32) + Send + Sync)>,
     ) -> Result<Vec<OutputEntry>>;
 }
 
@@ -148,8 +150,9 @@ impl TranscribeBackend for CpuBackend {
         speaker: &str,
         lang_opt: Option<&str>,
         _gpu_layers: Option<u32>,
+        progress_cb: Option<&(dyn Fn(i32) + Send + Sync)>,
     ) -> Result<Vec<OutputEntry>> {
-        transcribe_with_whisper_rs(audio_path, speaker, lang_opt)
+        transcribe_with_whisper_rs(audio_path, speaker, lang_opt, progress_cb)
     }
 }
 
@@ -163,9 +166,10 @@ impl TranscribeBackend for CudaBackend {
         speaker: &str,
         lang_opt: Option<&str>,
         _gpu_layers: Option<u32>,
+        progress_cb: Option<&(dyn Fn(i32) + Send + Sync)>,
     ) -> Result<Vec<OutputEntry>> {
         // whisper-rs uses enabled CUDA feature at build time; call same code path
-        transcribe_with_whisper_rs(audio_path, speaker, lang_opt)
+        transcribe_with_whisper_rs(audio_path, speaker, lang_opt, progress_cb)
     }
 }
 
@@ -179,8 +183,9 @@ impl TranscribeBackend for HipBackend {
         speaker: &str,
         lang_opt: Option<&str>,
         _gpu_layers: Option<u32>,
+        progress_cb: Option<&(dyn Fn(i32) + Send + Sync)>,
     ) -> Result<Vec<OutputEntry>> {
-        transcribe_with_whisper_rs(audio_path, speaker, lang_opt)
+        transcribe_with_whisper_rs(audio_path, speaker, lang_opt, progress_cb)
     }
 }
 
@@ -194,6 +199,7 @@ impl TranscribeBackend for VulkanBackend {
         _speaker: &str,
         _lang_opt: Option<&str>,
         _gpu_layers: Option<u32>,
+        _progress_cb: Option<&(dyn Fn(i32) + Send + Sync)>,
     ) -> Result<Vec<OutputEntry>> {
         Err(anyhow!(
             "Vulkan backend not yet wired to whisper.cpp FFI. Build with --features gpu-vulkan and ensure Vulkan SDK is installed. How to fix: install Vulkan loader (libvulkan), set VULKAN_SDK, and run cargo build --features gpu-vulkan."
@@ -301,8 +307,13 @@ pub(crate) fn transcribe_with_whisper_rs(
     audio_path: &Path,
     speaker: &str,
     lang_opt: Option<&str>,
+    progress_cb: Option<&(dyn Fn(i32) + Send + Sync)>,
 ) -> Result<Vec<OutputEntry>> {
+    if let Some(cb) = progress_cb { cb(0); }
+
     let pcm = decode_audio_to_pcm_f32_ffmpeg(audio_path)?;
+    if let Some(cb) = progress_cb { cb(5); }
+
     let model = find_model_file()?;
     let is_en_only = model
         .file_name()
@@ -341,6 +352,7 @@ pub(crate) fn transcribe_with_whisper_rs(
             .map_err(|e| anyhow!("Failed to create Whisper state: {:?}", e))?;
         Ok::<_, anyhow::Error>((ctx, state))
     })?;
+    if let Some(cb) = progress_cb { cb(20); }
 
     let mut params =
         whisper_rs::FullParams::new(whisper_rs::SamplingStrategy::Greedy { best_of: 1 });
@@ -352,13 +364,16 @@ pub(crate) fn transcribe_with_whisper_rs(
     if let Some(lang) = lang_opt {
         params.set_language(Some(lang));
     }
+    if let Some(cb) = progress_cb { cb(30); }
 
     crate::with_suppressed_stderr(|| {
+        if let Some(cb) = progress_cb { cb(40); }
         state
             .full(params, &pcm)
             .map_err(|e| anyhow!("Whisper full() failed: {:?}", e))
     })?;
 
+    if let Some(cb) = progress_cb { cb(90); }
     let num_segments = state
         .full_n_segments()
         .map_err(|e| anyhow!("Failed to get segments: {:?}", e))?;
@@ -383,5 +398,6 @@ pub(crate) fn transcribe_with_whisper_rs(
             text: text.trim().to_string(),
         });
     }
+    if let Some(cb) = progress_cb { cb(100); }
     Ok(items)
 }
