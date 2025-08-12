@@ -93,7 +93,7 @@ impl StderrSilencer {
         #[cfg(unix)]
         unsafe {
             // Duplicate current stderr (fd 2)
-            let old_fd = dup(2);
+            let old_fd = unix_fd::dup(unix_fd::STDERR_FILENO);
             if old_fd < 0 {
                 return Self {
                     active: false,
@@ -103,10 +103,10 @@ impl StderrSilencer {
             }
             // Open /dev/null for writing
             let devnull_cstr = std::ffi::CString::new("/dev/null").unwrap();
-            let dn = open(devnull_cstr.as_ptr(), O_WRONLY);
+            let dn = unix_fd::open(devnull_cstr.as_ptr(), unix_fd::O_WRONLY);
             if dn < 0 {
                 // failed to open devnull; restore and bail
-                close(old_fd);
+                unix_fd::close(old_fd);
                 return Self {
                     active: false,
                     old_stderr_fd: -1,
@@ -114,9 +114,9 @@ impl StderrSilencer {
                 };
             }
             // Redirect fd 2 to devnull
-            if dup2(dn, 2) < 0 {
-                close(dn);
-                close(old_fd);
+            if unix_fd::dup2(dn, unix_fd::STDERR_FILENO) < 0 {
+                unix_fd::close(dn);
+                unix_fd::close(old_fd);
                 return Self {
                     active: false,
                     old_stderr_fd: -1,
@@ -144,9 +144,9 @@ impl Drop for StderrSilencer {
         #[cfg(unix)]
         unsafe {
             // Restore old stderr and close devnull and old copies
-            let _ = dup2(self.old_stderr_fd, 2);
-            let _ = close(self.devnull_fd);
-            let _ = close(self.old_stderr_fd);
+            let _ = unix_fd::dup2(self.old_stderr_fd, unix_fd::STDERR_FILENO);
+            let _ = unix_fd::close(self.devnull_fd);
+            let _ = unix_fd::close(self.old_stderr_fd);
         }
         self.active = false;
     }
@@ -242,7 +242,18 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[cfg(unix)]
-use libc::{O_WRONLY, close, dup, dup2, open};
+mod unix_fd {
+    pub use libc::O_WRONLY;
+    pub const STDERR_FILENO: i32 = 2; // libc::STDERR_FILENO isn't always available on all targets
+    #[inline]
+    pub unsafe fn dup(fd: i32) -> i32 { libc::dup(fd) }
+    #[inline]
+    pub unsafe fn dup2(fd: i32, fd2: i32) -> i32 { libc::dup2(fd, fd2) }
+    #[inline]
+    pub unsafe fn open(path: *const libc::c_char, flags: i32) -> i32 { libc::open(path, flags) }
+    #[inline]
+    pub unsafe fn close(fd: i32) -> i32 { libc::close(fd) }
+}
 
 /// Re-export backend module (GPU/CPU selection and transcription).
 pub mod backend;
