@@ -226,7 +226,7 @@ pub struct SelectionResult {
 /// guidance on how to enable it.
 ///
 /// Set `verbose` to true to print detection/selection info to stderr.
-pub fn select_backend(requested: BackendKind, verbose: bool) -> Result<SelectionResult> {
+pub fn select_backend(requested: BackendKind, config: &crate::Config) -> Result<SelectionResult> {
     let mut detected = Vec::new();
     if cuda_available() {
         detected.push(BackendKind::Cuda);
@@ -290,7 +290,7 @@ pub fn select_backend(requested: BackendKind, verbose: bool) -> Result<Selection
         BackendKind::Cpu => BackendKind::Cpu,
     };
 
-    if verbose {
+    if config.verbose >= 1 && !config.quiet {
         crate::dlog!(1, "Detected backends: {:?}", detected);
         crate::dlog!(1, "Selected backend: {:?}", chosen);
     }

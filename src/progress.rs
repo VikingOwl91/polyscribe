@@ -107,6 +107,13 @@ impl ProgressFactory {
             _ => ProgressManager::noop(),
         }
     }
+
+    /// Preferred constructor using Config. Respects config.no_progress and TTY.
+    pub fn from_config(config: &crate::Config) -> Self {
+        // Prefer Config.no_progress over manual flag; still honor NO_PROGRESS env var.
+        let force_disable = config.no_progress;
+        Self::new(force_disable)
+    }
 }
 
 #[derive(Clone)]

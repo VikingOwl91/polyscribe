@@ -16,6 +16,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 // Global runtime flags
+// Compatibility: globals are retained temporarily until all call-sites pass Config explicitly. They will be removed in a follow-up cleanup.
 static QUIET: AtomicBool = AtomicBool::new(false);
 static NO_INTERACTION: AtomicBool = AtomicBool::new(false);
 static VERBOSE: AtomicU8 = AtomicU8::new(0);
@@ -247,6 +248,41 @@ pub mod progress;
 
 /// UI helpers for interactive prompts (cliclack-backed)
 pub mod ui;
+
+/// Runtime configuration passed across the library instead of using globals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Config {
+    /// Suppress non-essential logs.
+    pub quiet: bool,
+    /// Verbosity level (0 = normal, 1 = verbose, 2 = super-verbose).
+    pub verbose: u8,
+    /// Disable interactive prompts.
+    pub no_interaction: bool,
+    /// Disable progress output.
+    pub no_progress: bool,
+}
+
+impl Config {
+    /// Construct a Config from explicit values.
+    pub fn new(quiet: bool, verbose: u8, no_interaction: bool, no_progress: bool) -> Self {
+        Self { quiet, verbose, no_interaction, no_progress }
+    }
+    /// Snapshot current global settings into a Config (temporary compatibility helper).
+    pub fn from_globals() -> Self {
+        Self {
+            quiet: crate::is_quiet(),
+            verbose: crate::verbose_level(),
+            no_interaction: crate::is_no_interaction(),
+            no_progress: matches!(std::env::var("NO_PROGRESS"), Ok(ref v) if v == "1" || v.eq_ignore_ascii_case("true")),
+        }
+    }
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self { quiet: false, verbose: 0, no_interaction: false, no_progress: false }
+    }
+}
 
 /// Transcript entry for a single segment.
 #[derive(Debug, serde::Serialize, Clone)]
@@ -586,7 +622,7 @@ where
     // keep output synchronized with any active progress rendering.
     printer("");
     let prompt = format!("Select model [1-{}]:", candidates.len());
-    // TODO(ui): migrate to cliclack::Select for model picking to standardize UI.
+    // UI: using dialoguer::Input for selection for now; migration to cliclack::Select may be considered later for consistency.
     let sel: usize = dialoguer::Input::new()
         .with_prompt(prompt)
         .interact_text()
