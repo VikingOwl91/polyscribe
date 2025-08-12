@@ -36,17 +36,7 @@ pub fn set_no_interaction(b: bool) {
 }
 /// Return current non-interactive state.
 pub fn is_no_interaction() -> bool {
-    if NO_INTERACTION.load(Ordering::Relaxed) {
-        return true;
-    }
-    // Also honor NO_INTERACTION=1/true environment variable for convenience/testing
-    match std::env::var("NO_INTERACTION") {
-        Ok(v) => {
-            let v = v.trim();
-            v == "1" || v.eq_ignore_ascii_case("true")
-        }
-        Err(_) => false,
-    }
+    NO_INTERACTION.load(Ordering::Relaxed)
 }
 
 /// Set verbose level (0 = normal, 1 = verbose, 2 = super-verbose)
@@ -648,13 +638,8 @@ where
     }
     // Print a blank line before the selection prompt to keep output synchronized.
     printer("");
-    let idx = if crate::is_no_interaction() || !crate::stdin_is_tty() {
-        // Non-interactive: auto-select the first candidate deterministically (as listed)
-        0
-    } else {
-        crate::ui::prompt_select_index("Select a Whisper model", &display_names)
-            .context("Failed to read selection")?
-    };
+    let idx = crate::ui::prompt_select_index("Select a Whisper model", &display_names)
+        .context("Failed to read selection")?;
     let chosen = candidates.swap_remove(idx);
     let _ = std::fs::write(models_dir.join(".last_model"), chosen.display().to_string());
     // Print an empty line after selection input

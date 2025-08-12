@@ -950,30 +950,3 @@ fn out_format_multiple_json_and_srt() {
 }
 
 */
-
-
-#[test]
-fn cli_no_interation_alias_skips_speaker_prompts_and_uses_defaults() {
-    let exe = env!("CARGO_BIN_EXE_polyscribe");
-
-    let input1 = manifest_path("input/1-s0wlz.json");
-    let input2 = manifest_path("input/2-vikingowl.json");
-
-    let output = Command::new(exe)
-        .arg(input1.as_os_str())
-        .arg(input2.as_os_str())
-        .arg("-m")
-        .arg("--set-speaker-names")
-        .arg("--no-interation")
-        .output()
-        .expect("failed to spawn polyscribe");
-
-    assert!(output.status.success(), "CLI did not exit successfully");
-
-    let stdout = String::from_utf8(output.stdout).expect("stdout not UTF-8");
-    let root: OutputRoot = serde_json::from_str(&stdout).unwrap();
-    let speakers: std::collections::HashSet<String> =
-        root.items.into_iter().map(|e| e.speaker).collect();
-    assert!(speakers.contains("s0wlz"), "default s0wlz not used (alias)");
-    assert!(speakers.contains("vikingowl"), "default vikingowl not used (alias)");
-}

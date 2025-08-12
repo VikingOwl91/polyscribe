@@ -67,8 +67,7 @@ struct Args {
     quiet: bool,
 
     /// Non-interactive mode: never prompt; use defaults instead.
-    /// Deprecated alias supported: --no-interation (typo)
-    #[arg(long = "no-interaction", alias = "no-interation", global = true)]
+    #[arg(long = "no-interaction", global = true)]
     no_interaction: bool,
 
     /// Disable progress bars (also respects NO_PROGRESS=1). Progress bars render on stderr only when attached to a TTY.
@@ -504,17 +503,14 @@ fn run() -> Result<()> {
         if let Some(out) = &args.output {
             // Merge target: either only merged, or merged plus separate
             let outp = PathBuf::from(out);
-            // Ensure target directory exists appropriately for the chosen mode
+            if let Some(parent) = outp.parent() { create_dir_all(parent).ok(); }
+            // Name: <date>_out or <date>_merged depending on flag
             if args.merge_and_separate {
-                // When writing inside an output directory, create it directly
-                create_dir_all(&outp).ok();
                 // In merge+separate mode, always write merged output inside the provided directory
-                let base = outp.join(format!("{}_merged", polyscribe::date_prefix()));
+                let base = PathBuf::from(out).join(format!("{}_merged", polyscribe::date_prefix()));
                 let root = OutputRoot { items: merged_items.clone() };
                 write_outputs(&base, &root, &out_formats)?;
             } else {
-                // For single merged file, ensure the parent dir exists
-                if let Some(parent) = outp.parent() { create_dir_all(parent).ok(); }
                 let base = outp.with_file_name(format!("{}_{}", polyscribe::date_prefix(), outp.file_name().and_then(|s| s.to_str()).unwrap_or("out")));
                 let root = OutputRoot { items: merged_items.clone() };
                 write_outputs(&base, &root, &out_formats)?;
@@ -917,28 +913,6 @@ mod tests {
         // Cleanup
         unsafe {
             std_env::remove_var("POLYSCRIBE_TEST_FORCE_VULKAN");
-        }
-    }
-
-    #[test]
-    fn test_no_interaction_disables_speaker_prompt() {
-        use polyscribe::ui;
-        // Ensure non-interactive via env and global flag
-        unsafe {
-            std_env::set_var("NO_INTERACTION", "1");
-        }
-        polyscribe::set_no_interaction(true);
-        ui::testing_reset_prompt_call_counters();
-        // Build a minimal progress manager
-        let pf = polyscribe::progress::ProgressFactory::from_config(&polyscribe::Config::default());
-        let pm = pf.make_manager(polyscribe::progress::ProgressMode::Single);
-        let dummy = std::path::PathBuf::from("example.wav");
-        let got = super::prompt_speaker_name_for_path(&dummy, "DefaultSpeaker", /*enabled:*/ true, &pm);
-        assert_eq!(got, "DefaultSpeaker");
-        assert_eq!(ui::testing_prompt_call_count(), 0, "no prompt functions should be called when NO_INTERACTION=1");
-        // Cleanup
-        unsafe {
-            std_env::remove_var("NO_INTERACTION");
         }
     }
 }
