@@ -129,6 +129,10 @@ struct Args {
     /// Continue processing other inputs even if some fail; exit non-zero if any failed
     #[arg(long = "continue-on-error")]
     continue_on_error: bool,
+
+    /// Overwrite existing output files instead of appending a numeric suffix
+    #[arg(long = "force")]
+    force: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -511,13 +515,13 @@ fn run() -> Result<()> {
                 // In merge+separate mode, always write merged output inside the provided directory
                 let base = outp.join(format!("{}_merged", polyscribe::date_prefix()));
                 let root = OutputRoot { items: merged_items.clone() };
-                write_outputs(&base, &root, &out_formats)?;
+                write_outputs(&base, &root, &out_formats, args.force)?;
             } else {
                 // For single merged file, ensure the parent dir exists
                 if let Some(parent) = outp.parent() { create_dir_all(parent).ok(); }
                 let base = outp.with_file_name(format!("{}_{}", polyscribe::date_prefix(), outp.file_name().and_then(|s| s.to_str()).unwrap_or("out")));
                 let root = OutputRoot { items: merged_items.clone() };
-                write_outputs(&base, &root, &out_formats)?;
+                write_outputs(&base, &root, &out_formats, args.force)?;
             }
         } else {
             // Print JSON to stdout
@@ -547,7 +551,7 @@ fn run() -> Result<()> {
                 let root = OutputRoot { items };
                 let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("output");
                 let base = out_dir.join(format!("{}_{}", polyscribe::date_prefix(), stem));
-                write_outputs(&base, &root, &out_formats)?;
+                write_outputs(&base, &root, &out_formats, args.force)?;
             } else if is_audio_file(path) {
                 // Skip in tests
             }
