@@ -28,4 +28,3 @@ Example GitHub Actions job (outline)
 Notes
 - For GPU features, set up appropriate runners and add `--features gpu-cuda|gpu-hip|gpu-vulkan` where applicable.
 - For docs-only changes, jobs still build/test to ensure doctests and examples compile when enabled.
-- Mark the CI job named `ci` as a required status check for the default branch in repository branch protection settings.

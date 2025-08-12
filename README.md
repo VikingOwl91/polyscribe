@@ -77,7 +77,7 @@ Troubleshooting & docs
 - docs/ci.md – minimal CI checklist and job outline
 - CONTRIBUTING.md – PR checklist and workflow
 
-CI status: [CI workflow runs](actions/workflows/ci.yml)
+CI status: [CI badge placeholder]
 
 Examples
 See the examples/ directory for copy-paste scripts:
