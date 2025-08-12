@@ -228,13 +228,6 @@ impl ProgressManager {
         Self::with_multi(mp, total as u64)
     }
 
-    /// Test helper: create a Single-mode manager with a hidden draw target, safe for tests
-    /// even when not attached to a TTY.
-    pub fn new_for_tests_single_hidden() -> Self {
-        let mp = Arc::new(MultiProgress::with_draw_target(ProgressDrawTarget::hidden()));
-        Self::with_single(mp)
-    }
-
     /// Backwards-compatible constructor used by older tests: same as new_for_tests_multi_hidden.
     pub fn test_new_multi(total: usize) -> Self {
         Self::new_for_tests_multi_hidden(total)
@@ -245,23 +238,6 @@ impl ProgressManager {
         match &self.inner {
             ProgressInner::Multi(m) => Some((m.total.position(), m.total.length().unwrap_or(0))),
             _ => None,
-        }
-    }
-
-    /// Test helper: return the number of visible bars managed initially.
-    /// Single mode: 3 (header, info, current). Multi mode: 4 (header, info, current, total).
-    pub fn testing_bar_count(&self) -> usize {
-        match &self.inner {
-            ProgressInner::Noop => 0,
-            ProgressInner::Single(_) => 3,
-            ProgressInner::Multi(m) => {
-                // Base bars always present
-                let mut count = 4;
-                // If per-file bars were initialized, include them as well
-                if let Ok(files) = m.files.lock() { if let Some(v) = &*files { count += v.len(); } }
-                if let Ok(t) = m.total_pct.lock() { if t.is_some() { count += 1; } }
-                count
-            }
         }
     }
 
