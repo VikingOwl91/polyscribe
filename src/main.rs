@@ -291,27 +291,9 @@ fn run() -> Result<()> {
         }
     }
 
-    // Handle model management modes early and exit
-    if args.download_models && args.update_models {
-        // Avoid ambiguous behavior when both flags are set
-        return Err(anyhow!("Choose only one: --download-models or --update-models"));
-    }
-    if args.download_models {
-        // Launch interactive model downloader and exit
-        polyscribe::models::run_interactive_model_downloader()?;
-        return Ok(());
-    }
-    if args.update_models {
-        // Update existing local models and exit
-        polyscribe::models::update_local_models()?;
-        return Ok(());
-    }
-
     // Prefer Config-driven progress factory
     let pf = ProgressFactory::from_config(&config);
     let pm = pf.make_manager(pf.decide_mode(args.inputs.len()));
-    // Route subsequent INFO/WARN/DEBUG logs through the cliclack/indicatif area
-    polyscribe::progress::set_global_progress_manager(&pm);
 
     // Determine formats
     let out_formats = if args.out_format.is_empty() {
@@ -331,8 +313,7 @@ fn run() -> Result<()> {
 
     let do_merge = args.merge || args.merge_and_separate;
     if polyscribe::verbose_level() >= 1 && !args.quiet {
-        // Render mode information inside the progress/cliclack area
-        polyscribe::ilog!("Mode: {}", if do_merge { "merge" } else { "separate" });
+        eprintln!("Mode: {}", if do_merge { "merge" } else { "separate" });
     }
 
     // Collect inputs and default speakers
@@ -478,13 +459,12 @@ fn run() -> Result<()> {
 
     // Emit totals and summary to stderr unless quiet
     if !polyscribe::is_quiet() {
-        // Print inside the progress/cliclack area
-        polyscribe::ilog!("Total: {}/{} processed", summary.len(), plan.len());
-        polyscribe::ilog!("Summary:");
-        for line in render_summary_lines(&summary) { polyscribe::ilog!("{}", line); }
-        for (_, _, ok, _) in &summary { if !ok { polyscribe::elog!("ERR"); } }
-        polyscribe::ilog!("");
-        if had_error { polyscribe::elog!("One or more inputs failed"); }
+        eprintln!("INFO: Total: {}/{} processed", summary.len(), plan.len());
+        eprintln!("Summary:");
+        for line in render_summary_lines(&summary) { eprintln!("{}", line); }
+        for (_, _, ok, _) in &summary { if !ok { eprintln!("ERR"); } }
+        eprintln!();
+        if had_error { eprintln!("ERROR: One or more inputs failed"); }
     }
 
     if had_error { std::process::exit(2); }
