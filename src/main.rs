@@ -10,18 +10,14 @@ use clap::{Parser, Subcommand, ValueEnum, CommandFactory};
 use clap_complete::Shell;
 use serde::{Deserialize, Serialize};
 
-// Use the library crate for shared functionality
-use polyscribe::{OutputEntry, date_prefix, normalize_lang_code, render_srt, models_dir_path};
+use polyscribe::{OutputEntry, date_prefix, normalize_lang_code, render_srt};
 
 #[derive(Subcommand, Debug, Clone)]
 enum AuxCommands {
-    /// Generate shell completion script to stdout
     Completions {
-        /// Shell to generate completions for
         #[arg(value_enum)]
         shell: Shell,
     },
-    /// Generate a man page to stdout
     Man,
 }
 
@@ -43,11 +39,13 @@ enum GpuBackendCli {
     about = "Merge JSON transcripts or transcribe audio using native whisper"
 )]
 struct Args {
-    /// Increase verbosity (-v, -vv). Repeat to increase. Debug logs appear with -v; very verbose with -vv. Logs go to stderr.
+    /// Increase verbosity (-v, -vv). Repeat to increase.
+    /// Debug logs appear with -v; very verbose with -vv. Logs go to stderr.
     #[arg(short = 'v', long = "verbose", action = clap::ArgAction::Count, global = true)]
     verbose: u8,
 
-    /// Quiet mode: suppress non-error logging on stderr (overrides -v). Does not suppress interactive prompts or stdout output.
+    /// Quiet mode: suppress non-error logging on stderr (overrides -v)
+    /// Does not suppress interactive prompts or stdout output.
     #[arg(short = 'q', long = "quiet", global = true)]
     quiet: bool,
 
@@ -66,7 +64,10 @@ struct Args {
     /// Input .json transcript files or audio files to merge/transcribe
     inputs: Vec<String>,
 
-    /// Output file path base or directory (date prefix added). In merge mode: base path. In separate mode: directory. If omitted: prints JSON to stdout for merge mode; separate mode requires directory for multiple inputs.
+    /// Output file path base or directory (date prefix added).
+    /// In merge mode: base path.
+    /// In separate mode: directory.
+    /// If omitted: prints JSON to stdout for merge mode; separate mode requires directory for multiple inputs.
     #[arg(short, long, value_name = "FILE")]
     output: Option<String>,
 
@@ -78,17 +79,13 @@ struct Args {
     #[arg(long = "merge-and-separate")]
     merge_and_separate: bool,
 
+    /// Prompt for speaker names per input file
+    #[arg(long = "set-speaker-names")]
+    set_speaker_names: bool,
+
     /// Language code to use for transcription (e.g., en, de). No auto-detection.
     #[arg(short, long, value_name = "LANG")]
     language: Option<String>,
-
-    /// Choose GPU backend at runtime (auto|cpu|cuda|hip|vulkan). Default: auto.
-    #[arg(long = "gpu-backend", value_enum, default_value_t = GpuBackendCli::Auto)]
-    _gpu_backend: GpuBackendCli,
-
-    /// Number of layers to offload to GPU (if supported by backend)
-    #[arg(long = "gpu-layers", value_name = "N")]
-    _gpu_layers: Option<u32>,
 
     /// Launch interactive model downloader (list HF models, multi-select and download)
     #[arg(long)]
@@ -97,10 +94,6 @@ struct Args {
     /// Update local Whisper models by comparing hashes/sizes with remote manifest
     #[arg(long)]
     update_models: bool,
-
-    /// Prompt for speaker names per input file
-    #[arg(long = "set-speaker-names")]
-    set_speaker_names: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -137,16 +130,14 @@ fn is_audio_file(path: &Path) -> bool {
 }
 
 fn validate_input_path(path: &Path) -> anyhow::Result<()> {
-    use anyhow::{anyhow, Context};
     let display = path.display();
     if !path.exists() {
         return Err(anyhow!("Input not found: {}", display));
     }
-    let md = std::fs::metadata(path).with_context(|| format!("Failed to stat input: {}", display))?;
-    if md.is_dir() {
+    let metadata = std::fs::metadata(path).with_context(|| format!("Failed to stat input: {}", display))?;
+    if metadata.is_dir() {
         return Err(anyhow!("Input is a directory (expected a file): {}", display));
     }
-    // Attempt to open to catch permission errors early
     std::fs::File::open(path)
         .with_context(|| format!("Failed to open input file: {}", display))
         .map(|_| ())
@@ -162,18 +153,18 @@ fn sanitize_speaker_name(raw: &str) -> String {
 }
 
 fn prompt_speaker_name_for_path(
-    path: &Path,
+    _path: &Path,
     default_name: &str,
     enabled: bool,
 ) -> String {
     if !enabled || polyscribe::is_no_interaction() {
         return sanitize_speaker_name(default_name);
     }
-    // Read a single line from stdin (works with piped input in tests). If empty, use default.
-    let mut s = String::new();
-    match std::io::stdin().read_line(&mut s) {
+    // TODO implement cliclack for this
+    let mut input_line = String::new();
+    match std::io::stdin().read_line(&mut input_line) {
         Ok(_) => {
-            let trimmed = s.trim();
+            let trimmed = input_line.trim();
             if trimmed.is_empty() {
                 sanitize_speaker_name(default_name)
             } else {
@@ -205,9 +196,9 @@ fn main() -> Result<()> {
             AuxCommands::Man => {
                 let cmd = Args::command();
                 let man = clap_mangen::Man::new(cmd);
-                let mut out = Vec::new();
-                man.render(&mut out)?;
-                io::stdout().write_all(&out)?;
+                let mut man_bytes = Vec::new();
+                man.render(&mut man_bytes)?;
+                io::stdout().write_all(&man_bytes)?;
                 return Ok(());
             }
         }
@@ -215,17 +206,17 @@ fn main() -> Result<()> {
 
     // Optional model management actions
     if args.download_models {
-        if let Err(e) = polyscribe::models::run_interactive_model_downloader() {
-            polyscribe::elog!("Model downloader failed: {:#}", e);
+        if let Err(err) = polyscribe::models::run_interactive_model_downloader() {
+            polyscribe::elog!("Model downloader failed: {:#}", err);
         }
         if args.inputs.is_empty() {
             return Ok(())
         }
     }
     if args.update_models {
-        if let Err(e) = polyscribe::models::update_local_models() {
-            polyscribe::elog!("Model update failed: {:#}", e);
-            return Err(e);
+        if let Err(err) = polyscribe::models::update_local_models() {
+            polyscribe::elog!("Model update failed: {:#}", err);
+            return Err(err);
         }
         if args.inputs.is_empty() {
             return Ok(())
@@ -241,25 +232,25 @@ fn main() -> Result<()> {
     // If last arg looks like an output path and not existing file, accept it as -o when multiple inputs
     let mut output_path = args.output;
     if output_path.is_none() && inputs.len() >= 2 {
-        if let Some(last) = inputs.last().cloned() {
-            if !Path::new(&last).exists() {
+        if let Some(candidate_output) = inputs.last().cloned() {
+            if !Path::new(&candidate_output).exists() {
                 inputs.pop();
-                output_path = Some(last);
+                output_path = Some(candidate_output);
             }
         }
     }
 
     // Validate inputs; allow JSON and audio. For audio, require --language.
-    for inp in &inputs {
-        let p = Path::new(inp);
-        validate_input_path(p)?;
-        if !(is_json_file(p) || is_audio_file(p)) {
+    for input_arg in &inputs {
+        let path_ref = Path::new(input_arg);
+        validate_input_path(path_ref)?;
+        if !(is_json_file(path_ref) || is_audio_file(path_ref)) {
             return Err(anyhow!(
                 "Unsupported input type (expected .json transcript or audio media): {}",
-                p.display()
+                path_ref.display()
             ));
         }
-        if is_audio_file(p) && args.language.is_none() {
+        if is_audio_file(path_ref) && args.language.is_none() {
             return Err(anyhow!("Please specify --language (e.g., --language en). Language detection was removed."));
         }
     }
@@ -294,6 +285,7 @@ fn main() -> Result<()> {
             let path = Path::new(input_path);
             let speaker = speakers[idx].clone();
             // Decide based on input type (JSON transcript vs audio to transcribe)
+            // TODO remove duplicate
             let mut entries: Vec<OutputEntry> = if is_json_file(path) {
                 let mut buf = String::new();
                 File::open(path)
@@ -308,15 +300,15 @@ fn main() -> Result<()> {
                     .map(|seg| OutputEntry { id: 0, speaker: speaker.clone(), start: seg.start, end: seg.end, text: seg.text })
                     .collect()
             } else {
-                // Audio file: transcribe using backend (this may error when ffmpeg is missing)
                 let lang_norm: Option<String> = args.language.as_deref().and_then(|s| normalize_lang_code(s));
-                let sel = polyscribe::backend::select_backend(polyscribe::backend::BackendKind::Auto, args.verbose > 0)?;
-                sel.backend.transcribe(path, &speaker, lang_norm.as_deref(), None, None)?
+                let selected_backend = polyscribe::backend::select_backend(polyscribe::backend::BackendKind::Auto, args.verbose > 0)?;
+                selected_backend.backend.transcribe(path, &speaker, lang_norm.as_deref(), None, None)?
             };
             // Sort and id per-file
+            // TODO remove duplicate
             entries.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap_or(std::cmp::Ordering::Equal)
                 .then(a.end.partial_cmp(&b.end).unwrap_or(std::cmp::Ordering::Equal)));
-            for (i, e) in entries.iter_mut().enumerate() { e.id = i as u64; }
+            for (i, entry) in entries.iter_mut().enumerate() { entry.id = i as u64; }
             // Write per-file outputs
             let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("output");
             let date = date_prefix();
@@ -325,36 +317,37 @@ fn main() -> Result<()> {
             let toml_path = out_dir.join(format!("{}.toml", &base_name));
             let srt_path = out_dir.join(format!("{}.srt", &base_name));
 
-            let out = OutputRoot { items: entries.clone() };
-            let mut jf = File::create(&json_path).with_context(|| format!("Failed to create output file: {}", json_path.display()))?;
-            serde_json::to_writer_pretty(&mut jf, &out)?; writeln!(&mut jf)?;
-            let toml_str = toml::to_string_pretty(&out)?;
-            let mut tf = File::create(&toml_path).with_context(|| format!("Failed to create output file: {}", toml_path.display()))?;
-            tf.write_all(toml_str.as_bytes())?; if !toml_str.ends_with('\n') { writeln!(&mut tf)?; }
-            let srt_str = render_srt(&out.items);
-            let mut sf = File::create(&srt_path).with_context(|| format!("Failed to create output file: {}", srt_path.display()))?;
-            sf.write_all(srt_str.as_bytes())?;
+            let output_bundle = OutputRoot { items: entries.clone() };
+            let mut json_file = File::create(&json_path).with_context(|| format!("Failed to create output file: {}", json_path.display()))?;
+            serde_json::to_writer_pretty(&mut json_file, &output_bundle)?; writeln!(&mut json_file)?;
+            let toml_str = toml::to_string_pretty(&output_bundle)?;
+            let mut toml_file = File::create(&toml_path).with_context(|| format!("Failed to create output file: {}", toml_path.display()))?;
+            toml_file.write_all(toml_str.as_bytes())?; if !toml_str.ends_with('\n') { writeln!(&mut toml_file)?; }
+            let srt_str = render_srt(&output_bundle.items);
+            let mut srt_file = File::create(&srt_path).with_context(|| format!("Failed to create output file: {}", srt_path.display()))?;
+            srt_file.write_all(srt_str.as_bytes())?;
 
-            merged_entries.extend(out.items.into_iter());
+            merged_entries.extend(output_bundle.items.into_iter());
         }
         // Write merged outputs into out_dir
+        // TODO remove duplicate
         merged_entries.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap_or(std::cmp::Ordering::Equal)
             .then(a.end.partial_cmp(&b.end).unwrap_or(std::cmp::Ordering::Equal)));
-        for (i, e) in merged_entries.iter_mut().enumerate() { e.id = i as u64; }
-        let merged_out = OutputRoot { items: merged_entries };
+        for (index, entry) in merged_entries.iter_mut().enumerate() { entry.id = index as u64; }
+        let merged_output = OutputRoot { items: merged_entries };
         let date = date_prefix();
         let merged_base = format!("{date}_merged");
-        let m_json = out_dir.join(format!("{}.json", &merged_base));
-        let m_toml = out_dir.join(format!("{}.toml", &merged_base));
-        let m_srt = out_dir.join(format!("{}.srt", &merged_base));
-        let mut mj = File::create(&m_json).with_context(|| format!("Failed to create output file: {}", m_json.display()))?;
-        serde_json::to_writer_pretty(&mut mj, &merged_out)?; writeln!(&mut mj)?;
-        let m_toml_str = toml::to_string_pretty(&merged_out)?;
-        let mut mt = File::create(&m_toml).with_context(|| format!("Failed to create output file: {}", m_toml.display()))?;
-        mt.write_all(m_toml_str.as_bytes())?; if !m_toml_str.ends_with('\n') { writeln!(&mut mt)?; }
-        let m_srt_str = render_srt(&merged_out.items);
-        let mut ms = File::create(&m_srt).with_context(|| format!("Failed to create output file: {}", m_srt.display()))?;
-        ms.write_all(m_srt_str.as_bytes())?;
+        let merged_json_path = out_dir.join(format!("{}.json", &merged_base));
+        let merged_toml_path = out_dir.join(format!("{}.toml", &merged_base));
+        let merged_srt_path = out_dir.join(format!("{}.srt", &merged_base));
+        let mut merged_json_file = File::create(&merged_json_path).with_context(|| format!("Failed to create output file: {}", merged_json_path.display()))?;
+        serde_json::to_writer_pretty(&mut merged_json_file, &merged_output)?; writeln!(&mut merged_json_file)?;
+        let merged_toml_str = toml::to_string_pretty(&merged_output)?;
+        let mut merged_toml_file = File::create(&merged_toml_path).with_context(|| format!("Failed to create output file: {}", merged_toml_path.display()))?;
+        merged_toml_file.write_all(merged_toml_str.as_bytes())?; if !merged_toml_str.ends_with('\n') { writeln!(&mut merged_toml_file)?; }
+        let merged_srt_str = render_srt(&merged_output.items);
+        let mut merged_srt_file = File::create(&merged_srt_path).with_context(|| format!("Failed to create output file: {}", merged_srt_path.display()))?;
+        merged_srt_file.write_all(merged_srt_str.as_bytes())?;
         return Ok(());
     }
 
@@ -362,9 +355,9 @@ fn main() -> Result<()> {
     if args.merge {
         polyscribe::dlog!(1, "Mode: merge; output_base={:?}", output_path);
         let mut entries: Vec<OutputEntry> = Vec::new();
-        for (idx, input_path) in inputs.iter().enumerate() {
+        for (index, input_path) in inputs.iter().enumerate() {
             let path = Path::new(input_path);
-            let speaker = speakers[idx].clone();
+            let speaker = speakers[index].clone();
             if is_json_file(path) {
                 let mut buf = String::new();
                 File::open(path)
@@ -377,17 +370,17 @@ fn main() -> Result<()> {
                     entries.push(OutputEntry { id: 0, speaker: speaker.clone(), start: seg.start, end: seg.end, text: seg.text });
                 }
             } else {
-                // Audio file: transcribe and append entries
                 let lang_norm: Option<String> = args.language.as_deref().and_then(|s| normalize_lang_code(s));
-                let sel = polyscribe::backend::select_backend(polyscribe::backend::BackendKind::Auto, args.verbose > 0)?;
-                let mut es = sel.backend.transcribe(path, &speaker, lang_norm.as_deref(), None, None)?;
-                entries.append(&mut es);
+                let selected_backend = polyscribe::backend::select_backend(polyscribe::backend::BackendKind::Auto, args.verbose > 0)?;
+                let mut new_entries = selected_backend.backend.transcribe(path, &speaker, lang_norm.as_deref(), None, None)?;
+                entries.append(&mut new_entries);
             }
         }
+        // TODO remove duplicate
         entries.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap_or(std::cmp::Ordering::Equal)
             .then(a.end.partial_cmp(&b.end).unwrap_or(std::cmp::Ordering::Equal)));
-        for (i, e) in entries.iter_mut().enumerate() { e.id = i as u64; }
-        let out = OutputRoot { items: entries };
+        for (i, entry) in entries.iter_mut().enumerate() { entry.id = i as u64; }
+        let output_bundle = OutputRoot { items: entries };
 
         if let Some(path) = output_path {
             let base_path = Path::new(&path);
@@ -408,17 +401,17 @@ fn main() -> Result<()> {
             let srt_path = dir.join(format!("{}.srt", &base_name));
 
             let mut json_file = File::create(&json_path).with_context(|| format!("Failed to create output file: {}", json_path.display()))?;
-            serde_json::to_writer_pretty(&mut json_file, &out)?; writeln!(&mut json_file)?;
-            let toml_str = toml::to_string_pretty(&out)?;
+            serde_json::to_writer_pretty(&mut json_file, &output_bundle)?; writeln!(&mut json_file)?;
+            let toml_str = toml::to_string_pretty(&output_bundle)?;
             let mut toml_file = File::create(&toml_path).with_context(|| format!("Failed to create output file: {}", toml_path.display()))?;
             toml_file.write_all(toml_str.as_bytes())?; if !toml_str.ends_with('\n') { writeln!(&mut toml_file)?; }
-            let srt_str = render_srt(&out.items);
+            let srt_str = render_srt(&output_bundle.items);
             let mut srt_file = File::create(&srt_path).with_context(|| format!("Failed to create output file: {}", srt_path.display()))?;
             srt_file.write_all(srt_str.as_bytes())?;
         } else {
             let stdout = io::stdout();
             let mut handle = stdout.lock();
-            serde_json::to_writer_pretty(&mut handle, &out)?; writeln!(&mut handle)?;
+            serde_json::to_writer_pretty(&mut handle, &output_bundle)?; writeln!(&mut handle)?;
         }
         return Ok(());
     }
@@ -435,9 +428,10 @@ fn main() -> Result<()> {
         }
     }
 
-    for (idx, input_path) in inputs.iter().enumerate() {
+    for (index, input_path) in inputs.iter().enumerate() {
         let path = Path::new(input_path);
-        let speaker = speakers[idx].clone();
+        let speaker = speakers[index].clone();
+        // TODO remove duplicate
         let mut entries: Vec<OutputEntry> = if is_json_file(path) {
             let mut buf = String::new();
             File::open(path)
@@ -453,13 +447,14 @@ fn main() -> Result<()> {
         } else {
             // Audio file: transcribe to entries
             let lang_norm: Option<String> = args.language.as_deref().and_then(|s| normalize_lang_code(s));
-            let sel = polyscribe::backend::select_backend(polyscribe::backend::BackendKind::Auto, args.verbose > 0)?;
-            sel.backend.transcribe(path, &speaker, lang_norm.as_deref(), None, None)?
+            let selected_backend = polyscribe::backend::select_backend(polyscribe::backend::BackendKind::Auto, args.verbose > 0)?;
+            selected_backend.backend.transcribe(path, &speaker, lang_norm.as_deref(), None, None)?
         };
+        // TODO remove duplicate
         entries.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap_or(std::cmp::Ordering::Equal)
             .then(a.end.partial_cmp(&b.end).unwrap_or(std::cmp::Ordering::Equal)));
-        for (i, e) in entries.iter_mut().enumerate() { e.id = i as u64; }
-        let out = OutputRoot { items: entries };
+        for (i, entry) in entries.iter_mut().enumerate() { entry.id = i as u64; }
+        let output_bundle = OutputRoot { items: entries };
 
         if let Some(dir) = &out_dir {
             let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("output");
@@ -470,17 +465,17 @@ fn main() -> Result<()> {
             let srt_path = dir.join(format!("{}.srt", &base_name));
 
             let mut json_file = File::create(&json_path).with_context(|| format!("Failed to create output file: {}", json_path.display()))?;
-            serde_json::to_writer_pretty(&mut json_file, &out)?; writeln!(&mut json_file)?;
-            let toml_str = toml::to_string_pretty(&out)?;
+            serde_json::to_writer_pretty(&mut json_file, &output_bundle)?; writeln!(&mut json_file)?;
+            let toml_str = toml::to_string_pretty(&output_bundle)?;
             let mut toml_file = File::create(&toml_path).with_context(|| format!("Failed to create output file: {}", toml_path.display()))?;
             toml_file.write_all(toml_str.as_bytes())?; if !toml_str.ends_with('\n') { writeln!(&mut toml_file)?; }
-            let srt_str = render_srt(&out.items);
+            let srt_str = render_srt(&output_bundle.items);
             let mut srt_file = File::create(&srt_path).with_context(|| format!("Failed to create output file: {}", srt_path.display()))?;
             srt_file.write_all(srt_str.as_bytes())?;
         } else {
             let stdout = io::stdout();
             let mut handle = stdout.lock();
-            serde_json::to_writer_pretty(&mut handle, &out)?; writeln!(&mut handle)?;
+            serde_json::to_writer_pretty(&mut handle, &output_bundle)?; writeln!(&mut handle)?;
         }
     }
 
