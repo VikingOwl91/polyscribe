@@ -47,6 +47,16 @@ Tests
   - cargo test
 - The test suite includes CLI-oriented integration tests and unit tests. Some tests simulate GPU detection using env vars (POLYSCRIBE_TEST_FORCE_*). Do not rely on these flags in production code.
 
+Examples check (no network, non-interactive)
+- To quickly validate that example scripts are wired correctly (no prompts, quiet, exit 0), run:
+  - make examples-check
+- What it does:
+  - Iterates over examples/*.sh
+  - Forces execution with --no-interaction and -q via a wrapper
+  - Uses a stubbed BIN that performs no network access and exits successfully
+  - Redirects stdin from /dev/null to ensure no prompts
+- This is intended for CI smoke checks and local verification; it does not actually download models or transcribe audio.
+
 Clippy
 - Run lint checks and treat warnings as errors:
   - cargo clippy --all-targets -- -D warnings
