@@ -133,7 +133,12 @@ fn sanitize_speaker_name(raw: &str) -> String {
     raw.to_string()
 }
 
-fn prompt_speaker_name_for_path(path: &Path, default_name: &str, enabled: bool) -> String {
+fn prompt_speaker_name_for_path(
+    path: &Path,
+    default_name: &str,
+    enabled: bool,
+    _pm: Option<&polyscribe::ui::progress::ProgressManager>,
+) -> String {
     if !enabled {
         return default_name.to_string();
     }
@@ -323,6 +328,12 @@ fn run() -> Result<()> {
         ));
     }
 
+    // Initialize progress manager early to coordinate prompts
+    let mut pm = polyscribe::ui::progress::ProgressManager::default_for_files(inputs.len());
+
+    // Initialize progress manager early to coordinate prompts
+    let mut pm = polyscribe::ui::progress::ProgressManager::default_for_files(inputs.len());
+
     // Collect all speaker names up front (one per input), before any file reading/transcription
     let speakers: Vec<String> = inputs
         .iter()
@@ -333,7 +344,7 @@ fn run() -> Result<()> {
                     .and_then(|s| s.to_str())
                     .unwrap_or("speaker"),
             );
-            prompt_speaker_name_for_path(path, &default_speaker, args.set_speaker_names)
+            prompt_speaker_name_for_path(path, &default_speaker, args.set_speaker_names, Some(&pm))
         })
         .collect();
 
