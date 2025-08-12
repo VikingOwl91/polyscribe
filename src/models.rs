@@ -440,11 +440,26 @@ fn prompt_select_models_two_stage(models: &[ModelEntry]) -> Result<Vec<ModelEntr
         &[],
     )?;
 
-    // Map labels back to entries in stable order
+    // If no variants were explicitly selected, ask for confirmation to download all.
+    // This avoids surprising behavior while still allowing a quick "download all" path.
     let mut picked: Vec<ModelEntry> = Vec::new();
-    for (i, label) in labels.iter().enumerate() {
-        if selected_labels.iter().any(|s| s == label) {
-            picked.push(variants[i].clone().clone());
+    if selected_labels.is_empty() {
+        // Confirm with the user; default to "No" to prevent accidental bulk downloads.
+        if crate::ui::prompt_confirm(&format!("No variants selected. Download ALL {base} variants?"), false).unwrap_or(false) {
+            crate::qlog!("Downloading all {base} variants as requested.");
+            for v in &variants {
+                picked.push((*v).clone());
+            }
+        } else {
+            // User declined; return empty selection so caller can abort gracefully.
+            return Ok(Vec::new());
+        }
+    } else {
+        // Map labels back to entries in stable order
+        for (i, label) in labels.iter().enumerate() {
+            if selected_labels.iter().any(|s| s == label) {
+                picked.push(variants[i].clone());
+            }
         }
     }
 
@@ -480,6 +495,11 @@ pub fn run_interactive_model_downloader() -> Result<()> {
         .build()
         .context("Failed to build HTTP client")?;
 
+    // Set up a temporary progress manager so INFO/WARN logs render within the UI.
+    let pf0 = crate::progress::ProgressFactory::from_config(&crate::Config::from_globals());
+    let pm0 = pf0.make_manager(crate::progress::ProgressMode::Single);
+    crate::progress::set_global_progress_manager(&pm0);
+
     ilog!(
         "Fetching online data: contacting Hugging Face to retrieve available models (this may take a moment)..."
     );
@@ -493,11 +513,162 @@ pub fn run_interactive_model_downloader() -> Result<()> {
         qlog!("No selection. Aborting download.");
         return Ok(());
     }
+    // Set up progress bars for downloads
+    let pf = crate::progress::ProgressFactory::from_config(&crate::Config::from_globals());
+    let pm = pf.make_manager(crate::progress::ProgressMode::Multi { total_inputs: selected.len() as u64 });
+    crate::progress::set_global_progress_manager(&pm);
+    // Install Ctrl-C cleanup to ensure partial downloads (*.part) are removed on cancel
+    crate::progress::install_ctrlc_cleanup(pm.clone());
+    pm.set_total(selected.len());
     for m in selected {
-        if let Err(e) = download_one_model(&client, models_dir, &m) {
+        let label = format!("{} ({} total)", m.name, human_size(m.size));
+        let item = pm.start_item(&label);
+        // Initialize message
+        if m.size > 0 { update_item_progress(&item, 0, m.size); }
+        if let Err(e) = download_one_model_with_progress(&client, models_dir, &m, &item) {
+            item.finish_with("done");
             elog!("Error: {:#}", e);
         }
+        pm.inc_completed();
     }
+    pm.finish_all();
+    Ok(())
+}
+
+/// Internal helper: update a per-item progress handle with bytes progress.
+fn update_item_progress(item: &crate::progress::ItemHandle, done_bytes: u64, total_bytes: u64) {
+    let total_mib = (total_bytes as f64) / (1024.0 * 1024.0);
+    let done_mib = (done_bytes as f64) / (1024.0 * 1024.0);
+    let pct = if total_bytes > 0 { ((done_bytes as f64) * 100.0 / (total_bytes as f64)).round() } else { 0.0 };
+    item.set_message(&format!("{:.2}/{:.2} MiB ({:.0}%)", done_mib, total_mib, pct));
+    if total_bytes > 0 {
+        item.set_progress((done_bytes as f32) / (total_bytes as f32));
+    }
+}
+
+/// Internal streaming helper used by both network and tests.
+fn stream_with_progress<R: Read, W: Write>(mut reader: R, mut writer: W, total: u64, item: &crate::progress::ItemHandle) -> Result<(u64, String)> {
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 1024 * 128];
+    let mut done: u64 = 0;
+    if total > 0 {
+        // initialize bar to determinate length 100
+        item.set_progress(0.0);
+    }
+    loop {
+        let n = reader.read(&mut buf).context("Network/read error")?;
+        if n == 0 { break; }
+        hasher.update(&buf[..n]);
+        writer.write_all(&buf[..n]).context("Write error")?;
+        done += n as u64;
+        update_item_progress(item, done, total);
+    }
+    writer.flush().ok();
+    let got = to_hex_lower(&hasher.finalize());
+    Ok((done, got))
+}
+
+/// Download a single model entry into the given models directory, verifying SHA-256 when available, with visible progress.
+fn download_one_model_with_progress(client: &Client, models_dir: &Path, entry: &ModelEntry, item: &crate::progress::ItemHandle) -> Result<()> {
+    let final_path = models_dir.join(format!("ggml-{}.bin", entry.name));
+
+    // Same pre-checks as the non-progress version (up-to-date checks)
+    if final_path.exists() {
+        if let Some(expected) = &entry.sha256 {
+            match compute_file_sha256_hex(&final_path) {
+                Ok(local_hash) => {
+                    if local_hash.eq_ignore_ascii_case(expected) {
+                        item.set_message(&format!("{} up-to-date", entry.name));
+                        item.set_progress(1.0);
+                        item.finish_with("done");
+                        return Ok(());
+                    }
+                }
+                Err(_) => { /* proceed to download */ }
+            }
+        } else if entry.size > 0 {
+            if let Ok(md) = std::fs::metadata(&final_path) {
+                if md.len() == entry.size {
+                    item.set_message(&format!("{} up-to-date", entry.name));
+                    item.set_progress(1.0);
+                    item.finish_with("done");
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    // Offline/local copy mode for tests (same behavior, but reflect via item)
+    if let Ok(base_dir) = env::var("POLYSCRIBE_MODELS_BASE_COPY_DIR") {
+        let src_path = std::path::Path::new(&base_dir).join(format!("ggml-{}.bin", entry.name));
+        if src_path.exists() {
+            let tmp_path = models_dir.join(format!("ggml-{}.bin.part", entry.name));
+            if tmp_path.exists() { let _ = std::fs::remove_file(&tmp_path); }
+            std::fs::copy(&src_path, &tmp_path).with_context(|| {
+                format!("Failed to copy from {} to {}", src_path.display(), tmp_path.display())
+            })?;
+            if let Some(expected) = &entry.sha256 {
+                let got = compute_file_sha256_hex(&tmp_path)?;
+                if !got.eq_ignore_ascii_case(expected) {
+                    let _ = std::fs::remove_file(&tmp_path);
+                    return Err(anyhow!("SHA-256 mismatch for {} (copied): expected {}, got {}", entry.name, expected, got));
+                }
+            }
+            if final_path.exists() { let _ = std::fs::remove_file(&final_path); }
+            std::fs::rename(&tmp_path, &final_path).with_context(|| format!("Failed to move into place: {}", final_path.display()))?;
+            item.set_progress(1.0);
+            item.finish_with("done");
+            return Ok(());
+        }
+    }
+
+    let url = format!(
+        "https://huggingface.co/{}/resolve/main/ggml-{}.bin",
+        entry.repo, entry.name
+    );
+
+    let mut resp = client
+        .get(url)
+        .send()
+        .and_then(|r| r.error_for_status())
+        .context("Failed to download model")?;
+
+    let tmp_path = models_dir.join(format!("ggml-{}.bin.part", entry.name));
+    if tmp_path.exists() { let _ = std::fs::remove_file(&tmp_path); }
+    let mut file = std::io::BufWriter::new(
+        File::create(&tmp_path).with_context(|| format!("Failed to create {}", tmp_path.display()))?,
+    );
+
+    // Determine total bytes (prefer metadata/HEAD-derived entry.size)
+    let total = if entry.size > 0 { entry.size } else { resp.content_length().unwrap_or(0) };
+
+    // Stream with progress
+    let (_bytes, hash_hex) = stream_with_progress(&mut resp, &mut file, total, item)?;
+
+    // Verify
+    item.set_message("sha256 verifying…");
+    if let Some(expected) = &entry.sha256 {
+        if hash_hex.to_lowercase() != expected.to_lowercase() {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(anyhow!(
+                "SHA-256 mismatch for {}: expected {}, got {}",
+                entry.name,
+                expected,
+                hash_hex
+            ));
+        }
+    } else {
+        qlog!(
+            "Warning: no SHA-256 available for {}. Skipping verification.",
+            entry.name
+        );
+    }
+
+    // Replace existing file safely
+    if final_path.exists() { let _ = std::fs::remove_file(&final_path); }
+    std::fs::rename(&tmp_path, &final_path)
+        .with_context(|| format!("Failed to move into place: {}", final_path.display()))?;
+    item.finish_with("done");
     Ok(())
 }
 
@@ -700,6 +871,11 @@ pub fn update_local_models() -> Result<()> {
         .timeout(std::time::Duration::from_secs(600))
         .build()
         .context("Failed to build HTTP client")?;
+
+    // Ensure logs go through cliclack area during update as well
+    let pf_up = crate::progress::ProgressFactory::from_config(&crate::Config::from_globals());
+    let pm_up = pf_up.make_manager(crate::progress::ProgressMode::Single);
+    crate::progress::set_global_progress_manager(&pm_up);
 
     // Obtain manifest: env override or online fetch
     let models: Vec<ModelEntry> = if let Ok(manifest_path) = env::var("POLYSCRIBE_MODELS_MANIFEST")
@@ -1069,6 +1245,33 @@ mod tests {
         unsafe {
             std::env::remove_var("XDG_DATA_HOME");
             std::env::remove_var("HOME");
+        }
+    }
+
+    #[test]
+    fn test_download_progress_bar_reaches_done() {
+        use std::io::Cursor;
+        // Prepare small fake stream of 300 KiB
+        let data = vec![42u8; 300 * 1024];
+        let total = data.len() as u64;
+        let cursor = Cursor::new(data);
+        let mut sink: Vec<u8> = Vec::new();
+        let pm = crate::progress::ProgressManager::new_for_tests_multi_hidden(1);
+        let item = pm.start_item("test-download");
+        // Stream into sink while updating progress
+        let (_bytes, _hash) = super::stream_with_progress(cursor, &mut sink, total, &item).unwrap();
+        // Transition to verifying and finish
+        item.set_message("sha256 verifying…");
+        item.finish_with("done");
+        // Inspect current bar state
+        if let Some((pos, len, finished, msg)) = pm.current_state_for_tests() {
+            // Ensure determinate length is 100 and we reached 100
+            assert_eq!(len, 100);
+            assert_eq!(pos, 100);
+            assert!(finished);
+            assert!(msg.contains("done"));
+        } else {
+            panic!("progress manager did not expose current state");
         }
     }
 }

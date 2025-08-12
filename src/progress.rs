@@ -8,6 +8,35 @@ use std::time::Instant;
 
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 
+// Global hook to route logs through the active progress manager so they render within
+// the same cliclack/indicatif area instead of raw stderr.
+static GLOBAL_PM: std::sync::Mutex<Option<ProgressManager>> = std::sync::Mutex::new(None);
+
+/// Install a global ProgressManager used for printing log lines above bars.
+pub fn set_global_progress_manager(pm: &ProgressManager) {
+    if let Ok(mut g) = GLOBAL_PM.lock() {
+        *g = Some(pm.clone());
+    }
+}
+
+/// Remove the global ProgressManager hook.
+pub fn clear_global_progress_manager() {
+    if let Ok(mut g) = GLOBAL_PM.lock() {
+        *g = None;
+    }
+}
+
+/// Try to print a line via the global ProgressManager, returning true if handled.
+pub fn log_line_via_global(line: &str) -> bool {
+    if let Ok(g) = GLOBAL_PM.lock() {
+        if let Some(pm) = g.as_ref() {
+            pm.println_above_bars(line);
+            return true;
+        }
+    }
+    false
+}
+
 const NAME_WIDTH: usize = 28;
 
 #[derive(Debug, Clone)]
@@ -209,6 +238,25 @@ impl ProgressManager {
         match &self.inner {
             ProgressInner::Multi(m) => Some((m.total.position(), m.total.length().unwrap_or(0))),
             _ => None,
+        }
+    }
+
+    /// Test helper: get state of the current item bar (position, length, finished, message).
+    pub fn current_state_for_tests(&self) -> Option<(u64, u64, bool, String)> {
+        match &self.inner {
+            ProgressInner::Single(s) => Some((
+                s.current.position(),
+                s.current.length().unwrap_or(0),
+                s.current.is_finished(),
+                s.current.message().to_string(),
+            )),
+            ProgressInner::Multi(m) => Some((
+                m.current.position(),
+                m.current.length().unwrap_or(0),
+                m.current.is_finished(),
+                m.current.message().to_string(),
+            )),
+            ProgressInner::Noop => None,
         }
     }
 
@@ -501,7 +549,7 @@ pub fn select_mode(si: SelectionInput) -> (bool, ProgressMode) {
     (enabled, mode)
 }
 
-/// Optional Ctrl-C cleanup: clears progress bars and removes .last_model before exiting on SIGINT.
+/// Optional Ctrl-C cleanup: clears progress bars and removes temporary files before exiting on SIGINT.
 pub fn install_ctrlc_cleanup(pm: ProgressManager) {
     let state = Arc::new(Mutex::new(Some(pm.clone())));
     let state_clone = state.clone();
@@ -513,8 +561,20 @@ pub fn install_ctrlc_cleanup(pm: ProgressManager) {
             }
         }
         // Best-effort removal of the last-model cache so it doesn't persist after Ctrl-C
-        let last_path = crate::models_dir_path().join(".last_model");
+        let models_dir = crate::models_dir_path();
+        let last_path = models_dir.join(".last_model");
         let _ = std::fs::remove_file(&last_path);
+        // Also remove any unfinished model downloads ("*.part")
+        if let Ok(rd) = std::fs::read_dir(&models_dir) {
+            for entry in rd.flatten() {
+                let p = entry.path();
+                if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
+                    if name.ends_with(".part") {
+                        let _ = std::fs::remove_file(&p);
+                    }
+                }
+            }
+        }
         // Exit with 130 to reflect SIGINT
         std::process::exit(130);
     }) {

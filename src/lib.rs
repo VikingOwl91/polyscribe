@@ -179,7 +179,8 @@ where
 #[macro_export]
 macro_rules! elog {
     ($($arg:tt)*) => {{
-        eprintln!("ERROR: {}", format!($($arg)*));
+        // Route errors through the progress area when available so they render inside cliclack
+        $crate::log_with_level!("ERROR", None, true, $($arg)*);
     }}
 }
 /// Internal helper macro used by other logging macros to centralize the
@@ -196,7 +197,11 @@ macro_rules! log_with_level {
             !$crate::is_quiet()
         };
         if should_print {
-            eprintln!("{}: {}", $label, format!($($arg)*));
+            let line = format!("{}: {}", $label, format!($($arg)*));
+            // Try to render via the active progress manager (cliclack/indicatif area).
+            if !$crate::progress::log_line_via_global(&line) {
+                eprintln!("{}", line);
+            }
         }
     }}
 }
