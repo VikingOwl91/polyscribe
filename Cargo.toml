@@ -29,9 +29,7 @@ chrono = { version = "0.4", features = ["clock"] }
 reqwest = { version = "0.12", features = ["blocking", "json"] }
 sha2 = "0.10"
 # Make whisper-rs optional; enabled via `whisper` feature
-# Pin whisper-rs to a known-good commit for reproducible builds.
-# To update: run `cargo update -p whisper-rs --precise 135b60b85a15714862806b6ea9f76abec38156f1` (adjust SHA) and update this rev.
-whisper-rs = { git = "https://github.com/tazz4843/whisper-rs", rev = "135b60b85a15714862806b6ea9f76abec38156f1", default-features = false, optional = true }
+whisper-rs = { git = "https://github.com/tazz4843/whisper-rs", default-features = false, optional = true }
 libc = "0.2"
 indicatif = "0.17"
 ctrlc = "3.4"
