@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 static QUIET: AtomicBool = AtomicBool::new(false);
 static NO_INTERACTION: AtomicBool = AtomicBool::new(false);
 static VERBOSE: AtomicU8 = AtomicU8::new(0);
+static NO_PROGRESS: AtomicBool = AtomicBool::new(false);
 
 /// Set quiet mode: when true, non-interactive logs should be suppressed.
 pub fn set_quiet(q: bool) {
@@ -45,6 +46,15 @@ pub fn set_verbose(level: u8) {
 /// Get current verbose level.
 pub fn verbose_level() -> u8 {
     VERBOSE.load(Ordering::Relaxed)
+}
+
+/// Disable interactive progress indicators (bars/spinners)
+pub fn set_no_progress(b: bool) {
+    NO_PROGRESS.store(b, Ordering::Relaxed);
+}
+/// Return current no-progress state
+pub fn is_no_progress() -> bool {
+    NO_PROGRESS.load(Ordering::Relaxed)
 }
 
 /// Check whether stdin is connected to a TTY. Used to avoid blocking prompts when not interactive.
@@ -246,7 +256,7 @@ pub mod ui {
 
             /// Create a manager that enables bars when `n > 1`, stderr is a TTY, and not quiet.
             pub fn default_for_files(n: usize) -> Self {
-                let enabled = n > 1 && atty::is(Stream::Stderr) && !crate::is_quiet();
+                let enabled = n > 1 && atty::is(Stream::Stderr) && !crate::is_quiet() && !crate::is_no_progress();
                 Self::new(enabled)
             }
 

@@ -14,6 +14,8 @@ use reqwest::blocking::Client;
 use reqwest::redirect::Policy;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use indicatif::{ProgressBar, ProgressStyle};
+use atty::Stream;
 
 // --- Model downloader: list & download ggml models from Hugging Face ---
 
@@ -693,21 +695,47 @@ fn download_one_model(client: &Client, models_dir: &Path, entry: &ModelEntry) ->
             .with_context(|| format!("Failed to create {}", tmp_path.display()))?,
     );
 
+    // Set up progress bar if interactive and we know size
+    let show_progress = !crate::is_quiet() && !crate::is_no_progress() && atty::is(Stream::Stderr) && entry.size > 0;
+    let pb_opt = if show_progress {
+        let pb = ProgressBar::new(entry.size);
+        let style = ProgressStyle::with_template("Downloading {prefix} ({total_bytes}) [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({percent}%)")
+            .unwrap()
+            .progress_chars("=>-");
+        pb.set_style(style);
+        pb.set_prefix(format!("{}", entry.name));
+        Some(pb)
+    } else { None };
+
     let mut hasher = Sha256::new();
+    let mut downloaded: u64 = 0;
     let mut buf = [0u8; 1024 * 128];
+    let mut read_err: Option<anyhow::Error> = None;
     loop {
-        let n = resp.read(&mut buf).context("Network read error")?;
-        if n == 0 {
-            break;
+        let nres = resp.read(&mut buf);
+        match nres {
+            Ok(n) => {
+                if n == 0 { break; }
+                hasher.update(&buf[..n]);
+                if let Err(e) = file.write_all(&buf[..n]) { read_err = Some(anyhow!(e)); break; }
+                downloaded += n as u64;
+                if let Some(pb) = &pb_opt { pb.set_position(downloaded.min(entry.size)); }
+            }
+            Err(e) => { read_err = Some(anyhow!("Network read error: {}", e)); break; }
         }
-        hasher.update(&buf[..n]);
-        file.write_all(&buf[..n]).context("Write error")?;
     }
     file.flush().ok();
+
+    if let Some(err) = read_err {
+        if let Some(pb) = &pb_opt { pb.abandon_with_message("download failed"); }
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(err);
+    }
 
     let got = to_hex_lower(&hasher.finalize());
     if let Some(expected) = &entry.sha256 {
         if got != expected.to_lowercase() {
+            if let Some(pb) = &pb_opt { pb.abandon_with_message("hash mismatch"); }
             let _ = std::fs::remove_file(&tmp_path);
             return Err(anyhow!(
                 "SHA-256 mismatch for {}: expected {}, got {}",
@@ -728,6 +756,7 @@ fn download_one_model(client: &Client, models_dir: &Path, entry: &ModelEntry) ->
     }
     std::fs::rename(&tmp_path, &final_path)
         .with_context(|| format!("Failed to move into place: {}", final_path.display()))?;
+    if let Some(pb) = &pb_opt { pb.finish_with_message("saved"); }
     qlog!("Saved: {}", final_path.display());
     Ok(())
 }
@@ -805,7 +834,17 @@ pub fn update_local_models() -> Result<()> {
         if let Some(remote) = map.get(&model_name) {
             // If SHA256 available, verify and update if mismatch
             if let Some(expected) = &remote.sha256 {
-                match compute_file_sha256_hex(&path) {
+                // Show a small spinner while verifying hash (TTY, not quiet, not no-progress)
+                let show_spin = !crate::is_quiet() && !crate::is_no_progress() && atty::is(Stream::Stderr);
+                let spinner = if show_spin {
+                    let pb = ProgressBar::new_spinner();
+                    pb.enable_steady_tick(std::time::Duration::from_millis(100));
+                    pb.set_message(format!("Verifying {}", fname));
+                    Some(pb)
+                } else { None };
+                let verify_res = compute_file_sha256_hex(&path);
+                if let Some(pb) = &spinner { pb.finish_and_clear(); }
+                match verify_res {
                     Ok(local_hash) => {
                         if local_hash.eq_ignore_ascii_case(expected) {
                             qlog!("{} is up-to-date.", fname);

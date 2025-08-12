@@ -55,6 +55,10 @@ struct Args {
     #[arg(long = "no-interaction", global = true)]
     no_interaction: bool,
 
+    /// Disable interactive progress indicators (bars/spinners)
+    #[arg(long = "no-progress", global = true)]
+    no_progress: bool,
+
     /// Optional auxiliary subcommands (completions, man)
     #[command(subcommand)]
     aux: Option<AuxCommands>,
@@ -218,6 +222,7 @@ fn run() -> Result<()> {
     polyscribe::set_verbose(args.verbose);
     polyscribe::set_quiet(args.quiet);
     polyscribe::set_no_interaction(args.no_interaction);
+    polyscribe::set_no_progress(args.no_progress);
 
     // Startup banner via UI (TTY-aware through cliclack), suppressed when quiet
     polyscribe::ui::intro(format!("PolyScribe v{}", env!("CARGO_PKG_VERSION")));
