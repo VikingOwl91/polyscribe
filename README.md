@@ -30,8 +30,12 @@ Quickstart
 - ./target/release/polyscribe --download-models
 
 2) Transcribe a file:
-- ./target/release/polyscribe -v -o output my_audio.mp3
-This writes JSON and SRT into the output directory with a date prefix.
+- ./target/release/polyscribe -v -o output --out-format json --jobs 4 my_audio.mp3
+This writes JSON (because of --out-format json) into the output directory with a date prefix. Omit --out-format to write all available formats (JSON and SRT). For large batches, add --continue-on-error to skip bad files and keep going.
+
+Gotchas
+- English-only models: If you picked an English-only Whisper model (e.g., tiny.en, base.en), non-English language hints (via --language) will be rejected and detection may be biased toward English. Use a multilingual model (without the .en suffix) for non-English audio.
+- Language hints help: When you know the language, pass --language <code> (e.g., --language de) to improve accuracy and speed. If the audio is mixed language, omit the hint to let the model detect.
 
 Shell completions and man page
 - Completions: ./target/release/polyscribe completions <bash|zsh|fish|powershell|elvish> > polyscribe.<ext>
