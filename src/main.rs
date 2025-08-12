@@ -6,7 +6,7 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
-use clap::{Parser, Subcommand, CommandFactory};
+use clap::{Parser, Subcommand};
 use clap_complete::Shell;
 use serde::{Deserialize, Serialize};
 
@@ -120,10 +120,6 @@ struct Args {
     /// Prompt for speaker names per input file
     #[arg(long = "set-speaker-names")]
     set_speaker_names: bool,
-
-    /// Continue processing other inputs even if some fail; exit non-zero if any failed
-    #[arg(long = "continue-on-error")]
-    continue_on_error: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -175,24 +171,9 @@ fn prompt_speaker_name_for_path(path: &Path, default_name: &str, enabled: bool, 
     pm.pause_for_prompt();
     let answer = {
         let prompt = format!("Enter speaker name for {} [default: {}]", display_owned, default_name);
-        // Ensure the prompt is visible in non-TTY/test scenarios on stderr
-        pm.println_above_bars(&prompt);
-        // Prefer TTY prompt; if that fails (e.g., piped stdin), fall back to raw stdin line
         match polyscribe::ui::prompt_text(&prompt, default_name) {
             Ok(ans) => ans,
-            Err(_) => {
-                // Fallback: read a single line from stdin
-                use std::io::Read as _;
-                let mut buf = String::new();
-                // Read up to newline; if nothing, use default
-                match std::io::stdin().read_line(&mut buf) {
-                    Ok(_) => {
-                        let t = buf.trim();
-                        if t.is_empty() { default_name.to_string() } else { t.to_string() }
-                    }
-                    Err(_) => default_name.to_string(),
-                }
-            }
+            Err(_) => default_name.to_string(),
         }
     };
     pm.resume_after_prompt();
@@ -257,217 +238,711 @@ where
     f()
 }
 
-// Rust
 fn run() -> Result<()> {
-    use std::time::{Duration, Instant};
-
+    // Compute selected output formats from CLI flags (default: all)
+    fn compute_output_formats(args: &Args) -> OutputFormats {
+        if args.out_format.is_empty() {
+            return OutputFormats::all();
+        }
+        let mut formats = OutputFormats { json: false, toml: false, srt: false };
+        for f in &args.out_format {
+            match f {
+                OutFormatCli::All => return OutputFormats::all(),
+                OutFormatCli::Json => formats.json = true,
+                OutFormatCli::Toml => formats.toml = true,
+                OutFormatCli::Srt => formats.srt = true,
+            }
+        }
+        formats
+    }
+    use polyscribe::progress::ProgressFactory;
+    // Parse CLI
     let args = Args::parse();
+    // Determine which on-disk output formats to write
+    let selected_formats = compute_output_formats(&args);
 
-    // Configure global flags for library and stderr silencing.
-    polyscribe::set_quiet(args.quiet);
+    // Initialize runtime flags
     polyscribe::set_verbose(args.verbose);
+    polyscribe::set_quiet(args.quiet);
     polyscribe::set_no_interaction(args.no_interaction);
-    let _silence = polyscribe::StderrSilencer::activate_if_quiet();
 
-    // Handle auxiliary subcommands early and exit.
+    // Handle auxiliary subcommands that write to stdout and exit early
     if let Some(aux) = &args.aux {
+        use clap::CommandFactory;
         match aux {
             AuxCommands::Completions { shell } => {
                 let mut cmd = Args::command();
                 let bin_name = cmd.get_name().to_string();
-                let mut stdout = std::io::stdout();
-                clap_complete::generate(*shell, &mut cmd, bin_name, &mut stdout);
+                clap_complete::generate(*shell, &mut cmd, bin_name, &mut io::stdout());
                 return Ok(());
             }
             AuxCommands::Man => {
                 let cmd = Args::command();
                 let man = clap_mangen::Man::new(cmd);
-                let mut buf: Vec<u8> = Vec::new();
-                man.render(&mut buf).context("failed to render man page")?;
-                print!("{}", String::from_utf8_lossy(&buf));
+                let mut out = Vec::new();
+                man.render(&mut out)?;
+                io::stdout().write_all(&out)?;
                 return Ok(());
             }
         }
     }
 
-    // Disable complex progress bars for integration-friendly behavior
-    let pf = ProgressFactory::new(true);
-    let pm = pf.make_manager(pf.decide_mode(args.inputs.len()));
-
-    // Determine formats
-    let out_formats = if args.out_format.is_empty() {
-        OutputFormats::all()
-    } else {
-        let mut f = OutputFormats { json: false, toml: false, srt: false };
-        for of in &args.out_format {
-            match of {
-                OutFormatCli::Json => f.json = true,
-                OutFormatCli::Toml => f.toml = true,
-                OutFormatCli::Srt => f.srt = true,
-                OutFormatCli::All => { f.json = true; f.toml = true; f.srt = true; }
-            }
-        }
-        f
+    // Defer cleanup of .last_model until program exit
+    let models_dir_buf = models_dir_path();
+    let last_model_path = models_dir_buf.join(".last_model");
+    // Ensure cleanup at end of program, regardless of exit path
+    let _last_model_cleanup = LastModelCleanup {
+        path: last_model_path.clone(),
     };
 
-    let do_merge = args.merge || args.merge_and_separate;
-    if polyscribe::verbose_level() >= 1 && !args.quiet {
-        eprintln!("Mode: {}", if do_merge { "merge" } else { "separate" });
+    // Also ensure cleanup on panic: install a panic hook that removes .last_model, then chains
+    {
+        let last_for_panic = last_model_path.clone();
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let _ = std::fs::remove_file(&last_for_panic);
+            // chain to default/previous hook for normal panic reporting
+            prev_hook(info);
+        }));
     }
 
-    // Collect inputs and default speakers
-    let mut plan: Vec<(PathBuf, String)> = Vec::new();
-    for raw in &args.inputs {
-        let p = PathBuf::from(raw);
-        let default_speaker = p
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .map(|s| sanitize_speaker_name(s))
-            .unwrap_or_else(|| "unknown".to_string());
-        let speaker = prompt_speaker_name_for_path(&p, &default_speaker, args.set_speaker_names, &pm);
-        plan.push((p, speaker));
+    // Select backend
+    let requested = match args.gpu_backend {
+        GpuBackendCli::Auto => BackendKind::Auto,
+        GpuBackendCli::Cpu => BackendKind::Cpu,
+        GpuBackendCli::Cuda => BackendKind::Cuda,
+        GpuBackendCli::Hip => BackendKind::Hip,
+        GpuBackendCli::Vulkan => BackendKind::Vulkan,
+    };
+    let sel = select_backend(requested, args.verbose > 0)?;
+    polyscribe::dlog!(1, "Using backend: {:?}", sel.chosen);
+
+    // If requested, run the interactive model downloader first. If no inputs were provided, exit after downloading.
+    if args.download_models {
+        if let Err(e) = polyscribe::models::run_interactive_model_downloader() {
+            polyscribe::elog!("Model downloader failed: {:#}", e);
+        }
+        if args.inputs.is_empty() {
+            return Ok(());
+        }
     }
 
-    // Helper to read a JSON transcript file
-    fn read_json_file(path: &Path) -> Result<InputRoot> {
-        let mut f = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
-        let mut s = String::new();
-        f.read_to_string(&mut s)?;
-        let root: InputRoot = serde_json::from_str(&s).with_context(|| format!("failed to parse {}", path.display()))?;
-        Ok(root)
+    // If requested, update local models and exit unless inputs provided to continue
+    if args.update_models {
+        if let Err(e) = polyscribe::models::update_local_models() {
+            polyscribe::elog!("Model update failed: {:#}", e);
+            return Err(e);
+        }
+        // if only updating models and no inputs, exit
+        if args.inputs.is_empty() {
+            return Ok(());
+        }
     }
 
-    // Build outputs depending on mode
-    let mut summary: Vec<(String, String, bool, Duration)> = Vec::new();
+    // Determine inputs and optional output path
+    polyscribe::dlog!(1, "Parsed {} input(s)", args.inputs.len());
 
-    // After collecting speakers, echo the mapping with blank separators for consistency
-    if !plan.is_empty() {
-        pm.println_above_bars("");
-        for (path, speaker) in &plan {
-            let fname: String = path
-                .file_name()
+    // Progress will be initialized after all prompts are completed
+    // Install Ctrl-C cleanup that removes .last_model and exits 130 on SIGINT
+    let last_for_ctrlc = last_model_path.clone();
+    ctrlc::set_handler(move || {
+        let _ = std::fs::remove_file(&last_for_ctrlc);
+        std::process::exit(130);
+    })
+    .expect("failed to set ctrlc handler");
+
+    let mut inputs = args.inputs;
+    let mut output_path = args.output;
+    if output_path.is_none() && inputs.len() >= 2 {
+        if let Some(last) = inputs.last().cloned() {
+            if !Path::new(&last).exists() {
+                inputs.pop();
+                output_path = Some(last);
+            }
+        }
+    }
+    if inputs.is_empty() {
+        return Err(anyhow!("No input files provided"));
+    }
+
+    // Language must be provided via CLI when transcribing audio (no detection from JSON/env)
+    let lang_hint: Option<String> = if let Some(ref l) = args.language {
+        normalize_lang_code(l).or_else(|| Some(l.trim().to_lowercase()))
+    } else {
+        None
+    };
+    let any_audio = inputs.iter().any(|p| is_audio_file(Path::new(p)));
+    if any_audio && lang_hint.is_none() {
+        return Err(anyhow!(
+            "Please specify --language (e.g., --language en). Language detection was removed."
+        ));
+    }
+
+    // Initialize progress manager BEFORE any interactive prompts so we can route
+    // prompt lines via the synchronized ProgressManager APIs
+    let pf = ProgressFactory::new(args.no_progress || args.quiet);
+    let mode = pf.decide_mode(inputs.len());
+    let progress = pf.make_manager(mode);
+    progress.set_total(inputs.len());
+    polyscribe::dlog!(1, "Progress mode: {:?}", mode);
+
+    // Trigger model selection once upfront so any interactive messages appear cleanly
+    if any_audio {
+        progress.pause_for_prompt();
+        if let Err(e) = polyscribe::find_model_file_with_printer(|s: &str| {
+            progress.println_above_bars(s);
+        }) {
+            progress.resume_after_prompt();
+            return Err(e);
+        }
+        // Blank line after model selection prompts
+        progress.println_above_bars("");
+        progress.resume_after_prompt();
+    }
+
+    // 1) Prompt all speaker names upfront (before creating per-file bars), respecting non-interactive stdin
+    let mut speakers: Vec<String> = Vec::new();
+    for s in &inputs {
+        let path = Path::new(s);
+        let default_speaker = sanitize_speaker_name(
+            path.file_stem()
                 .and_then(|s| s.to_str())
+                .unwrap_or("speaker"),
+        );
+        let name = prompt_speaker_name_for_path(path, &default_speaker, args.set_speaker_names, &progress);
+        speakers.push(name);
+    }
+
+    // 2) After collecting names, optionally print a compact mapping once
+    // Only when interactive and not quiet
+    if !args.quiet && !polyscribe::is_no_interaction() {
+        progress.println_above_bars("Files to process:");
+        for e in inputs.iter().zip(speakers.iter()) {
+            let (input, speaker) = e;
+            let p = Path::new(input);
+            let display = p
+                .file_name()
+                .and_then(|os| os.to_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| p.to_string_lossy().to_string());
+            progress.println_above_bars(&format!(" - {} -> {}", display, speaker));
+        }
+        // Blank line before progress display
+        progress.println_above_bars("");
+    }
+
+    if args.merge_and_separate {
+        polyscribe::dlog!(1, "Mode: merge-and-separate; output_dir={:?}", output_path);
+        // Combined mode: write separate outputs per input and also a merged output set
+        // Require an output directory
+        let out_dir = match output_path.as_ref() {
+            Some(p) => PathBuf::from(p),
+            None => return Err(anyhow!("--merge-and-separate requires -o OUTPUT_DIR")),
+        };
+        if !out_dir.as_os_str().is_empty() {
+            create_dir_all(&out_dir).with_context(|| {
+                format!("Failed to create output directory: {}", out_dir.display())
+            })?;
+        }
+
+        let mut merged_entries: Vec<OutputEntry> = Vec::new();
+
+        let mut completed_count: usize = 0;
+        let total_inputs = inputs.len();
+        let mut summary: Vec<(String, String, bool, std::time::Duration)> = Vec::with_capacity(total_inputs);
+        for (idx, input_path) in inputs.iter().enumerate() {
+            let path = Path::new(input_path);
+            let started_at = std::time::Instant::now();
+            let display_name = path
+                .file_name()
+                .and_then(|os| os.to_str())
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| path.to_string_lossy().to_string());
-            pm.println_above_bars(&format!(" - {}: {}", fname, speaker));
-        }
-        pm.println_above_bars("");
-    }
-    let mut had_error = false;
-
-    // For merge JSON emission if stdout
-    let mut merged_items: Vec<polyscribe::OutputEntry> = Vec::new();
-
-    let start_overall = Instant::now();
-
-    if do_merge {
-        for (i, (path, speaker)) in plan.iter().enumerate() {
-            let start = Instant::now();
-            if !path.exists() {
-                had_error = true;
-                summary.push((
-                    path.file_name().and_then(|s| s.to_str().map(|s| s.to_string())).unwrap_or_else(|| path.to_string_lossy().to_string()),
-                    speaker.clone(),
-                    false,
-                    start.elapsed(),
-                ));
-                if !args.continue_on_error {
-                    break;
-                }
-                continue;
+            // Single progress area: one item spinner/bar
+            let item = progress.start_item(&format!("Processing: {}", path.display()));
+            if matches!(mode, polyscribe::progress::ProgressMode::None) {
+                polyscribe::ilog!("Processing: {} ... started", path.display());
             }
-            if is_json_file(path) {
-                let root = read_json_file(path)?;
-                for (idx, seg) in root.segments.iter().enumerate() {
-                    merged_items.push(polyscribe::OutputEntry {
-                        id: (merged_items.len() as u64),
+            let speaker = speakers[idx].clone();
+
+            // Collect entries per file and extend merged
+            let mut entries: Vec<OutputEntry> = Vec::new();
+            if is_audio_file(path) {
+                // Avoid println! while bars are active: only log when no bars, otherwise keep UI clean
+                if matches!(mode, polyscribe::progress::ProgressMode::None) {
+                    polyscribe::ilog!("Processing file: {} ...", path.display());
+                }
+                // Setup progress channel and receiver thread for this transcription
+                let (tx, rx) = channel::<ProgressMessage>();
+                let item_clone = item.clone();
+                let recv_handle = std::thread::spawn(move || {
+                    let mut last = -1.0f32;
+                    while let Ok(msg) = rx.recv() {
+                        if let Some(stage) = &msg.stage {
+                            item_clone.set_message(stage);
+                        }
+                        let f = msg.fraction;
+                        if (f - last).abs() >= 0.01 || f >= 0.999 {
+                            item_clone.set_progress(f);
+                            last = f;
+                        }
+                        if f >= 1.0 {
+                            break;
+                        }
+                    }
+                });
+                let res = with_quiet_stdio_if_needed(args.quiet, || {
+                    sel.backend.transcribe(
+                        path,
+                        &speaker,
+                        lang_hint.as_deref(),
+                        Some(tx),
+                        args.gpu_layers,
+                    )
+                });
+                let _ = recv_handle.join();
+                match res {
+                    Ok(items) => {
+                        if matches!(mode, polyscribe::progress::ProgressMode::None) {
+                            polyscribe::ilog!("done");
+                        }
+                        // Mark progress for this input after outputs are written (below)
+                        entries.extend(items.into_iter());
+                    }
+                    Err(e) => {
+                        if !polyscribe::is_no_interaction() && polyscribe::stdin_is_tty() {
+                            polyscribe::elog!("{:#}", e);
+                        }
+                        return Err(e);
+                    }
+                }
+            } else if is_json_file(path) {
+                let mut buf = String::new();
+                File::open(path)
+                    .with_context(|| format!("Failed to open: {input_path}"))?
+                    .read_to_string(&mut buf)
+                    .with_context(|| format!("Failed to read: {input_path}"))?;
+                let root: InputRoot = serde_json::from_str(&buf)
+                    .with_context(|| format!("Invalid JSON transcript parsed from {input_path}"))?;
+                for seg in root.segments {
+                    entries.push(OutputEntry {
+                        id: 0,
                         speaker: speaker.clone(),
                         start: seg.start,
                         end: seg.end,
-                        text: seg.text.clone(),
+                        text: seg.text,
                     });
                 }
-            } else if is_audio_file(path) {
-                // Not exercised by tests; skip for now.
-            }
-            summary.push((
-                path.file_name().and_then(|s| s.to_str().map(|s| s.to_string())).unwrap_or_else(|| path.to_string_lossy().to_string()),
-                speaker.clone(),
-                true,
-                start.elapsed(),
-            ));
-            let _ = i; // silence unused in case
-        }
-
-        // Write merged outputs
-        if let Some(out) = &args.output {
-            // Merge target: either only merged, or merged plus separate
-            let outp = PathBuf::from(out);
-            if let Some(parent) = outp.parent() { create_dir_all(parent).ok(); }
-            // Name: <date>_out or <date>_merged depending on flag
-            if args.merge_and_separate {
-                // In merge+separate mode, always write merged output inside the provided directory
-                let base = PathBuf::from(out).join(format!("{}_merged", polyscribe::date_prefix()));
-                let root = OutputRoot { items: merged_items.clone() };
-                write_outputs(&base, &root, &out_formats)?;
             } else {
-                let base = outp.with_file_name(format!("{}_{}", polyscribe::date_prefix(), outp.file_name().and_then(|s| s.to_str()).unwrap_or("out")));
-                let root = OutputRoot { items: merged_items.clone() };
-                write_outputs(&base, &root, &out_formats)?;
+                return Err(anyhow!(format!(
+                    "Unsupported input type (expected .json or audio media): {}",
+                    input_path
+                )));
             }
-        } else {
-            // Print JSON to stdout
-            let root = OutputRoot { items: merged_items.clone() };
-            let mut out = std::io::stdout().lock();
-            serde_json::to_writer_pretty(&mut out, &root)?;
-            writeln!(&mut out)?;
-        }
-    }
 
-    // Separate outputs if no merge, or also when merge_and_separate
-    if !do_merge || args.merge_and_separate {
-        // Determine output dir
-        let out_dir = if let Some(o) = &args.output { PathBuf::from(o) } else { PathBuf::from("output") };
-        create_dir_all(&out_dir).ok();
-        for (path, speaker) in &plan {
-            let start = Instant::now();
-            if !path.exists() { had_error = true; summary.push((path.file_name().and_then(|s| s.to_str().map(|s| s.to_string())).unwrap_or_else(|| path.to_string_lossy().to_string()), speaker.clone(), false, start.elapsed())); if !args.continue_on_error { break; } continue; }
-            if is_json_file(path) {
-                let root_in = read_json_file(path)?;
-                let items: Vec<polyscribe::OutputEntry> = root_in
-                    .segments
-                    .iter()
-                    .enumerate()
-                    .map(|(i, seg)| polyscribe::OutputEntry { id: i as u64, speaker: speaker.clone(), start: seg.start, end: seg.end, text: seg.text.clone() })
-                    .collect();
-                let root = OutputRoot { items };
-                let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("output");
-                let base = out_dir.join(format!("{}_{}", polyscribe::date_prefix(), stem));
-                write_outputs(&base, &root, &out_formats)?;
-            } else if is_audio_file(path) {
-                // Skip in tests
+            // Sort and reassign ids per file
+            entries.sort_by(|a, b| {
+                match a.start.partial_cmp(&b.start) {
+                    Some(std::cmp::Ordering::Equal) | None => {}
+                    Some(o) => return o,
+                }
+                a.end
+                    .partial_cmp(&b.end)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            for (i, e) in entries.iter_mut().enumerate() {
+                e.id = i as u64;
             }
-            summary.push((
-                path.file_name().and_then(|s| s.to_str().map(|s| s.to_string())).unwrap_or_else(|| path.to_string_lossy().to_string()),
-                speaker.clone(),
-                true,
-                start.elapsed(),
+
+            // Write separate outputs to out_dir
+            let out = OutputRoot {
+                items: entries.clone(),
+            };
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("output");
+            let date = date_prefix();
+            let base_name = format!("{date}_{stem}");
+            let base_path = out_dir.join(&base_name);
+            write_outputs(&base_path, &out, &selected_formats)?;
+
+            // Extend merged with per-file entries
+            merged_entries.extend(out.items.into_iter());
+            // progress: mark file complete (once per input)
+            item.finish_with("done");
+            progress.inc_completed();
+            completed_count += 1;
+            if matches!(mode, polyscribe::progress::ProgressMode::None) {
+                polyscribe::ilog!("Total: {}/{} processed", completed_count, total_inputs);
+            }
+            // record summary row
+            summary.push((display_name, speaker.clone(), true, started_at.elapsed()));
+        }
+
+        // Now write merged output set into out_dir
+        merged_entries.sort_by(|a, b| {
+            match a.start.partial_cmp(&b.start) {
+                Some(std::cmp::Ordering::Equal) | None => {}
+                Some(o) => return o,
+            }
+            a.end
+                .partial_cmp(&b.end)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        for (i, e) in merged_entries.iter_mut().enumerate() {
+            e.id = i as u64;
+        }
+        let merged_out = OutputRoot {
+            items: merged_entries,
+        };
+
+        let date = date_prefix();
+        let merged_base = format!("{date}_merged");
+        let base_path = out_dir.join(&merged_base);
+        write_outputs(&base_path, &merged_out, &selected_formats)?;
+
+        // Final concise summary table to stderr (below progress bars)
+        if !args.quiet && !summary.is_empty() {
+            progress.println_above_bars("Summary:");
+            for line in render_summary_lines(&summary) {
+                progress.println_above_bars(&line);
+            }
+            // One blank line before finishing bars
+            progress.println_above_bars("");
+        }
+    } else if args.merge {
+        polyscribe::dlog!(1, "Mode: merge; output_base={:?}", output_path);
+        // MERGED MODE (previous default)
+        let mut entries: Vec<OutputEntry> = Vec::new();
+        let mut completed_count: usize = 0;
+        let total_inputs = inputs.len();
+        let mut summary: Vec<(String, String, bool, std::time::Duration)> = Vec::with_capacity(total_inputs);
+        for (idx, input_path) in inputs.iter().enumerate() {
+            let path = Path::new(input_path);
+            let started_at = std::time::Instant::now();
+            let display_name = path
+                .file_name()
+                .and_then(|os| os.to_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| path.to_string_lossy().to_string());
+            let item = if progress.has_file_bars() { progress.item_handle_at(idx) } else { progress.start_item(&format!("Processing: {}", path.display())) };
+            let speaker = speakers[idx].clone();
+
+            let mut buf = String::new();
+            if is_audio_file(path) {
+                // Avoid println! while bars are active
+                if matches!(mode, polyscribe::progress::ProgressMode::None) {
+                    polyscribe::ilog!("Processing file: {} ...", path.display());
+                }
+                let (tx, rx) = channel::<ProgressMessage>();
+                let item_clone = item.clone();
+                let allow_stage_msgs = !progress.has_file_bars();
+                let recv_handle = std::thread::spawn(move || {
+                    let mut last = -1.0f32;
+                    while let Ok(msg) = rx.recv() {
+                        if allow_stage_msgs {
+                            if let Some(stage) = &msg.stage {
+                                item_clone.set_message(stage);
+                            }
+                        }
+                        let f = msg.fraction;
+                        if (f - last).abs() >= 0.01 || f >= 0.999 {
+                            item_clone.set_progress(f);
+                            last = f;
+                        }
+                        if f >= 1.0 {
+                            break;
+                        }
+                    }
+                });
+                let res = with_quiet_stdio_if_needed(args.quiet, || {
+                    sel.backend.transcribe(
+                        path,
+                        &speaker,
+                        lang_hint.as_deref(),
+                        Some(tx),
+                        args.gpu_layers,
+                    )
+                });
+                let _ = recv_handle.join();
+                match res {
+                    Ok(items) => {
+                        if matches!(mode, polyscribe::progress::ProgressMode::None) {
+                            polyscribe::ilog!("done");
+                        }
+                        item.finish_with("done");
+                        progress.inc_completed();
+                        completed_count += 1;
+                        if matches!(mode, polyscribe::progress::ProgressMode::None) {
+                            polyscribe::ilog!("Total: {}/{} processed", completed_count, total_inputs);
+                        }
+                        for e in items {
+                            entries.push(e);
+                        }
+                        // record summary row
+                        summary.push((display_name, speaker.clone(), true, started_at.elapsed()));
+                        continue;
+                    }
+                    Err(e) => {
+                        if !polyscribe::is_no_interaction() && polyscribe::stdin_is_tty() {
+                            polyscribe::elog!("{:#}", e);
+                        }
+                        return Err(e);
+                    }
+                }
+            } else if is_json_file(path) {
+                File::open(path)
+                    .with_context(|| format!("Failed to open: {input_path}"))?
+                    .read_to_string(&mut buf)
+                    .with_context(|| format!("Failed to read: {input_path}"))?;
+                // progress: mark file complete (JSON parsed)
+                item.finish_with("done");
+                progress.inc_completed();
+                completed_count += 1;
+                if matches!(mode, polyscribe::progress::ProgressMode::None) {
+                    polyscribe::ilog!("Total: {}/{} processed", completed_count, total_inputs);
+                }
+                // record summary row
+                summary.push((display_name, speaker.clone(), true, started_at.elapsed()));
+            } else {
+                return Err(anyhow!(format!(
+                    "Unsupported input type (expected .json or audio media): {}",
+                    input_path
+                )));
+            }
+
+            let root: InputRoot = serde_json::from_str(&buf)
+                .with_context(|| format!("Invalid JSON transcript parsed from {input_path}"))?;
+
+            for seg in root.segments {
+                entries.push(OutputEntry {
+                    id: 0,
+                    speaker: speaker.clone(),
+                    start: seg.start,
+                    end: seg.end,
+                    text: seg.text,
+                });
+            }
+        }
+
+        // Sort globally by (start, end)
+        entries.sort_by(|a, b| {
+            match a.start.partial_cmp(&b.start) {
+                Some(std::cmp::Ordering::Equal) | None => {}
+                Some(o) => return o,
+            }
+            a.end
+                .partial_cmp(&b.end)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        for (i, e) in entries.iter_mut().enumerate() {
+            e.id = i as u64;
+        }
+        let out = OutputRoot { items: entries };
+
+        if let Some(path) = output_path {
+            let base_path = Path::new(&path);
+            let parent_opt = base_path.parent();
+            if let Some(parent) = parent_opt {
+                if !parent.as_os_str().is_empty() {
+                    create_dir_all(parent).with_context(|| {
+                        format!(
+                            "Failed to create parent directory for output: {}",
+                            parent.display()
+                        )
+                    })?;
+                }
+            }
+            let stem = base_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("output");
+            let date = date_prefix();
+            let base_name = format!("{date}_{stem}");
+            let dir = parent_opt.unwrap_or(Path::new(""));
+            let base_path = dir.join(&base_name);
+            write_outputs(&base_path, &out, &selected_formats)?;
+        } else {
+            let stdout = io::stdout();
+            let mut handle = stdout.lock();
+            serde_json::to_writer_pretty(&mut handle, &out)?;
+            writeln!(&mut handle)?;
+        }
+
+        // Final concise summary table to stderr (below progress bars)
+        if !args.quiet && !summary.is_empty() {
+            progress.println_above_bars("Summary:");
+            for line in render_summary_lines(&summary) {
+                progress.println_above_bars(&line);
+            }
+            // One blank line before finishing bars
+            progress.println_above_bars("");
+        }
+    } else {
+        polyscribe::dlog!(1, "Mode: separate; output_dir={:?}", output_path);
+        // SEPARATE MODE (default now)
+        // If writing to stdout with multiple inputs, not supported
+        if output_path.is_none() && inputs.len() > 1 {
+            return Err(anyhow!(
+                "Multiple inputs without --merge require -o OUTPUT_DIR to write separate files"
             ));
         }
+
+        // If output_path is provided, treat it as a directory. Create it.
+        let out_dir: Option<PathBuf> = output_path.as_ref().map(PathBuf::from);
+        if let Some(dir) = &out_dir {
+            if !dir.as_os_str().is_empty() {
+                create_dir_all(dir).with_context(|| {
+                    format!("Failed to create output directory: {}", dir.display())
+                })?;
+            }
+        }
+
+        let mut completed_count: usize = 0;
+        let total_inputs = inputs.len();
+        let mut summary: Vec<(String, String, bool, std::time::Duration)> = Vec::with_capacity(total_inputs);
+        for (idx, input_path) in inputs.iter().enumerate() {
+            let path = Path::new(input_path);
+            let started_at = std::time::Instant::now();
+            let display_name = path
+                .file_name()
+                .and_then(|os| os.to_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| path.to_string_lossy().to_string());
+            let item = progress.start_item(&format!("Processing: {}", path.display()));
+            let speaker = speakers[idx].clone();
+
+            // Collect entries per file
+            let mut entries: Vec<OutputEntry> = Vec::new();
+            if is_audio_file(path) {
+                // Avoid println! while bars are active
+                if matches!(mode, polyscribe::progress::ProgressMode::None) {
+                    polyscribe::ilog!("Processing file: {} ...", path.display());
+                }
+                let (tx, rx) = channel::<ProgressMessage>();
+                let item_clone = item.clone();
+                let allow_stage_msgs = !progress.has_file_bars();
+                let recv_handle = std::thread::spawn(move || {
+                    let mut last = -1.0f32;
+                    while let Ok(msg) = rx.recv() {
+                        if allow_stage_msgs {
+                            if let Some(stage) = &msg.stage {
+                                item_clone.set_message(stage);
+                            }
+                        }
+                        let f = msg.fraction;
+                        if (f - last).abs() >= 0.01 || f >= 0.999 {
+                            item_clone.set_progress(f);
+                            last = f;
+                        }
+                        if f >= 1.0 {
+                            break;
+                        }
+                    }
+                });
+                let res = with_quiet_stdio_if_needed(args.quiet, || {
+                    sel.backend.transcribe(
+                        path,
+                        &speaker,
+                        lang_hint.as_deref(),
+                        Some(tx),
+                        args.gpu_layers,
+                    )
+                });
+                let _ = recv_handle.join();
+                match res {
+                    Ok(items) => {
+                        if matches!(mode, polyscribe::progress::ProgressMode::None) {
+                            polyscribe::ilog!("done");
+                        }
+                        entries.extend(items);
+                    }
+                    Err(e) => {
+                        if !polyscribe::is_no_interaction() && polyscribe::stdin_is_tty() {
+                            polyscribe::elog!("{:#}", e);
+                        }
+                        return Err(e);
+                    }
+                }
+            } else if is_json_file(path) {
+                let mut buf = String::new();
+                File::open(path)
+                    .with_context(|| format!("Failed to open: {input_path}"))?
+                    .read_to_string(&mut buf)
+                    .with_context(|| format!("Failed to read: {input_path}"))?;
+                let root: InputRoot = serde_json::from_str(&buf)
+                    .with_context(|| format!("Invalid JSON transcript parsed from {input_path}"))?;
+                for seg in root.segments {
+                    entries.push(OutputEntry {
+                        id: 0,
+                        speaker: speaker.clone(),
+                        start: seg.start,
+                        end: seg.end,
+                        text: seg.text,
+                    });
+                }
+            } else {
+                return Err(anyhow!(format!(
+                    "Unsupported input type (expected .json or audio media): {}",
+                    input_path
+                )));
+            }
+
+            // Sort and reassign ids per file
+            entries.sort_by(|a, b| {
+                match a.start.partial_cmp(&b.start) {
+                    Some(std::cmp::Ordering::Equal) | None => {}
+                    Some(o) => return o,
+                }
+                a.end
+                    .partial_cmp(&b.end)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            for (i, e) in entries.iter_mut().enumerate() {
+                e.id = i as u64;
+            }
+            let out = OutputRoot { items: entries };
+
+            if let Some(dir) = &out_dir {
+                // Build file names using input stem
+                let stem = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("output");
+                let date = date_prefix();
+                let base_name = format!("{date}_{stem}");
+                let base_path = dir.join(&base_name);
+                write_outputs(&base_path, &out, &selected_formats)?;
+            } else {
+                // stdout (only single input reaches here)
+                let stdout = io::stdout();
+                let mut handle = stdout.lock();
+                serde_json::to_writer_pretty(&mut handle, &out)?;
+                writeln!(&mut handle)?;
+            }
+            // progress: mark file complete
+            item.finish_with("done");
+            progress.inc_completed();
+            // record summary row
+            summary.push((display_name, speaker.clone(), true, started_at.elapsed()));
+        }
+
+        // Final concise summary table to stderr (below progress bars)
+        if !args.quiet && !summary.is_empty() {
+            progress.println_above_bars("Summary:");
+            for line in render_summary_lines(&summary) {
+                progress.println_above_bars(&line);
+            }
+            // One blank line before finishing bars
+            progress.println_above_bars("");
+        }
     }
 
-    // Emit totals and summary to stderr unless quiet
-    if !polyscribe::is_quiet() {
-        eprintln!("INFO: Total: {}/{} processed", summary.len(), plan.len());
-        eprintln!("Summary:");
-        for line in render_summary_lines(&summary) { eprintln!("{}", line); }
-        for (_, _, ok, _) in &summary { if !ok { eprintln!("ERR"); } }
-        eprintln!();
-        if had_error { eprintln!("ERROR: One or more inputs failed"); }
-    }
-
-    if had_error { std::process::exit(2); }
-    let _elapsed = start_overall.elapsed();
+    // Finalize progress bars: keep total visible with final message
+    progress.finish_all();
+    // Final best-effort cleanup of .last_model on normal exit
+    let _ = std::fs::remove_file(&last_model_path);
     Ok(())
 }
 
