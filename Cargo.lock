@@ -1959,7 +1959,7 @@ dependencies = [
 [[package]]
 name = "whisper-rs"
 version = "0.14.3"
-source = "git+https://github.com/tazz4843/whisper-rs#135b60b85a15714862806b6ea9f76abec38156f1"
+source = "git+https://github.com/tazz4843/whisper-rs?rev=135b60b85a15714862806b6ea9f76abec38156f1#135b60b85a15714862806b6ea9f76abec38156f1"
 dependencies = [
  "whisper-rs-sys",
 ]
@@ -1967,7 +1967,7 @@ dependencies = [
 [[package]]
 name = "whisper-rs-sys"
 version = "0.13.0"
-source = "git+https://github.com/tazz4843/whisper-rs#135b60b85a15714862806b6ea9f76abec38156f1"
+source = "git+https://github.com/tazz4843/whisper-rs?rev=135b60b85a15714862806b6ea9f76abec38156f1#135b60b85a15714862806b6ea9f76abec38156f1"
 dependencies = [
  "bindgen",
  "cfg-if",

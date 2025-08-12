@@ -13,6 +13,12 @@ Rust toolchain
   - rustup install stable
   - rustup default stable
 
+Dependency pinning
+- We pin whisper-rs (git dependency) to a known-good commit in Cargo.toml for reproducibility.
+- To bump it, resolve/test the desired commit locally, then run:
+  - cargo update -p whisper-rs --precise 135b60b85a15714862806b6ea9f76abec38156f1
+  Replace the SHA with the desired commit and update the rev in Cargo.toml accordingly.
+
 Build
 - CPU-only (default):
   - cargo build

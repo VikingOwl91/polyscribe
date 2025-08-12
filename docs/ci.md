@@ -14,6 +14,10 @@ Example GitHub Actions job (outline)
   steps:
   - uses: actions/checkout@v4
   - uses: dtolnay/rust-toolchain@stable
+  - name: Print resolved whisper-rs rev
+    run: |
+      echo "Resolved whisper-rs revision:" && \
+      awk '/name = "whisper-rs"/{f=1} f&&/source = "git\+.*whisper-rs#/{match($0,/#([0-9a-f]{7,40})"/,m); if(m[1]){print m[1]; exit}}' Cargo.lock
   - name: Build
     run: cargo build --all-targets --locked
   - name: Test
