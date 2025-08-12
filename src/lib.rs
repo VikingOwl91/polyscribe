@@ -694,10 +694,11 @@ pub fn decode_audio_to_pcm_f32_ffmpeg(audio_path: &Path) -> Result<Vec<f32>> {
         }
     };
     if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(anyhow!(
-            "ffmpeg failed for {}: {}",
+            "Failed to decode audio from {} using ffmpeg. This may indicate the file is not a valid or supported audio/video file, is corrupted, or cannot be opened. ffmpeg stderr: {}",
             audio_path.display(),
-            String::from_utf8_lossy(&output.stderr)
+            stderr.trim()
         ));
     }
     let bytes = output.stdout;

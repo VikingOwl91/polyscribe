@@ -186,6 +186,22 @@ fn is_audio_file(path: &Path) -> bool {
     false
 }
 
+fn validate_input_path(path: &Path) -> anyhow::Result<()> {
+    use anyhow::{anyhow, Context};
+    let display = path.display();
+    if !path.exists() {
+        return Err(anyhow!("Input not found: {}", display));
+    }
+    let md = std::fs::metadata(path).with_context(|| format!("Failed to stat input: {}", display))?;
+    if md.is_dir() {
+        return Err(anyhow!("Input is a directory (expected a file): {}", display));
+    }
+    // Attempt to open to catch permission errors early
+    std::fs::File::open(path)
+        .with_context(|| format!("Failed to open input file: {}", display))
+        .map(|_| ())
+}
+
 struct LastModelCleanup {
     path: PathBuf,
 }
@@ -313,6 +329,18 @@ fn run() -> Result<()> {
     }
     if inputs.is_empty() {
         return Err(anyhow!("No input files provided"));
+    }
+
+    // Preflight: validate each input path and type
+    for inp in &inputs {
+        let p = Path::new(inp);
+        validate_input_path(p)?;
+        if !(is_audio_file(p) || is_json_file(p)) {
+            return Err(anyhow!(
+                "Unsupported input type (expected .json transcript or common audio/video): {}",
+                p.display()
+            ));
+        }
     }
 
     // Language must be provided via CLI when transcribing audio (no detection from JSON/env)

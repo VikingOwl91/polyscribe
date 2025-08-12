@@ -620,10 +620,13 @@ fn download_one_model(client: &Client, models_dir: &Path, entry: &ModelEntry) ->
         url
     );
     let mut resp = client
-        .get(url)
+        .get(url.clone())
         .send()
         .and_then(|r| r.error_for_status())
-        .context("Failed to download model")?;
+        .with_context(|| format!(
+            "Failed to download model {} from {}. If your terminal has display/TTY issues, try running with --no-progress.",
+            entry.name, url
+        ))?;
 
     let tmp_path = models_dir.join(format!("ggml-{}.bin.part", entry.name));
     if tmp_path.exists() {
