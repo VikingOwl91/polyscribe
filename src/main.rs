@@ -254,17 +254,6 @@ fn run() -> Result<()> {
         path: last_model_path.clone(),
     };
 
-    // Also ensure cleanup on panic: install a panic hook that removes .last_model, then chains
-    {
-        let last_for_panic = last_model_path.clone();
-        let prev_hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
-            let _ = std::fs::remove_file(&last_for_panic);
-            // chain to default/previous hook for normal panic reporting
-            prev_hook(info);
-        }));
-    }
-
     // Select backend
     let requested = match args.gpu_backend {
         GpuBackendCli::Auto => BackendKind::Auto,
@@ -751,8 +740,6 @@ fn run() -> Result<()> {
         }
     }
 
-    // Final best-effort cleanup of .last_model on normal exit
-    let _ = std::fs::remove_file(&last_model_path);
     Ok(())
 }
 
