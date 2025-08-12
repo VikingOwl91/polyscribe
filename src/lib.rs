@@ -173,50 +173,82 @@ where
     }
 }
 
+/// Centralized UI helpers (TTY-aware, quiet/verbose-aware)
+pub mod ui {
+    use std::io;
+    // Prefer cliclack for all user-visible messages to ensure consistent, TTY-aware output.
+    // Falls back to stderr printing if needed.
+    /// Startup intro/banner (suppressed when quiet).
+    pub fn intro(msg: impl AsRef<str>) {
+        if crate::is_quiet() { return; }
+        // Use cliclack intro to render a nice banner when TTY
+        let _ = cliclack::intro(msg.as_ref());
+    }
+    /// Print an informational line (suppressed when quiet).
+    pub fn info(msg: impl AsRef<str>) {
+        if crate::is_quiet() { return; }
+        let _ = cliclack::log::info(msg.as_ref());
+    }
+    /// Print a warning (always printed).
+    pub fn warn(msg: impl AsRef<str>) {
+        // cliclack provides a warning-level log utility
+        let _ = cliclack::log::warning(msg.as_ref());
+    }
+    /// Print an error (always printed).
+    pub fn error(msg: impl AsRef<str>) {
+        let _ = cliclack::log::error(msg.as_ref());
+    }
+    /// Print a line above any progress bars (maps to cliclack log; synchronized).
+    pub fn println_above_bars(msg: impl AsRef<str>) {
+        if crate::is_quiet() { return; }
+        // cliclack logs are synchronized with its spinners/bars
+        let _ = cliclack::log::info(msg.as_ref());
+    }
+    /// Final outro/summary printed below any progress indicators (suppressed when quiet).
+    pub fn outro(msg: impl AsRef<str>) {
+        if crate::is_quiet() { return; }
+        let _ = cliclack::outro(msg.as_ref());
+    }
+    /// Prompt the user (TTY-aware via cliclack) and read a line from stdin. Returns the raw line with trailing newline removed.
+    pub fn prompt_line(prompt: &str) -> io::Result<String> {
+        // Route prompt through cliclack to keep consistent styling and avoid direct eprint!/println!
+        let _ = cliclack::log::info(prompt);
+        let mut s = String::new();
+        io::stdin().read_line(&mut s)?;
+        Ok(s)
+    }
+}
+
 /// Logging macros and helpers
-/// Log an error to stderr (always printed). Recommended for user-visible errors.
+/// Log an error using the UI helper (always printed). Recommended for user-visible errors.
 #[macro_export]
 macro_rules! elog {
     ($($arg:tt)*) => {{
-        eprintln!("ERROR: {}", format!($($arg)*));
-    }}
-}
-/// Internal helper macro used by other logging macros to centralize the
-/// common behavior: build formatted message, check quiet/verbose flags,
-/// and print to stderr with a label.
-#[macro_export]
-macro_rules! log_with_level {
-    ($label:expr, $min_lvl:expr, $always:expr, $($arg:tt)*) => {{
-        let should_print = if $always {
-            true
-        } else if let Some(minv) = $min_lvl {
-            !$crate::is_quiet() && $crate::verbose_level() >= minv
-        } else {
-            !$crate::is_quiet()
-        };
-        if should_print {
-            eprintln!("{}: {}", $label, format!($($arg)*));
-        }
+        $crate::ui::error(format!($($arg)*));
     }}
 }
 
-/// Log a warning to stderr (printed even in quiet mode).
+/// Log a warning using the UI helper (printed even in quiet mode).
 #[macro_export]
 macro_rules! wlog {
-    ($($arg:tt)*) => {{ $crate::log_with_level!("WARN", None, true, $($arg)*); }}
+    ($($arg:tt)*) => {{
+        $crate::ui::warn(format!($($arg)*));
+    }}
 }
 
-/// Log an informational line to stderr unless quiet mode is enabled.
+/// Log an informational line using the UI helper unless quiet mode is enabled.
 #[macro_export]
 macro_rules! ilog {
-    ($($arg:tt)*) => {{ $crate::log_with_level!("INFO", None, false, $($arg)*); }}
+    ($($arg:tt)*) => {{
+        if !$crate::is_quiet() { $crate::ui::info(format!($($arg)*)); }
+    }}
 }
 
 /// Log a debug/trace line when verbose level is at least the given level (u8).
 #[macro_export]
 macro_rules! dlog {
     ($lvl:expr, $($arg:tt)*) => {{
-        $crate::log_with_level!(&format!("DEBUG{}", &$lvl), Some($lvl), false, $($arg)*);
+        if !$crate::is_quiet() && $crate::verbose_level() >= $lvl { $crate::ui::info(format!("DEBUG{}: {}", $lvl, format!($($arg)*))); }
     }}
 }
 
@@ -230,7 +262,6 @@ use anyhow::{Context, Result, anyhow};
 use chrono::Local;
 use std::env;
 use std::fs::create_dir_all;
-use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -462,10 +493,7 @@ pub fn find_model_file() -> Result<PathBuf> {
                 "No models available and interactive mode is disabled. Please set WHISPER_MODEL or run with --download-models."
             ));
         }
-        eprint!("Would you like to download models now? [Y/n]: ");
-        io::stderr().flush().ok();
-        let mut input = String::new();
-        io::stdin().read_line(&mut input).ok();
+        let input = crate::ui::prompt_line("Would you like to download models now? [Y/n]: ").unwrap_or_default();
         let ans = input.trim().to_lowercase();
         if ans.is_empty() || ans == "y" || ans == "yes" {
             if let Err(e) = models::run_interactive_model_downloader() {
@@ -519,16 +547,12 @@ pub fn find_model_file() -> Result<PathBuf> {
         }
     }
 
-    eprintln!("Multiple Whisper models found in {}:", models_dir.display());
+    crate::ui::println_above_bars(format!("Multiple Whisper models found in {}:", models_dir.display()));
     for (i, p) in candidates.iter().enumerate() {
-        eprintln!("  {}) {}", i + 1, p.display());
+        crate::ui::println_above_bars(format!("  {}) {}", i + 1, p.display()));
     }
-    eprint!("Select model by number [1-{}]: ", candidates.len());
-    io::stderr().flush().ok();
-    let mut input = String::new();
-    io::stdin()
-        .read_line(&mut input)
-        .context("Failed to read selection")?;
+    let input = crate::ui::prompt_line(&format!("Select model by number [1-{}]: ", candidates.len()))
+        .map_err(|_| anyhow!("Failed to read selection"))?;
     let sel: usize = input
         .trim()
         .parse()

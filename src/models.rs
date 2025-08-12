@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::env;
 use std::fs::{File, create_dir_all};
-use std::io::{self, Read, Write};
+use std::io::{Read, Write};
 use std::path::Path;
 use std::time::Duration;
 
@@ -326,8 +326,8 @@ fn fetch_all_models(client: &Client) -> Result<Vec<ModelEntry>> {
         match hf_fetch_repo_models(client, "akashmjn/tinydiarize-whisper.cpp") {
             Ok(v) => v,
             Err(e) => {
-                ilog!(
-                    "Warning: failed to fetch optional repo akashmjn/tinydiarize-whisper.cpp: {:#}",
+                wlog!(
+                    "Failed to fetch optional repo akashmjn/tinydiarize-whisper.cpp: {:#}",
                     e
                 );
                 Vec::new()
@@ -413,18 +413,16 @@ fn prompt_select_models_two_stage(models: &[ModelEntry]) -> Result<Vec<ModelEntr
         return Ok(Vec::new());
     }
 
-    // Print base selection on stderr
-    eprintln!("Available base model families:");
+    // Print base selection via UI
+    crate::ui::println_above_bars("Available base model families:");
     for (i, b) in bases.iter().enumerate() {
-        eprintln!("  {}) {}", i + 1, b);
+        crate::ui::println_above_bars(format!("  {}) {}", i + 1, b));
     }
     loop {
-        eprint!("Select base (number or name, 'q' to cancel): ");
-        io::stderr().flush().ok();
-        let mut line = String::new();
-        io::stdin()
-            .read_line(&mut line)
-            .context("Failed to read base selection")?;
+        let mut line = match crate::ui::prompt_line("Select base (number or name, 'q' to cancel): ") {
+            Ok(s) => s,
+            Err(_) => String::new(),
+        };
         let s = line.trim();
         if s.eq_ignore_ascii_case("q")
             || s.eq_ignore_ascii_case("quit")
@@ -450,12 +448,12 @@ fn prompt_select_models_two_stage(models: &[ModelEntry]) -> Result<Vec<ModelEntr
             let filtered: Vec<ModelEntry> =
                 models.iter().filter(|m| m.base == base).cloned().collect();
             if filtered.is_empty() {
-                eprintln!("No models found for base '{base}'.");
+                crate::ui::warn(format!("No models found for base '{base}'."));
                 continue;
             }
             // Reuse the formatter but only for the chosen base list
             let listing = format_model_list(&filtered);
-            eprint!("{listing}");
+            crate::ui::println_above_bars(listing);
 
             // Build index map for filtered list
             let mut index_map: Vec<usize> = Vec::with_capacity(filtered.len());
@@ -466,12 +464,8 @@ fn prompt_select_models_two_stage(models: &[ModelEntry]) -> Result<Vec<ModelEntr
             }
             // Second prompt: sub-type selection
             loop {
-                eprint!("Selection: ");
-                io::stderr().flush().ok();
-                let mut line2 = String::new();
-                io::stdin()
-                    .read_line(&mut line2)
-                    .context("Failed to read selection")?;
+                let line2 = crate::ui::prompt_line("Selection: ")
+                    .map_err(|_| anyhow!("Failed to read selection"))?;
                 let s2 = line2.trim().to_lowercase();
                 if s2 == "q" || s2 == "quit" || s2 == "exit" {
                     return Ok(Vec::new());
@@ -501,7 +495,7 @@ fn prompt_select_models_two_stage(models: &[ModelEntry]) -> Result<Vec<ModelEntr
                 selected.sort_unstable();
                 selected.dedup();
                 if selected.is_empty() {
-                    eprintln!("No valid selection. Please try again or 'q' to cancel.");
+                    crate::ui::warn("No valid selection. Please try again or 'q' to cancel.");
                     continue;
                 }
                 let chosen: Vec<ModelEntry> = selected
@@ -511,10 +505,10 @@ fn prompt_select_models_two_stage(models: &[ModelEntry]) -> Result<Vec<ModelEntr
                 return Ok(chosen);
             }
         } else {
-            eprintln!(
+            crate::ui::warn(format!(
                 "Invalid base selection. Please enter a number from 1-{} or a base name.",
                 bases.len()
-            );
+            ));
         }
     }
 }
@@ -591,8 +585,8 @@ fn download_one_model(client: &Client, models_dir: &Path, entry: &ModelEntry) ->
                     }
                 }
                 Err(e) => {
-                    qlog!(
-                        "Warning: failed to hash existing {}: {}. Will re-download to ensure correctness.",
+                    wlog!(
+                        "Failed to hash existing {}: {}. Will re-download to ensure correctness.",
                         final_path.display(),
                         e
                     );
@@ -618,8 +612,8 @@ fn download_one_model(client: &Client, models_dir: &Path, entry: &ModelEntry) ->
                     }
                 }
                 Err(e) => {
-                    qlog!(
-                        "Warning: failed to stat existing {}: {}. Will re-download to ensure correctness.",
+                    wlog!(
+                        "Failed to stat existing {}: {}. Will re-download to ensure correctness.",
                         final_path.display(),
                         e
                     );
@@ -723,8 +717,8 @@ fn download_one_model(client: &Client, models_dir: &Path, entry: &ModelEntry) ->
             ));
         }
     } else {
-        qlog!(
-            "Warning: no SHA-256 available for {}. Skipping verification.",
+        wlog!(
+            "No SHA-256 available for {}. Skipping verification.",
             entry.name
         );
     }
@@ -826,7 +820,7 @@ pub fn update_local_models() -> Result<()> {
                         }
                     }
                     Err(e) => {
-                        qlog!("Warning: failed hashing {}: {}. Re-downloading.", fname, e);
+                        wlog!("Failed hashing {}: {}. Re-downloading.", fname, e);
                     }
                 }
                 download_one_model(&client, models_dir, remote)?;
@@ -839,7 +833,7 @@ pub fn update_local_models() -> Result<()> {
                         download_one_model(&client, models_dir, remote)?;
                     }
                     Err(e) => {
-                        qlog!("Warning: stat failed for {}: {}. Updating...", fname, e);
+                        wlog!("Stat failed for {}: {}. Updating...", fname, e);
                         download_one_model(&client, models_dir, remote)?;
                     }
                 }

@@ -142,25 +142,18 @@ fn prompt_speaker_name_for_path(path: &Path, default_name: &str, enabled: bool) 
         .and_then(|s| s.to_str())
         .map(|s| s.to_string())
         .unwrap_or_else(|| path.to_string_lossy().to_string());
-    eprint!(
+    let buf = polyscribe::ui::prompt_line(&format!(
         "Enter speaker name for {display_owned} [default: {default_name}]: "
-    );
-    io::stderr().flush().ok();
-    let mut buf = String::new();
-    match io::stdin().read_line(&mut buf) {
-        Ok(_) => {
-            let raw = buf.trim();
-            if raw.is_empty() {
-                return default_name.to_string();
-            }
-            let sanitized = sanitize_speaker_name(raw);
-            if sanitized.is_empty() {
-                default_name.to_string()
-            } else {
-                sanitized
-            }
-        }
-        Err(_) => default_name.to_string(),
+    )).unwrap_or_default();
+    let raw = buf.trim();
+    if raw.is_empty() {
+        return default_name.to_string();
+    }
+    let sanitized = sanitize_speaker_name(raw);
+    if sanitized.is_empty() {
+        default_name.to_string()
+    } else {
+        sanitized
     }
 }
 
@@ -217,6 +210,7 @@ where
 }
 
 fn run() -> Result<()> {
+    let _t0 = std::time::Instant::now();
     // Parse CLI
     let args = Args::parse();
 
@@ -224,6 +218,9 @@ fn run() -> Result<()> {
     polyscribe::set_verbose(args.verbose);
     polyscribe::set_quiet(args.quiet);
     polyscribe::set_no_interaction(args.no_interaction);
+
+    // Startup banner via UI (TTY-aware through cliclack), suppressed when quiet
+    polyscribe::ui::intro(format!("PolyScribe v{}", env!("CARGO_PKG_VERSION")));
 
     // Handle auxiliary subcommands that write to stdout and exit early
     if let Some(aux) = &args.aux {
@@ -266,6 +263,10 @@ fn run() -> Result<()> {
     polyscribe::dlog!(1, "Using backend: {:?}", sel.chosen);
 
     // If requested, run the interactive model downloader first. If no inputs were provided, exit after downloading.
+    let mut summary_inputs_total: usize = 0;
+    let mut summary_audio_count: usize = 0;
+    let mut summary_json_count: usize = 0;
+    let mut summary_segments_total: usize = 0;
     if args.download_models {
         if let Err(e) = polyscribe::models::run_interactive_model_downloader() {
             polyscribe::elog!("Model downloader failed: {:#}", e);
@@ -290,6 +291,7 @@ fn run() -> Result<()> {
     // Determine inputs and optional output path
     polyscribe::dlog!(1, "Parsed {} input(s)", args.inputs.len());
     let mut inputs = args.inputs;
+    summary_inputs_total = inputs.len();
     let mut output_path = args.output;
     if output_path.is_none() && inputs.len() >= 2 {
         if let Some(last) = inputs.last().cloned() {
@@ -353,6 +355,7 @@ fn run() -> Result<()> {
             // Collect entries per file and extend merged
             let mut entries: Vec<OutputEntry> = Vec::new();
             if is_audio_file(path) {
+                summary_audio_count += 1;
                 // Progress log to stderr (suppressed by -q); avoid partial lines
                 polyscribe::ilog!("Processing file: {} ...", path.display());
                 let res = with_quiet_stdio_if_needed(args.quiet, || {
@@ -372,6 +375,7 @@ fn run() -> Result<()> {
                     }
                 }
             } else if is_json_file(path) {
+                summary_json_count += 1;
                 let mut buf = String::new();
                 File::open(path)
                     .with_context(|| format!("Failed to open: {input_path}"))?
@@ -409,6 +413,7 @@ fn run() -> Result<()> {
             for (i, e) in entries.iter_mut().enumerate() {
                 e.id = i as u64;
             }
+            summary_segments_total += entries.len();
 
             // Write separate outputs to out_dir
             let out = OutputRoot {
@@ -498,6 +503,7 @@ fn run() -> Result<()> {
 
             let mut buf = String::new();
             if is_audio_file(path) {
+                summary_audio_count += 1;
                 // Progress log to stderr (suppressed by -q)
                 polyscribe::ilog!("Processing file: {} ...", path.display());
                 let res = with_quiet_stdio_if_needed(args.quiet, || {
@@ -520,6 +526,7 @@ fn run() -> Result<()> {
                     }
                 }
             } else if is_json_file(path) {
+                summary_json_count += 1;
                 File::open(path)
                     .with_context(|| format!("Failed to open: {}", input_path))?
                     .read_to_string(&mut buf)
@@ -559,6 +566,7 @@ fn run() -> Result<()> {
             e.id = i as u64;
         }
         let out = OutputRoot { items: entries };
+        summary_segments_total = out.items.len();
 
         if let Some(path) = output_path {
             let base_path = Path::new(&path);
@@ -636,6 +644,7 @@ fn run() -> Result<()> {
             // Collect entries per file
             let mut entries: Vec<OutputEntry> = Vec::new();
             if is_audio_file(path) {
+                summary_audio_count += 1;
                 // Progress log to stderr (suppressed by -q)
                 polyscribe::ilog!("Processing file: {} ...", path.display());
                 let res = with_quiet_stdio_if_needed(args.quiet, || {
@@ -655,6 +664,7 @@ fn run() -> Result<()> {
                     }
                 }
             } else if is_json_file(path) {
+                summary_json_count += 1;
                 let mut buf = String::new();
                 File::open(path)
                     .with_context(|| format!("Failed to open: {input_path}"))?
@@ -692,6 +702,7 @@ fn run() -> Result<()> {
             for (i, e) in entries.iter_mut().enumerate() {
                 e.id = i as u64;
             }
+            summary_segments_total += entries.len();
             let out = OutputRoot { items: entries };
 
             if let Some(dir) = &out_dir {
@@ -734,6 +745,20 @@ fn run() -> Result<()> {
                 writeln!(&mut handle)?;
             }
         }
+    }
+
+    // Final summary (TTY-aware via UI), only when not quiet
+    if !polyscribe::is_quiet() {
+        let elapsed = _t0.elapsed();
+        let secs = elapsed.as_secs_f32();
+        let mut out = String::new();
+        out.push_str("Summary:\n");
+        out.push_str(&format!("{:<12} {:>8}\n", "Files:", summary_inputs_total));
+        out.push_str(&format!("{:<12} {:>8}\n", "Audio:", summary_audio_count));
+        out.push_str(&format!("{:<12} {:>8}\n", "JSON:", summary_json_count));
+        out.push_str(&format!("{:<12} {:>8}\n", "Segments:", summary_segments_total));
+        out.push_str(&format!("{:<12} {:>8.2}s\n", "Time:", secs));
+        polyscribe::ui::outro(out);
     }
 
     Ok(())
