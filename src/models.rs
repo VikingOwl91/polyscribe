@@ -15,23 +15,13 @@ use std::path::{Path, PathBuf};
 ///
 /// Heuristic: choose the largest .bin file by size. Returns None if none found.
 pub fn pick_best_local_model(dir: &Path) -> Option<PathBuf> {
-    let mut best: Option<(u64, PathBuf)> = None;
     let rd = fs::read_dir(dir).ok()?;
-    for e in rd.flatten() {
-        let p = e.path();
-        if p.is_file() {
-            if p.extension().and_then(|s| s.to_str()).map(|s| s.eq_ignore_ascii_case("bin")).unwrap_or(false) {
-                if let Ok(md) = fs::metadata(&p) {
-                    let sz = md.len();
-                    match &best {
-                        Some((b_sz, _)) if *b_sz >= sz => {}
-                        _ => best = Some((sz, p.clone())),
-                    }
-                }
-            }
-        }
-    }
-    best.map(|(_, p)| p)
+    rd.flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && p.extension().and_then(|s| s.to_str()).is_some_and(|s| s.eq_ignore_ascii_case("bin")))
+        .filter_map(|p| fs::metadata(&p).ok().map(|md| (md.len(), p)))
+        .max_by_key(|(sz, _)| *sz)
+        .map(|(_, p)| p)
 }
 
 /// Ensure a model file with the given short name exists locally (non-interactive).
@@ -105,22 +95,19 @@ pub fn run_interactive_model_downloader() -> Result<()> {
     let selection = if selection_raw.is_empty() { "1" } else { &selection_raw };
 
     // Parse indices
-    let mut picked_indices: Vec<usize> = Vec::new();
-    for part in selection.split(|c| c == ',' || c == ' ' || c == ';') {
+    use std::collections::BTreeSet;
+    let mut picked_set: BTreeSet<usize> = BTreeSet::new();
+    for part in selection.split([',', ' ', ';']) {
         let t = part.trim();
         if t.is_empty() { continue; }
         match t.parse::<usize>() {
-            Ok(n) if n >= 1 && n <= available.len() => {
-                let idx = n - 1;
-                if !picked_indices.contains(&idx) {
-                    picked_indices.push(idx);
-                }
+            Ok(n) if (1..=available.len()).contains(&n) => {
+                picked_set.insert(n - 1);
             }
-            _ => {
-                ui::warn(format!("Ignoring invalid selection: '{}'", t));
-            }
+            _ => ui::warn(format!("Ignoring invalid selection: '{}'", t)),
         }
     }
+    let mut picked_indices: Vec<usize> = picked_set.into_iter().collect();
     if picked_indices.is_empty() {
         // Fallback to default first item
         picked_indices.push(0);

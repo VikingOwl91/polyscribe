@@ -87,107 +87,39 @@ fn vulkan_available() -> bool {
 }
 
 /// CPU-based transcription backend using whisper-rs.
+#[derive(Default)]
 pub struct CpuBackend;
 /// CUDA-accelerated transcription backend for NVIDIA GPUs.
+#[derive(Default)]
 pub struct CudaBackend;
 /// ROCm/HIP-accelerated transcription backend for AMD GPUs.
+#[derive(Default)]
 pub struct HipBackend;
 /// Vulkan-based transcription backend (experimental/incomplete).
+#[derive(Default)]
 pub struct VulkanBackend;
 
-impl CpuBackend {
-    /// Create a new CPU backend instance.
-    pub fn new() -> Self {
-        CpuBackend
-    }
-}
-impl Default for CpuBackend {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-impl CudaBackend {
-    /// Create a new CUDA backend instance.
-    pub fn new() -> Self {
-        CudaBackend
-    }
-}
-impl Default for CudaBackend {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-impl HipBackend {
-    /// Create a new HIP backend instance.
-    pub fn new() -> Self {
-        HipBackend
-    }
-}
-impl Default for HipBackend {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-impl VulkanBackend {
-    /// Create a new Vulkan backend instance.
-    pub fn new() -> Self {
-        VulkanBackend
-    }
-}
-impl Default for VulkanBackend {
-    fn default() -> Self {
-        Self::new()
-    }
+macro_rules! impl_whisper_backend {
+    ($ty:ty, $kind:expr) => {
+        impl TranscribeBackend for $ty {
+            fn kind(&self) -> BackendKind { $kind }
+            fn transcribe(
+                &self,
+                audio_path: &Path,
+                speaker: &str,
+                lang_opt: Option<&str>,
+                _gpu_layers: Option<u32>,
+                progress_cb: Option<&(dyn Fn(i32) + Send + Sync)>,
+            ) -> Result<Vec<OutputEntry>> {
+                transcribe_with_whisper_rs(audio_path, speaker, lang_opt, progress_cb)
+            }
+        }
+    };
 }
 
-impl TranscribeBackend for CpuBackend {
-    fn kind(&self) -> BackendKind {
-        BackendKind::Cpu
-    }
-    fn transcribe(
-        &self,
-        audio_path: &Path,
-        speaker: &str,
-        lang_opt: Option<&str>,
-        _gpu_layers: Option<u32>,
-        progress_cb: Option<&(dyn Fn(i32) + Send + Sync)>,
-    ) -> Result<Vec<OutputEntry>> {
-        transcribe_with_whisper_rs(audio_path, speaker, lang_opt, progress_cb)
-    }
-}
-
-impl TranscribeBackend for CudaBackend {
-    fn kind(&self) -> BackendKind {
-        BackendKind::Cuda
-    }
-    fn transcribe(
-        &self,
-        audio_path: &Path,
-        speaker: &str,
-        lang_opt: Option<&str>,
-        _gpu_layers: Option<u32>,
-        progress_cb: Option<&(dyn Fn(i32) + Send + Sync)>,
-    ) -> Result<Vec<OutputEntry>> {
-        // whisper-rs uses enabled CUDA feature at build time; call same code path
-        transcribe_with_whisper_rs(audio_path, speaker, lang_opt, progress_cb)
-    }
-}
-
-impl TranscribeBackend for HipBackend {
-    fn kind(&self) -> BackendKind {
-        BackendKind::Hip
-    }
-    fn transcribe(
-        &self,
-        audio_path: &Path,
-        speaker: &str,
-        lang_opt: Option<&str>,
-        _gpu_layers: Option<u32>,
-        progress_cb: Option<&(dyn Fn(i32) + Send + Sync)>,
-    ) -> Result<Vec<OutputEntry>> {
-        transcribe_with_whisper_rs(audio_path, speaker, lang_opt, progress_cb)
-    }
-}
+impl_whisper_backend!(CpuBackend, BackendKind::Cpu);
+impl_whisper_backend!(CudaBackend, BackendKind::Cuda);
+impl_whisper_backend!(HipBackend, BackendKind::Hip);
 
 impl TranscribeBackend for VulkanBackend {
     fn kind(&self) -> BackendKind {
@@ -239,11 +171,11 @@ pub fn select_backend(requested: BackendKind, verbose: bool) -> Result<Selection
 
     let mk = |k: BackendKind| -> Box<dyn TranscribeBackend + Send + Sync> {
         match k {
-            BackendKind::Cpu => Box::new(CpuBackend::new()),
-            BackendKind::Cuda => Box::new(CudaBackend::new()),
-            BackendKind::Hip => Box::new(HipBackend::new()),
-            BackendKind::Vulkan => Box::new(VulkanBackend::new()),
-            BackendKind::Auto => Box::new(CpuBackend::new()), // will be replaced
+            BackendKind::Cpu => Box::new(CpuBackend::default()),
+            BackendKind::Cuda => Box::new(CudaBackend::default()),
+            BackendKind::Hip => Box::new(HipBackend::default()),
+            BackendKind::Vulkan => Box::new(VulkanBackend::default()),
+            BackendKind::Auto => Box::new(CpuBackend::default()), // will be replaced
         }
     };
 
