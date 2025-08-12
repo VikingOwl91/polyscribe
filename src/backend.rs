@@ -3,12 +3,10 @@
 
 //! Transcription backend selection and implementations (CPU/GPU) used by PolyScribe.
 use crate::OutputEntry;
-use crate::progress::ProgressMessage;
 use crate::{decode_audio_to_pcm_f32_ffmpeg, find_model_file};
 use anyhow::{Context, Result, anyhow};
 use std::env;
 use std::path::Path;
-use std::sync::mpsc::Sender;
 
 // Re-export a public enum for CLI parsing usage
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,7 +40,6 @@ pub trait TranscribeBackend {
         audio_path: &Path,
         speaker: &str,
         lang_opt: Option<&str>,
-        progress_tx: Option<Sender<ProgressMessage>>,
         gpu_layers: Option<u32>,
     ) -> Result<Vec<OutputEntry>>;
 }
@@ -150,10 +147,9 @@ impl TranscribeBackend for CpuBackend {
         audio_path: &Path,
         speaker: &str,
         lang_opt: Option<&str>,
-        progress_tx: Option<Sender<ProgressMessage>>,
         _gpu_layers: Option<u32>,
     ) -> Result<Vec<OutputEntry>> {
-        transcribe_with_whisper_rs(audio_path, speaker, lang_opt, progress_tx)
+        transcribe_with_whisper_rs(audio_path, speaker, lang_opt)
     }
 }
 
@@ -166,11 +162,10 @@ impl TranscribeBackend for CudaBackend {
         audio_path: &Path,
         speaker: &str,
         lang_opt: Option<&str>,
-        progress_tx: Option<Sender<ProgressMessage>>,
         _gpu_layers: Option<u32>,
     ) -> Result<Vec<OutputEntry>> {
         // whisper-rs uses enabled CUDA feature at build time; call same code path
-        transcribe_with_whisper_rs(audio_path, speaker, lang_opt, progress_tx)
+        transcribe_with_whisper_rs(audio_path, speaker, lang_opt)
     }
 }
 
@@ -183,10 +178,9 @@ impl TranscribeBackend for HipBackend {
         audio_path: &Path,
         speaker: &str,
         lang_opt: Option<&str>,
-        progress_tx: Option<Sender<ProgressMessage>>,
         _gpu_layers: Option<u32>,
     ) -> Result<Vec<OutputEntry>> {
-        transcribe_with_whisper_rs(audio_path, speaker, lang_opt, progress_tx)
+        transcribe_with_whisper_rs(audio_path, speaker, lang_opt)
     }
 }
 
@@ -199,7 +193,6 @@ impl TranscribeBackend for VulkanBackend {
         _audio_path: &Path,
         _speaker: &str,
         _lang_opt: Option<&str>,
-        _progress_tx: Option<Sender<ProgressMessage>>,
         _gpu_layers: Option<u32>,
     ) -> Result<Vec<OutputEntry>> {
         Err(anyhow!(
@@ -308,25 +301,9 @@ pub(crate) fn transcribe_with_whisper_rs(
     audio_path: &Path,
     speaker: &str,
     lang_opt: Option<&str>,
-    progress_tx: Option<Sender<ProgressMessage>>,
 ) -> Result<Vec<OutputEntry>> {
-    // initial progress
-    if let Some(tx) = &progress_tx {
-        let _ = tx.send(ProgressMessage {
-            fraction: 0.0,
-            stage: Some("load_model".to_string()),
-            note: Some(format!("{}", audio_path.display())),
-        });
-    }
     let pcm = decode_audio_to_pcm_f32_ffmpeg(audio_path)?;
     let model = find_model_file()?;
-    if let Some(tx) = &progress_tx {
-        let _ = tx.send(ProgressMessage {
-            fraction: 0.05,
-            stage: Some("load_model".to_string()),
-            note: Some("model selected".to_string()),
-        });
-    }
     let is_en_only = model
         .file_name()
         .and_then(|s| s.to_str())
@@ -364,13 +341,6 @@ pub(crate) fn transcribe_with_whisper_rs(
             .map_err(|e| anyhow!("Failed to create Whisper state: {:?}", e))?;
         Ok::<_, anyhow::Error>((ctx, state))
     })?;
-    if let Some(tx) = &progress_tx {
-        let _ = tx.send(ProgressMessage {
-            fraction: 0.15,
-            stage: Some("encode".to_string()),
-            note: Some("state ready".to_string()),
-        });
-    }
 
     let mut params =
         whisper_rs::FullParams::new(whisper_rs::SamplingStrategy::Greedy { best_of: 1 });
@@ -383,25 +353,11 @@ pub(crate) fn transcribe_with_whisper_rs(
         params.set_language(Some(lang));
     }
 
-    if let Some(tx) = &progress_tx {
-        let _ = tx.send(ProgressMessage {
-            fraction: 0.20,
-            stage: Some("decode".to_string()),
-            note: Some("inference".to_string()),
-        });
-    }
     crate::with_suppressed_stderr(|| {
         state
             .full(params, &pcm)
             .map_err(|e| anyhow!("Whisper full() failed: {:?}", e))
     })?;
-    if let Some(tx) = &progress_tx {
-        let _ = tx.send(ProgressMessage {
-            fraction: 1.0,
-            stage: Some("done".to_string()),
-            note: Some("transcription finished".to_string()),
-        });
-    }
 
     let num_segments = state
         .full_n_segments()
