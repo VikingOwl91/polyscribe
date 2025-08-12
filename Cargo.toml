@@ -5,11 +5,14 @@ edition = "2024"
 license = "MIT"
 
 [features]
-# Default: CPU only; no GPU features enabled
+# Default: build without whisper to keep tests lightweight; enable `whisper` to use whisper-rs.
 default = []
-# GPU backends map to whisper-rs features or FFI stub for Vulkan
-gpu-cuda = ["whisper-rs/cuda"]
-gpu-hip = ["whisper-rs/hipblas"]
+# Enable whisper-rs dependency (CPU-only unless combined with gpu-* features)
+whisper = ["dep:whisper-rs"]
+# GPU backends map to whisper-rs features
+gpu-cuda = ["whisper", "whisper-rs/cuda"]
+gpu-hip = ["whisper", "whisper-rs/hipblas"]
+# Vulkan path currently doesn't use whisper directly here; placeholder feature
 gpu-vulkan = []
 # explicit CPU fallback feature (no effect at build time, used for clarity)
 cpu-fallback = []
@@ -25,8 +28,8 @@ toml = "0.8"
 chrono = { version = "0.4", features = ["clock"] }
 reqwest = { version = "0.12", features = ["blocking", "json"] }
 sha2 = "0.10"
-# whisper-rs is always used (CPU-only by default); GPU features map onto it
-whisper-rs = { git = "https://github.com/tazz4843/whisper-rs", default-features = false }
+# Make whisper-rs optional; enabled via `whisper` feature
+whisper-rs = { git = "https://github.com/tazz4843/whisper-rs", default-features = false, optional = true }
 libc = "0.2"
 indicatif = "0.17"
 ctrlc = "3.4"

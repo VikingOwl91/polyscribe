@@ -304,6 +304,7 @@ pub fn select_backend(requested: BackendKind, verbose: bool) -> Result<Selection
 
 // Internal helper: transcription using whisper-rs with CPU/GPU (depending on build features)
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "whisper")]
 pub(crate) fn transcribe_with_whisper_rs(
     audio_path: &Path,
     speaker: &str,
@@ -428,4 +429,17 @@ pub(crate) fn transcribe_with_whisper_rs(
         });
     }
     Ok(items)
+}
+
+#[allow(clippy::too_many_arguments)]
+#[cfg(not(feature = "whisper"))]
+pub(crate) fn transcribe_with_whisper_rs(
+    _audio_path: &Path,
+    _speaker: &str,
+    _lang_opt: Option<&str>,
+    _progress_tx: Option<Sender<ProgressMessage>>,
+) -> Result<Vec<OutputEntry>> {
+    Err(anyhow!(
+        "Transcription requires the 'whisper' feature. Rebuild with --features whisper (and optional gpu-cuda/gpu-hip)."
+    ))
 }

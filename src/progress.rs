@@ -458,7 +458,9 @@ fn info_style() -> ProgressStyle {
 
 fn total_style() -> ProgressStyle {
     // Bottom total bar with elapsed time
-    ProgressStyle::with_template("Total [{bar:28=> }]  {pos}/{len} [{elapsed_precise}]").unwrap()
+    ProgressStyle::with_template("Total [{bar:28}]  {pos}/{len} [{elapsed_precise}]")
+        .unwrap()
+        .progress_chars("=> ")
 }
 
 #[derive(Debug, Clone, Copy)]
