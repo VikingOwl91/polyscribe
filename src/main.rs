@@ -316,6 +316,20 @@ fn run() -> Result<()> {
         ));
     }
 
+    // Collect all speaker names up front (one per input), before any file reading/transcription
+    let speakers: Vec<String> = inputs
+        .iter()
+        .map(|input_path| {
+            let path = Path::new(input_path);
+            let default_speaker = sanitize_speaker_name(
+                path.file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("speaker"),
+            );
+            prompt_speaker_name_for_path(path, &default_speaker, args.set_speaker_names)
+        })
+        .collect();
+
     if args.merge_and_separate {
         polyscribe::dlog!(1, "Mode: merge-and-separate; output_dir={:?}", output_path);
         // Combined mode: write separate outputs per input and also a merged output set
@@ -332,15 +346,9 @@ fn run() -> Result<()> {
 
         let mut merged_entries: Vec<OutputEntry> = Vec::new();
 
-        for input_path in &inputs {
+        for (idx, input_path) in inputs.iter().enumerate() {
             let path = Path::new(input_path);
-            let default_speaker = sanitize_speaker_name(
-                path.file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("speaker"),
-            );
-            let speaker =
-                prompt_speaker_name_for_path(path, &default_speaker, args.set_speaker_names);
+            let speaker = speakers[idx].clone();
 
             // Collect entries per file and extend merged
             let mut entries: Vec<OutputEntry> = Vec::new();
@@ -484,15 +492,9 @@ fn run() -> Result<()> {
         polyscribe::dlog!(1, "Mode: merge; output_base={:?}", output_path);
         // MERGED MODE (previous default)
         let mut entries: Vec<OutputEntry> = Vec::new();
-        for input_path in &inputs {
+        for (idx, input_path) in inputs.iter().enumerate() {
             let path = Path::new(input_path);
-            let default_speaker = sanitize_speaker_name(
-                path.file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("speaker"),
-            );
-            let speaker =
-                prompt_speaker_name_for_path(path, &default_speaker, args.set_speaker_names);
+            let speaker = speakers[idx].clone();
 
             let mut buf = String::new();
             if is_audio_file(path) {
@@ -627,15 +629,9 @@ fn run() -> Result<()> {
             }
         }
 
-        for input_path in &inputs {
+        for (idx, input_path) in inputs.iter().enumerate() {
             let path = Path::new(input_path);
-            let default_speaker = sanitize_speaker_name(
-                path.file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("speaker"),
-            );
-            let speaker =
-                prompt_speaker_name_for_path(path, &default_speaker, args.set_speaker_names);
+            let speaker = speakers[idx].clone();
 
             // Collect entries per file
             let mut entries: Vec<OutputEntry> = Vec::new();
