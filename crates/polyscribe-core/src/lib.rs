@@ -192,19 +192,16 @@ macro_rules! qlog {
     ($($arg:tt)*) => {{ $crate::ilog!($($arg)*); }}
 }
 
-/// Re-export backend module (GPU/CPU selection and transcription).
 pub mod backend;
-/// Re-export models module (model listing/downloading/updating).
 pub mod models;
-/// Configuration service (XDG + atomic writes)
+/// Configuration handling for PolyScribe
 pub mod config;
-/// UI helpers
+// Use the file-backed ui.rs module, which also declares its own `progress` submodule.
 pub mod ui;
-/// Error types for the crate.
+/// Error definitions for the PolyScribe library
 pub mod error;
+pub use error::Error;
 pub mod prelude;
-
-pub use error::{Error, Result as OtherResult};
 
 /// Transcript entry for a single segment.
 #[derive(Debug, serde::Serialize, Clone)]

@@ -79,3 +79,47 @@ impl ProgressManager {
         if let Some(total) = &self.total { total.set_position(self.completed as u64); }
     }
 }
+
+/// A simple reporter for displaying progress messages in the terminal.
+/// Provides different output formatting based on whether the environment is interactive or not.
+#[derive(Debug)]
+pub struct ProgressReporter {
+    non_interactive: bool,
+}
+
+impl ProgressReporter {
+    /// Creates a new progress reporter.
+    ///
+    /// # Arguments
+    ///
+    /// * `non_interactive` - Whether the output should be formatted for non-interactive environments.
+    pub fn new(non_interactive: bool) -> Self {
+        Self { non_interactive }
+    }
+
+    /// Displays a progress step message.
+    ///
+    /// # Arguments
+    ///
+    /// * `message` - The message to display for this progress step.
+    pub fn step(&mut self, message: &str) {
+        if self.non_interactive {
+            eprintln!("[..] {message}");
+        } else {
+            eprintln!("• {message}");
+        }
+    }
+
+    /// Displays a completion message.
+    ///
+    /// # Arguments
+    ///
+    /// * `message` - The message to display when a task is completed.
+    pub fn finish_with_message(&mut self, message: &str) {
+        if self.non_interactive {
+            eprintln!("[ok] {message}");
+        } else {
+            eprintln!("✓ {message}");
+        }
+    }
+}

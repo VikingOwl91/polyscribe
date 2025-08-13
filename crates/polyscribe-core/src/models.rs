@@ -88,9 +88,10 @@ pub fn run_interactive_model_downloader() -> Result<()> {
     }
 
     let answer = ui::prompt_input("Your selection", Some("1"))?;
-    let selection_raw = match answer {
-        Some(s) => s.trim().to_string(),
-        None => "1".to_string(),
+    let selection_raw = if answer.trim().is_empty() {
+        "1".to_string()
+    } else {
+        answer.trim().to_string()
     };
     let selection = if selection_raw.is_empty() { "1" } else { &selection_raw };
 

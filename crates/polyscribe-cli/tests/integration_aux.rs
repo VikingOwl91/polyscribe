@@ -3,8 +3,9 @@
 
 use std::process::Command;
 
-fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_polyscribe")
+fn bin() -> String {
+    std::env::var("CARGO_BIN_EXE_polyscribe")
+        .unwrap_or_else(|_| "polyscribe".to_string())
 }
 
 #[test]

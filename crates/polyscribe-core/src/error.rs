@@ -1,39 +1,39 @@
-// SPDX-License-Identifier: MIT
-
 use thiserror::Error;
 
-/// The common error type for the polyscribe core crate.
-/// Add more domain-specific variants as needed.
 #[derive(Debug, Error)]
+/// Error types for the polyscribe-core crate.
+///
+/// This enum represents various error conditions that can occur during
+/// operations in this crate, including I/O errors, serialization/deserialization
+/// errors, and environment variable access errors.
 pub enum Error {
-    /// Wrapper for any boxed dynamic error. Useful as a temporary catch-all.
-    #[error("anyhow error: {0}")]
-    Anyhow(#[from] anyhow::Error),
-
-    /// IO-related error.
-    #[error("io error: {0}")]
+    #[error("I/O error: {0}")]
+    /// Represents an I/O error that occurred during file or stream operations
     Io(#[from] std::io::Error),
 
-    /// UTF-8 conversion error.
-    #[error("utf8 error: {0}")]
-    Utf8(#[from] std::string::FromUtf8Error),
+    #[error("serde error: {0}")]
+    /// Represents a JSON serialization or deserialization error
+    Serde(#[from] serde_json::Error),
 
-    /// Environment variable error.
+    #[error("toml error: {0}")]
+    /// Represents a TOML deserialization error
+    Toml(#[from] toml::de::Error),
+
+    #[error("toml ser error: {0}")]
+    /// Represents a TOML serialization error
+    TomlSer(#[from] toml::ser::Error),
+
     #[error("env var error: {0}")]
-    Var(#[from] std::env::VarError),
+    /// Represents an error that occurred during environment variable access
+    EnvVar(#[from] std::env::VarError),
 
-    /// TOML de serialization error.
-    #[error("toml de error: {0}")]
-    TomlDe(#[from] toml::de::Error),
-
-    /// Configuration parsing error.
-    #[error("configuration error: {0}")]
-    Config(String),
-
-    /// Placeholder for not-yet-implemented backends or features.
-    #[error("unimplemented: {0}")]
-    Unimplemented(&'static str),
+    #[error("other: {0}")]
+    /// Represents a general error condition with a custom message
+    Other(String),
 }
 
-/// Convenient result alias for the polyscribe core crate.
-pub type Result<T> = std::result::Result<T, Error>;
+impl From<anyhow::Error> for Error {
+    fn from(e: anyhow::Error) -> Self {
+        Error::Other(e.to_string())
+    }
+}
