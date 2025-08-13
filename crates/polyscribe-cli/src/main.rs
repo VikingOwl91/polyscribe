@@ -85,7 +85,6 @@ async fn main() -> Result<()> {
                         .await
                         .map_err(|e| anyhow!("blocking task join error: {e}"))?
                         .context("updating models")?;
-                    println!("Models updated.");
                 }
                 ModelsCmd::Download => {
                     info!("interactive model selection and download");
