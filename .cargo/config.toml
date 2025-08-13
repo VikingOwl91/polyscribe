@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: MIT
+
+[build]
+# Make target-dir consistent across workspace for better cache reuse.
+target-dir = "target"
+
+[profile.dev]
+opt-level = 1
+debug = true
+incremental = true
+
+[profile.release]
+# Reasonable defaults for CLI apps/libraries
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"
+opt-level = 3

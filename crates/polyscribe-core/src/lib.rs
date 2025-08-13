@@ -12,7 +12,16 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
-// Global runtime flags
+use anyhow::{anyhow, Context, Result};
+use chrono::Local;
+use std::env;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+#[cfg(unix)]
+use libc::{O_WRONLY, close, dup, dup2, open};
+
+/// Global runtime flags
 static QUIET: AtomicBool = AtomicBool::new(false);
 static NO_INTERACTION: AtomicBool = AtomicBool::new(false);
 static VERBOSE: AtomicU8 = AtomicU8::new(0);
@@ -101,7 +110,7 @@ impl StderrSilencer {
             let devnull_cstr = std::ffi::CString::new("/dev/null").unwrap();
             let devnull_fd = open(devnull_cstr.as_ptr(), O_WRONLY);
             if devnull_fd < 0 {
-                close(old_fd);
+                let _ = close(old_fd);
                 return Self {
                     active: false,
                     old_stderr_fd: -1,
@@ -109,8 +118,8 @@ impl StderrSilencer {
                 };
             }
             if dup2(devnull_fd, 2) < 0 {
-                close(devnull_fd);
-                close(old_fd);
+                let _ = close(devnull_fd);
+                let _ = close(old_fd);
                 return Self {
                     active: false,
                     old_stderr_fd: -1,
@@ -120,7 +129,7 @@ impl StderrSilencer {
             Self {
                 active: true,
                 old_stderr_fd: old_fd,
-                devnull_fd: devnull_fd,
+                devnull_fd,
             }
         }
         #[cfg(not(unix))]
@@ -183,16 +192,6 @@ macro_rules! qlog {
     ($($arg:tt)*) => {{ $crate::ilog!($($arg)*); }}
 }
 
-use anyhow::{Context, Result, anyhow};
-use chrono::Local;
-use std::env;
-use std::fs::create_dir_all;
-use std::path::{Path, PathBuf};
-use std::process::Command;
-
-#[cfg(unix)]
-use libc::{O_WRONLY, close, dup, dup2, open};
-
 /// Re-export backend module (GPU/CPU selection and transcription).
 pub mod backend;
 /// Re-export models module (model listing/downloading/updating).
@@ -201,6 +200,11 @@ pub mod models;
 pub mod config;
 /// UI helpers
 pub mod ui;
+/// Error types for the crate.
+pub mod error;
+pub mod prelude;
+
+pub use error::{Error, Result as OtherResult};
 
 /// Transcript entry for a single segment.
 #[derive(Debug, serde::Serialize, Clone)]
@@ -356,56 +360,77 @@ pub fn normalize_lang_code(input: &str) -> Option<String> {
 
 /// Find the Whisper model file path to use.
 pub fn find_model_file() -> Result<PathBuf> {
+    // 1) Explicit override via environment
     if let Ok(path) = env::var("WHISPER_MODEL") {
         let p = PathBuf::from(path);
-        if p.exists() {
-            return Ok(p);
-        } else {
+        if !p.exists() {
             return Err(anyhow!(
-                "WHISPER_MODEL points to non-existing file: {}",
+                "WHISPER_MODEL points to a non-existing path: {}",
                 p.display()
             ));
         }
-    }
-    let models_dir = models_dir_path();
-    if !models_dir.exists() {
-        create_dir_all(&models_dir).with_context(|| {
-            format!("Failed to create models dir: {}", models_dir.display())
-        })?;
+        if !p.is_file() {
+            return Err(anyhow!(
+                "WHISPER_MODEL must point to a file, but is not: {}",
+                p.display()
+            ));
+        }
+        return Ok(p);
     }
 
-    // Heuristic: prefer larger model files and English-only when language hint is en
-    let mut candidates = Vec::new();
-    for entry in std::fs::read_dir(&models_dir).with_context(|| format!(
-        "Failed to read models dir: {}",
-        models_dir.display()
-    ))? {
-        let entry = entry?;
-        let path = entry.path();
-        if !path
-            .extension()
-            .and_then(|s| s.to_str())
-            .is_some_and(|s| s.eq_ignore_ascii_case("bin"))
-        {
-            continue;
-        }
-        if let Ok(md) = std::fs::metadata(&path) {
-            candidates.push((md.len(), path));
-        }
-    }
-    if candidates.is_empty() {
-        // Try default fallback (tiny.en)
-        let fallback = models_dir.join("ggml-tiny.en.bin");
-        if fallback.exists() {
-            return Ok(fallback);
-        }
+    // 2) Resolve models directory and ensure it exists and is a directory
+    let models_dir = models_dir_path();
+    if models_dir.exists() && !models_dir.is_dir() {
         return Err(anyhow!(
-            "No Whisper models found in {}. Please download a model or set WHISPER_MODEL.",
+            "Models path exists but is not a directory: {}",
             models_dir.display()
         ));
     }
+    std::fs::create_dir_all(&models_dir).with_context(|| {
+        format!("Failed to ensure models dir exists: {}", models_dir.display())
+    })?;
+
+    // 3) Gather candidate .bin files (regular files only), prefer largest
+    let mut candidates = Vec::new();
+    for entry in std::fs::read_dir(&models_dir).with_context(|| {
+        format!("Failed to read models dir: {}", models_dir.display())
+    })? {
+        let entry = entry?;
+        let path = entry.path();
+
+        // Only consider .bin files
+        let is_bin = path
+            .extension()
+            .and_then(|s| s.to_str())
+            .is_some_and(|s| s.eq_ignore_ascii_case("bin"));
+        if !is_bin {
+            continue;
+        }
+
+        // Only consider regular files
+        let md = match std::fs::metadata(&path) {
+            Ok(m) if m.is_file() => m,
+            _ => continue,
+        };
+
+        candidates.push((md.len(), path));
+    }
+
+    if candidates.is_empty() {
+        // 4) Fallback to known tiny English model if present
+        let fallback = models_dir.join("ggml-tiny.en.bin");
+        if fallback.is_file() {
+            return Ok(fallback);
+        }
+        return Err(anyhow!(
+            "No Whisper model files (*.bin) found in {}. \
+             Please download a model or set WHISPER_MODEL.",
+            models_dir.display()
+        ));
+    }
+
     candidates.sort_by_key(|(size, _)| *size);
-    let (_size, path) = candidates.into_iter().last().unwrap();
+    let (_size, path) = candidates.into_iter().last().expect("non-empty");
     Ok(path)
 }
 
@@ -414,12 +439,14 @@ pub fn decode_audio_to_pcm_f32_ffmpeg(audio_path: &Path) -> Result<Vec<f32>> {
     let in_path = audio_path
         .to_str()
         .ok_or_else(|| anyhow!("Audio path must be valid UTF-8: {}", audio_path.display()))?;
-    let tmp_wav = std::env::temp_dir().join("polyscribe_tmp_input.wav");
-    let tmp_wav_str = tmp_wav
-        .to_str()
-        .ok_or_else(|| anyhow!("Temp path not valid UTF-8: {}", tmp_wav.display()))?;
 
-    // ffmpeg -i input -f f32le -ac 1 -ar 16000 -y /tmp/tmp.raw
+    // Use a raw f32le file to match the -f f32le output format.
+    let tmp_raw = std::env::temp_dir().join("polyscribe_tmp_input.f32le");
+    let tmp_raw_str = tmp_raw
+        .to_str()
+        .ok_or_else(|| anyhow!("Temp path not valid UTF-8: {}", tmp_raw.display()))?;
+
+    // ffmpeg -i input -f f32le -ac 1 -ar 16000 -y /tmp/tmp.f32le
     let status = Command::new("ffmpeg")
         .arg("-hide_banner")
         .arg("-loglevel")
@@ -433,16 +460,29 @@ pub fn decode_audio_to_pcm_f32_ffmpeg(audio_path: &Path) -> Result<Vec<f32>> {
         .arg("-ar")
         .arg("16000")
         .arg("-y")
-        .arg(&tmp_wav_str)
+        .arg(tmp_raw_str)
         .status()
         .with_context(|| format!("Failed to invoke ffmpeg to decode: {}", in_path))?;
+
     if !status.success() {
-        return Err(anyhow!("ffmpeg exited with non-zero status when decoding {}", in_path));
+        return Err(anyhow!(
+            "ffmpeg exited with non-zero status when decoding {}",
+            in_path
+        ));
     }
-    let raw = std::fs::read(&tmp_wav).with_context(|| format!("Failed to read temp PCM file: {}", tmp_wav.display()))?;
+
+    let raw = std::fs::read(&tmp_raw)
+        .with_context(|| format!("Failed to read temp PCM file: {}", tmp_raw.display()))?;
+
+    // Best-effort cleanup of the temp file
+    let _ = std::fs::remove_file(&tmp_raw);
+
     // Interpret raw bytes as f32 little-endian
     if raw.len() % 4 != 0 {
-        return Err(anyhow!("Decoded PCM file length not multiple of 4: {}", raw.len()));
+        return Err(anyhow!(
+            "Decoded PCM file length not multiple of 4: {}",
+            raw.len()
+        ));
     }
     let mut samples = Vec::with_capacity(raw.len() / 4);
     for chunk in raw.chunks_exact(4) {

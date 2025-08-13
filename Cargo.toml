@@ -4,6 +4,37 @@ members = [
     "crates/polyscribe-protocol",
     "crates/polyscribe-host",
     "crates/polyscribe-cli",
-    "plugins/polyscribe-plugin-tubescribe",
 ]
-resolver = "2"
+resolver = "3"
+
+# Optional: Keep dependency versions consistent across members
+[workspace.dependencies]
+thiserror = "1.0.69"
+serde = { version = "1.0.219", features = ["derive"] }
+anyhow = "1.0.99"
+libc = "0.2.175"
+toml = "0.8.23"
+serde_json = "1.0.142"
+chrono = "0.4.41"
+sha2 = "0.10.9"
+which = "6.0.3"
+tokio = { version = "1.47.1", features = ["rt-multi-thread", "macros"] }
+clap = { version = "4.5.44", features = ["derive"] }
+indicatif = "0.17.11"
+directories = "5.0.1"
+whisper-rs = "0.14.3"
+cliclack = "0.3.6"
+clap_complete = "4.5.57"
+clap_mangen = "0.2.29"
+
+[workspace.lints.rust]
+unused_imports = "deny"
+dead_code = "warn"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+
+[profile.dev]
+panic = "unwind"
