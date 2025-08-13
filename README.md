@@ -87,3 +87,41 @@ See the examples/ directory for copy-paste scripts:
 License
 -------
 This project is licensed under the MIT License — see the LICENSE file for details.
+
+
+---
+
+Workspace layout
+- This repo is a Cargo workspace using resolver = "2".
+- Members:
+  - crates/polyscribe-core — types, errors, config service, core helpers.
+  - crates/polyscribe-protocol — PSP/1 serde types for NDJSON over stdio.
+  - crates/polyscribe-host — plugin discovery/runner, progress forwarding.
+  - crates/polyscribe-cli — the CLI, using host + core.
+  - plugins/polyscribe-plugin-tubescribe — stub plugin used for verification.
+
+Build and run
+- Build all: cargo build --workspace --all-targets
+- CLI help: cargo run -p polyscribe-cli -- --help
+
+Plugins
+- Build and link the example plugin into your XDG data plugin dir:
+  - make -C plugins/polyscribe-plugin-tubescribe link
+  - This creates a symlink at: $XDG_DATA_HOME/polyscribe/plugins/polyscribe-plugin-tubescribe (defaults to ~/.local/share on Linux).
+- Discover installed plugins:
+  - cargo run -p polyscribe-cli -- plugins list
+- Show a plugin's capabilities:
+  - cargo run -p polyscribe-cli -- plugins info tubescribe
+- Run a plugin command (JSON-RPC over NDJSON via stdio):
+  - cargo run -p polyscribe-cli -- plugins run tubescribe generate_metadata --json '{"input":{"kind":"text","summary":"hello world"}}'
+
+Verification commands
+- The above commands are used for acceptance; expected behavior:
+  - plugins list shows "tubescribe" once linked.
+  - plugins info tubescribe prints JSON capabilities.
+  - plugins run ... prints progress events and a JSON result.
+
+Notes
+- No absolute paths are hardcoded; config and plugin dirs respect XDG on Linux and platform equivalents via directories.
+- Plugins must be non-interactive (no TTY prompts). All interaction stays in the host/CLI.
+- Config files are written atomically and support env overrides: POLYSCRIBE__SECTION__KEY=value.

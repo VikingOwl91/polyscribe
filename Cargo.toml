@@ -1,35 +1,9 @@
-[package]
-name = "polyscribe"
-version = "0.1.0"
-edition = "2024"
-license = "MIT"
-
-[features]
-# Default: CPU only; no GPU features enabled
-default = []
-# GPU backends map to whisper-rs features or FFI stub for Vulkan
-gpu-cuda = ["whisper-rs/cuda"]
-gpu-hip = ["whisper-rs/hipblas"]
-gpu-vulkan = []
-# explicit CPU fallback feature (no effect at build time, used for clarity)
-cpu-fallback = []
-
-[dependencies]
-anyhow = "1.0.98"
-clap = { version = "4.5.43", features = ["derive"] }
-clap_complete = "4.5.28"
-clap_mangen = "0.2"
-serde = { version = "1.0.219", features = ["derive"] }
-serde_json = "1.0.142"
-toml = "0.8"
-chrono = { version = "0.4", features = ["clock"] }
-reqwest = { version = "0.12", features = ["blocking", "json"] }
-sha2 = "0.10"
-# whisper-rs is always used (CPU-only by default); GPU features map onto it
-whisper-rs = { git = "https://github.com/tazz4843/whisper-rs" }
-libc = "0.2"
-cliclack = "0.3"
-indicatif = "0.17"
-
-[dev-dependencies]
-tempfile = "3"
+[workspace]
+members = [
+    "crates/polyscribe-core",
+    "crates/polyscribe-protocol",
+    "crates/polyscribe-host",
+    "crates/polyscribe-cli",
+    "plugins/polyscribe-plugin-tubescribe",
+]
+resolver = "2"
