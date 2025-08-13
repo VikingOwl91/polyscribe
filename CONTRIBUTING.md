@@ -1,32 +1,26 @@
-# Contributing to PolyScribe
+# Contributing
 
-Thanks for your interest in contributing! This guide explains the workflow and the checklist to follow before opening a Pull Request.
+Thank you for your interest in contributing!
 
-Workflow (fork → branch → PR)
-1) Fork the repository to your account.
-2) Create a feature branch:
-- git checkout -b feat/short-description
-3) Make changes with focused commits and good messages.
-4) Run the checklist below.
-5) Push and open a Pull Request against the main repository.
+Development setup
+- Install Rust via rustup.
+- Ensure ffmpeg is installed and available on PATH.
+- For GPU builds, install the appropriate runtime (CUDA/ROCm/Vulkan) and enable the matching features.
 
-Developer checklist (before opening a PR)
-- Build:
-  - cargo build (preferably without warnings)
-- Tests:
-  - cargo test (all tests pass)
-- Lints:
-  - cargo clippy --all-targets -- -D warnings (fix warnings)
-- Documentation:
-  - Update README/docs for user-visible changes
-  - Update CHANGELOG.md if applicable
-- Tests for changes:
-  - Add or update tests for bug fixes and new features where reasonable
+Coding guidelines
+- Prefer small, focused changes.
+- Add tests where reasonable.
+- Keep user-facing changes documented in README/docs.
+- Run clippy and fix warnings.
 
-Local development tips
-- Use `cargo run -- <args>` during development.
-- For faster feedback, keep examples in the examples/ folder handy.
-- Keep functions small and focused; prefer clear error messages with context.
+CI checklist
+- Build: cargo build --all-targets --locked
+- Tests: cargo test --all --locked
+- Lints: cargo clippy --all-targets -- -D warnings
+- Optional: smoke-run examples inline (from README):
+  - ./target/release/polyscribe --update-models --no-interaction -q
+  - ./target/release/polyscribe -o output samples/podcast_clip.mp3
 
-Code of conduct
-- Be respectful and constructive. Assume good intent.
+Notes
+- For GPU features, use --features gpu-cuda|gpu-hip|gpu-vulkan as needed in your local runs.
+- For docs-only changes, please still ensure the project builds.

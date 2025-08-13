@@ -66,6 +66,8 @@ Minimal usage examples
   - ./target/release/polyscribe -m -o output merged input/a.json input/b.json
 - Update local models non-interactively (good for CI):
   - ./target/release/polyscribe --update-models --no-interaction -q
+- Download models interactively:
+  - ./target/release/polyscribe --download-models
 
 Troubleshooting & docs
 - docs/faq.md – common issues and solutions (missing ffmpeg, GPU selection, model paths)
@@ -73,21 +75,13 @@ Troubleshooting & docs
 - docs/development.md – build, run, and contribute locally
 - docs/design.md – architecture overview and decisions
 - docs/release-packaging.md – packaging notes for distributions
-- docs/ci.md – minimal CI checklist and job outline
-- CONTRIBUTING.md – PR checklist and workflow
+- CONTRIBUTING.md – PR checklist and CI workflow
 
 CI status: [CI badge placeholder]
-
-Examples
-See the examples/ directory for copy-paste scripts:
-- examples/transcribe_file.sh
-- examples/update_models.sh
-- examples/download_models_interactive.sh
 
 License
 -------
 This project is licensed under the MIT License — see the LICENSE file for details.
-
 
 ---
 
