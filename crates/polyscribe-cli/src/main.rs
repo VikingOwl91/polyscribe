@@ -4,6 +4,7 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Parser, CommandFactory};
 use cli::{Cli, Commands, GpuBackend, ModelsCmd, PluginsCmd};
 use polyscribe_core::{config::ConfigService, ui::progress::ProgressReporter};
+use polyscribe_core::models; // Added: call into core models
 use polyscribe_host::PluginManager;
 use tokio::io::AsyncWriteExt;
 use tracing::{error, info};
@@ -34,6 +35,11 @@ async fn main() -> Result<()> {
     let args = Cli::parse();
 
     init_tracing(args.quiet, args.verbose);
+
+    // Optionally propagate quiet/no-interaction/verbosity to core if your lib exposes setters.
+    // polyscribe_core::set_quiet(args.quiet);
+    // polyscribe_core::set_no_interaction(args.no_interaction);
+    // polyscribe_core::set_verbose(args.verbose);
 
     let _cfg = ConfigService::load_or_default().context("loading configuration")?;
 
@@ -75,12 +81,21 @@ async fn main() -> Result<()> {
             match cmd {
                 ModelsCmd::Update => {
                     info!("verifying/updating local models");
-                    println!("Models updated (stub).");
+                    tokio::task::spawn_blocking(|| models::update_local_models())
+                        .await
+                        .map_err(|e| anyhow!("blocking task join error: {e}"))?
+                        .context("updating models")?;
+                    println!("Models updated.");
                 }
                 ModelsCmd::Download => {
                     info!("interactive model selection and download");
-                    println!("Model download complete (stub).");
+                    tokio::task::spawn_blocking(|| models::run_interactive_model_downloader())
+                        .await
+                        .map_err(|e| anyhow!("blocking task join error: {e}"))?
+                        .context("running downloader")?;
+                    println!("Model download complete.");
                 }
+
             }
             Ok(())
         }
