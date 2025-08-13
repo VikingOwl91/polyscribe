@@ -4,9 +4,6 @@
 #![forbid(elided_lifetimes_in_paths)]
 #![forbid(unused_must_use)]
 #![deny(missing_docs)]
-// Lint policy for incremental refactor toward 2024:
-// - Keep basic clippy warnings enabled; skip pedantic/nursery for now (will revisit in step 7).
-// - cargo lints can be re-enabled later once codebase is tidied.
 #![warn(clippy::all)]
 //! PolyScribe library: business logic and core types.
 //!
@@ -22,8 +19,8 @@ static VERBOSE: AtomicU8 = AtomicU8::new(0);
 static NO_PROGRESS: AtomicBool = AtomicBool::new(false);
 
 /// Set quiet mode: when true, non-interactive logs should be suppressed.
-pub fn set_quiet(q: bool) {
-    QUIET.store(q, Ordering::Relaxed);
+pub fn set_quiet(enabled: bool) {
+    QUIET.store(enabled, Ordering::Relaxed);
 }
 /// Return current quiet mode state.
 pub fn is_quiet() -> bool {
@@ -31,8 +28,8 @@ pub fn is_quiet() -> bool {
 }
 
 /// Set non-interactive mode: when true, interactive prompts must be skipped.
-pub fn set_no_interaction(b: bool) {
-    NO_INTERACTION.store(b, Ordering::Relaxed);
+pub fn set_no_interaction(enabled: bool) {
+    NO_INTERACTION.store(enabled, Ordering::Relaxed);
 }
 /// Return current non-interactive state.
 pub fn is_no_interaction() -> bool {
@@ -49,8 +46,8 @@ pub fn verbose_level() -> u8 {
 }
 
 /// Disable interactive progress indicators (bars/spinners)
-pub fn set_no_progress(b: bool) {
-    NO_PROGRESS.store(b, Ordering::Relaxed);
+pub fn set_no_progress(enabled: bool) {
+    NO_PROGRESS.store(enabled, Ordering::Relaxed);
 }
 /// Return current no-progress state
 pub fn is_no_progress() -> bool {
@@ -92,7 +89,6 @@ impl StderrSilencer {
     pub fn activate() -> Self {
         #[cfg(unix)]
         unsafe {
-            // Duplicate current stderr (fd 2)
             let old_fd = dup(2);
             if old_fd < 0 {
                 return Self {
@@ -103,9 +99,8 @@ impl StderrSilencer {
             }
             // Open /dev/null for writing
             let devnull_cstr = std::ffi::CString::new("/dev/null").unwrap();
-            let dn = open(devnull_cstr.as_ptr(), O_WRONLY);
-            if dn < 0 {
-                // failed to open devnull; restore and bail
+            let devnull_fd = open(devnull_cstr.as_ptr(), O_WRONLY);
+            if devnull_fd < 0 {
                 close(old_fd);
                 return Self {
                     active: false,
@@ -113,9 +108,8 @@ impl StderrSilencer {
                     devnull_fd: -1,
                 };
             }
-            // Redirect fd 2 to devnull
-            if dup2(dn, 2) < 0 {
-                close(dn);
+            if dup2(devnull_fd, 2) < 0 {
+                close(devnull_fd);
                 close(old_fd);
                 return Self {
                     active: false,
@@ -126,7 +120,7 @@ impl StderrSilencer {
             Self {
                 active: true,
                 old_stderr_fd: old_fd,
-                devnull_fd: dn,
+                devnull_fd: devnull_fd,
             }
         }
         #[cfg(not(unix))]
@@ -143,7 +137,6 @@ impl Drop for StderrSilencer {
         }
         #[cfg(unix)]
         unsafe {
-            // Restore old stderr and close devnull and old copies
             let _ = dup2(self.old_stderr_fd, 2);
             let _ = close(self.devnull_fd);
             let _ = close(self.old_stderr_fd);
@@ -161,13 +154,13 @@ where
 {
     // Suppress noisy native logs unless super-verbose (-vv) is enabled.
     if verbose_level() < 2 {
-        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _guard = StderrSilencer::activate();
             f()
         }));
-        match res {
-            Ok(v) => v,
-            Err(p) => std::panic::resume_unwind(p),
+        match result {
+            Ok(value) => value,
+            Err(panic_payload) => std::panic::resume_unwind(panic_payload),
         }
     } else {
         f()
@@ -256,39 +249,39 @@ pub fn format_srt_time(seconds: f64) -> String {
     let total_ms = (seconds * 1000.0).round() as i64;
     let ms = total_ms % 1000;
     let total_secs = total_ms / 1000;
-    let s = total_secs % 60;
-    let m = (total_secs / 60) % 60;
-    let h = total_secs / 3600;
-    format!("{h:02}:{m:02}:{s:02},{ms:03}")
+    let sec = total_secs % 60;
+    let min = (total_secs / 60) % 60;
+    let hour = total_secs / 3600;
+    format!("{hour:02}:{min:02}:{sec:02},{ms:03}")
 }
 
 /// Render a list of transcript entries to SRT format.
-pub fn render_srt(items: &[OutputEntry]) -> String {
-    let mut out = String::new();
-    for (i, e) in items.iter().enumerate() {
-        let idx = i + 1;
-        out.push_str(&format!("{idx}\n"));
-        out.push_str(&format!(
+pub fn render_srt(entries: &[OutputEntry]) -> String {
+    let mut srt = String::new();
+    for (index, entry) in entries.iter().enumerate() {
+        let srt_index = index + 1;
+        srt.push_str(&format!("{srt_index}\n"));
+        srt.push_str(&format!(
             "{} --> {}\n",
-            format_srt_time(e.start),
-            format_srt_time(e.end)
+            format_srt_time(entry.start),
+            format_srt_time(entry.end)
         ));
-        if !e.speaker.is_empty() {
-            out.push_str(&format!("{}: {}\n", e.speaker, e.text));
+        if !entry.speaker.is_empty() {
+            srt.push_str(&format!("{}: {}\n", entry.speaker, entry.text));
         } else {
-            out.push_str(&format!("{}\n", e.text));
+            srt.push_str(&format!("{}\n", entry.text));
         }
-        out.push('\n');
+        srt.push('\n');
     }
-    out
+    srt
 }
 
 /// Determine the default models directory, honoring POLYSCRIBE_MODELS_DIR override.
 pub fn models_dir_path() -> PathBuf {
-    if let Ok(p) = env::var("POLYSCRIBE_MODELS_DIR") {
-        let pb = PathBuf::from(p);
-        if !pb.as_os_str().is_empty() {
-            return pb;
+    if let Ok(env_val) = env::var("POLYSCRIBE_MODELS_DIR") {
+        let env_path = PathBuf::from(env_val);
+        if !env_path.as_os_str().is_empty() {
+            return env_path;
         }
     }
     if cfg!(debug_assertions) {
@@ -313,17 +306,17 @@ pub fn models_dir_path() -> PathBuf {
 
 /// Normalize a language identifier to a short ISO code when possible.
 pub fn normalize_lang_code(input: &str) -> Option<String> {
-    let mut s = input.trim().to_lowercase();
-    if s.is_empty() || s == "auto" || s == "c" || s == "posix" {
+    let mut lang = input.trim().to_lowercase();
+    if lang.is_empty() || lang == "auto" || lang == "c" || lang == "posix" {
         return None;
     }
-    if let Some((lhs, _)) = s.split_once('.') {
-        s = lhs.to_string();
+    if let Some((prefix, _)) = lang.split_once('.') {
+        lang = prefix.to_string();
     }
-    if let Some((lhs, _)) = s.split_once('_') {
-        s = lhs.to_string();
+    if let Some((prefix, _)) = lang.split_once('_') {
+        lang = prefix.to_string();
     }
-    let code = match s.as_str() {
+    let code = match lang.as_str() {
         "en" => "en",
         "de" => "de",
         "es" => "es",
@@ -397,10 +390,10 @@ pub fn find_model_file() -> Result<PathBuf> {
     }
 
     if let Ok(env_model) = env::var("WHISPER_MODEL") {
-        let p = PathBuf::from(env_model);
-        if p.is_file() {
-            let _ = std::fs::write(models_dir.join(".last_model"), p.display().to_string());
-            return Ok(p);
+        let model_path = PathBuf::from(env_model);
+        if model_path.is_file() {
+            let _ = std::fs::write(models_dir.join(".last_model"), model_path.display().to_string());
+            return Ok(model_path);
         }
     }
 
@@ -419,9 +412,9 @@ pub fn find_model_file() -> Result<PathBuf> {
     }
 
     let mut candidates: Vec<PathBuf> = Vec::new();
-    let rd = std::fs::read_dir(models_dir)
+    let dir_entries = std::fs::read_dir(models_dir)
         .with_context(|| format!("Failed to read models directory: {}", models_dir.display()))?;
-    for entry in rd {
+    for entry in dir_entries {
         let entry = entry?;
         let path = entry.path();
         if path.is_file() {
@@ -452,16 +445,16 @@ pub fn find_model_file() -> Result<PathBuf> {
             ));
         }
         let input = crate::ui::prompt_line("Would you like to download models now? [Y/n]: ").unwrap_or_default();
-        let ans = input.trim().to_lowercase();
-        if ans.is_empty() || ans == "y" || ans == "yes" {
+        let answer = input.trim().to_lowercase();
+        if answer.is_empty() || answer == "y" || answer == "yes" {
             if let Err(e) = models::run_interactive_model_downloader() {
                 elog!("Downloader failed: {:#}", e);
             }
             candidates.clear();
-            let rd2 = std::fs::read_dir(models_dir).with_context(|| {
+            let dir_entries2 = std::fs::read_dir(models_dir).with_context(|| {
                 format!("Failed to read models directory: {}", models_dir.display())
             })?;
-            for entry in rd2 {
+            for entry in dir_entries2 {
                 let entry = entry?;
                 let path = entry.path();
                 if path.is_file() {
@@ -487,38 +480,36 @@ pub fn find_model_file() -> Result<PathBuf> {
     }
 
     if candidates.len() == 1 {
-        let only = candidates.remove(0);
-        let _ = std::fs::write(models_dir.join(".last_model"), only.display().to_string());
-        return Ok(only);
+        let only_model = candidates.remove(0);
+        let _ = std::fs::write(models_dir.join(".last_model"), only_model.display().to_string());
+        return Ok(only_model);
     }
 
     let last_file = models_dir.join(".last_model");
-    if let Ok(prev) = std::fs::read_to_string(&last_file) {
-        let prev = prev.trim();
-        if !prev.is_empty() {
-            let p = PathBuf::from(prev);
-            if p.is_file() && candidates.iter().any(|c| c == &p) {
-                // Previously printed: INFO about using previously selected model.
-                // Suppress this to avoid duplicate/noisy messages; per-file progress will be shown elsewhere.
-                return Ok(p);
+    if let Ok(previous_content) = std::fs::read_to_string(&last_file) {
+        let previous_content = previous_content.trim();
+        if !previous_content.is_empty() {
+            let previous_path = PathBuf::from(previous_content);
+            if previous_path.is_file() && candidates.iter().any(|c| c == &previous_path) {
+                return Ok(previous_path);
             }
         }
     }
 
     crate::ui::println_above_bars(format!("Multiple Whisper models found in {}:", models_dir.display()));
-    for (i, p) in candidates.iter().enumerate() {
-        crate::ui::println_above_bars(format!("  {}) {}", i + 1, p.display()));
+    for (index, path) in candidates.iter().enumerate() {
+        crate::ui::println_above_bars(format!("  {}) {}", index + 1, path.display()));
     }
     let input = crate::ui::prompt_line(&format!("Select model by number [1-{}]: ", candidates.len()))
         .map_err(|_| anyhow!("Failed to read selection"))?;
-    let sel: usize = input
+    let selection: usize = input
         .trim()
         .parse()
         .map_err(|_| anyhow!("Invalid selection: {}", input.trim()))?;
-    if sel == 0 || sel > candidates.len() {
+    if selection == 0 || selection > candidates.len() {
         return Err(anyhow!("Selection out of range"));
     }
-    let chosen = candidates.swap_remove(sel - 1);
+    let chosen = candidates.swap_remove(selection - 1);
     let _ = std::fs::write(models_dir.join(".last_model"), chosen.display().to_string());
     Ok(chosen)
 }
@@ -553,28 +544,28 @@ pub fn decode_audio_to_pcm_f32_ffmpeg(audio_path: &Path) -> Result<Vec<f32>> {
         }
     };
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr_str = String::from_utf8_lossy(&output.stderr);
         return Err(anyhow!(
             "Failed to decode audio from {} using ffmpeg. This may indicate the file is not a valid or supported audio/video file, is corrupted, or cannot be opened. ffmpeg stderr: {}",
             audio_path.display(),
-            stderr.trim()
+            stderr_str.trim()
         ));
     }
-    let bytes = output.stdout;
-    if bytes.len() % 4 != 0 {
-        let truncated = bytes.len() - (bytes.len() % 4);
-        let mut v = Vec::with_capacity(truncated / 4);
-        for chunk in bytes[..truncated].chunks_exact(4) {
+    let data = output.stdout;
+    if data.len() % 4 != 0 {
+        let truncated = data.len() - (data.len() % 4);
+        let mut samples = Vec::with_capacity(truncated / 4);
+        for chunk in data[..truncated].chunks_exact(4) {
             let arr = [chunk[0], chunk[1], chunk[2], chunk[3]];
-            v.push(f32::from_le_bytes(arr));
+            samples.push(f32::from_le_bytes(arr));
         }
-        Ok(v)
+        Ok(samples)
     } else {
-        let mut v = Vec::with_capacity(bytes.len() / 4);
-        for chunk in bytes.chunks_exact(4) {
+        let mut samples = Vec::with_capacity(data.len() / 4);
+        for chunk in data.chunks_exact(4) {
             let arr = [chunk[0], chunk[1], chunk[2], chunk[3]];
-            v.push(f32::from_le_bytes(arr));
+            samples.push(f32::from_le_bytes(arr));
         }
-        Ok(v)
+        Ok(samples)
     }
 }
