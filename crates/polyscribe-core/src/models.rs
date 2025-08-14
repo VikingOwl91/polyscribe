@@ -7,7 +7,6 @@
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
 use hex::ToHex;
-use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::blocking::Client;
 use reqwest::header::{
     ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, ETAG, IF_RANGE, LAST_MODIFIED, RANGE,
@@ -80,45 +79,6 @@ fn mirror_label(url: &str) -> &'static str {
     }
 }
 
-// Helper: build a single progress bar with desired format
-fn new_progress_bar(total: Option<u64>) -> ProgressBar {
-    let zero_or_none = matches!(total, None | Some(0));
-
-    let pb = if zero_or_none {
-        ProgressBar::new_spinner()
-    } else {
-        ProgressBar::new(total.unwrap())
-    };
-    pb.enable_steady_tick(Duration::from_millis(120));
-
-    // Use built-in byte and time placeholders
-    let style = if zero_or_none {
-        // No total known: show spinner, bytes so far, speed, and elapsed
-        ProgressStyle::with_template(
-            // Panel-ish spinner
-            "{spinner} {bytes:>9} @ {bytes_per_sec} | {elapsed} | {msg}"
-        ).unwrap_or_else(|_| ProgressStyle::default_spinner())
-    } else {
-        // Total known: show bar, percent, bytes progress, speed, and ETA
-        ProgressStyle::with_template(
-            // Railcar + numeric focus
-            "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})"
-        )
-            .unwrap_or_else(|_| ProgressStyle::default_bar()).tick_strings(&[
-            "▹▹▹▹▹",
-            "▸▹▹▹▹",
-            "▹▸▹▹▹",
-            "▹▹▸▹▹",
-            "▹▹▹▸▹",
-            "▹▹▹▹▸",
-            "▪▪▪▪▪",
-        ])
-            .progress_chars("=>-")
-    };
-
-    pb.set_style(style);
-    pb
-}
 
 // Perform a HEAD to get size/etag/last-modified and fill what we can
 fn head_entry(client: &Client, url: &str) -> Result<(Option<u64>, Option<String>, Option<String>, bool)> {
@@ -603,7 +563,7 @@ pub fn ensure_model_available_noninteractive(name: &str) -> Result<PathBuf> {
 
     // If already matches, early return
     if file_matches(&dest, entry.size, entry.sha256.as_deref())? {
-        println!("Already up to date: {}", dest.display());
+        crate::ui::info(format!("Already up to date: {}", dest.display()));
         return Ok(dest);
     }
 
@@ -611,12 +571,12 @@ pub fn ensure_model_available_noninteractive(name: &str) -> Result<PathBuf> {
     let base = &entry.base;
     let variant = &entry.variant;
     let size_str = format_size_mb(entry.size);
-    println!("Base: {base} • Type: {variant}");
-    println!(
+    crate::ui::println_above_bars(format!("Base: {base} • Type: {variant}"));
+    crate::ui::println_above_bars(format!(
         "Source: {} • Size: {}",
         mirror_label(&entry.url),
         size_str
-    );
+    ));
 
     download_with_progress(&dest, &entry)?;
     Ok(dest)
@@ -693,7 +653,7 @@ fn download_with_progress(dest_path: &Path, entry: &ModelEntry) -> Result<()> {
         .user_agent("polyscribe-model-downloader/1")
         .build()?;
 
-    println!("Resolving source: {} ({})", mirror_label(url), url);
+    crate::ui::info(format!("Resolving source: {} ({})", mirror_label(url), url));
 
     // HEAD for size/etag/ranges
     let (mut total_len, remote_etag, _remote_last_mod, ranges_ok) = head_entry(&client, url)
@@ -717,7 +677,7 @@ fn download_with_progress(dest_path: &Path, entry: &ModelEntry) -> Result<()> {
 
     if dest_path.exists() {
         if file_matches(dest_path, total_len, entry.sha256.as_deref())? {
-            println!("Already up to date: {}", dest_path.display());
+            crate::ui::info(format!("Already up to date: {}", dest_path.display()));
             return Ok(());
         }
     }
@@ -749,16 +709,19 @@ fn download_with_progress(dest_path: &Path, entry: &ModelEntry) -> Result<()> {
         }
     }
 
-    println!("Download: {}", part_path.display());
+    crate::ui::info(format!("Download: {}", part_path.display()));
 
     let pb_total = total_len.unwrap_or(0);
-    let pb = if pb_total > 0 {
-        let pb = new_progress_bar(Some(pb_total));
-        pb.set_position(resume_from);
-        pb
+    let mut bar = None;
+    let mut sp: Option<crate::ui::Spinner> = None;
+    if pb_total > 0 {
+        let mut b = cliclack::progress_bar(pb_total);
+        b.start("Downloading");
+        if resume_from > 0 { b.inc(resume_from); }
+        bar = Some(b);
     } else {
-        new_progress_bar(None)
-    };
+        sp = Some(crate::ui::Spinner::start("Downloading"));
+    }
 
     let start = Instant::now();
     let mut resp = req.send()?.error_for_status()?;
@@ -781,7 +744,12 @@ fn download_with_progress(dest_path: &Path, entry: &ModelEntry) -> Result<()> {
         // Plain GET without conditional headers
         let mut req2 = client.get(url);
         resp = req2.send()?.error_for_status()?;
-        pb.set_position(0);
+        if let Some(b) = bar.as_mut() {
+            b.stop("restarting");
+        }
+        let mut b2 = cliclack::progress_bar(pb_total);
+        b2.start("Downloading");
+        bar = Some(b2);
 
         // Reopen the part file since we dropped it
         part_file = OpenOptions::new()
@@ -803,20 +771,25 @@ fn download_with_progress(dest_path: &Path, entry: &ModelEntry) -> Result<()> {
             }
             part_file.write_all(&buf[..read])?;
             if pb_total > 0 {
-                let pos = part_file.metadata()?.len();
-                pb.set_position(pos);
+                if let Some(b) = bar.as_mut() {
+                    b.inc(read as u64);
+                }
             } else {
-                pb.inc(read as u64);
+                // spinner: nothing to update per chunk beyond the animation
             }
         }
         part_file.flush()?;
         part_file.sync_all()?;
     }
 
-    pb.finish_and_clear();
+    if pb_total > 0 {
+        if let Some(b) = bar.as_mut() { b.stop("done"); }
+    } else {
+        if let Some(s) = sp.take() { s.success("done"); }
+    }
 
     if let Some(expected_hex) = entry.sha256.as_deref() {
-        println!("Verify: SHA-256");
+        crate::ui::info("Verify: SHA-256");
         let mut f = File::open(&part_path)?;
         let mut hasher = Sha256::new();
         let mut buf = vec![0u8; 1024 * 1024];
@@ -836,7 +809,7 @@ fn download_with_progress(dest_path: &Path, entry: &ModelEntry) -> Result<()> {
             ));
         }
     } else {
-        println!("Verify: checksum not provided by source (skipped)");
+        crate::ui::info("Verify: checksum not provided by source (skipped)");
     }
 
     if let Some(parent) = dest_path.parent() {
@@ -853,26 +826,26 @@ fn download_with_progress(dest_path: &Path, entry: &ModelEntry) -> Result<()> {
         if elapsed > 0.0 {
             let mib = sz as f64 / 1024.0 / 1024.0;
             let rate = mib / elapsed;
-            println!(
-                "✔ Saved: {} ({}) in {:.1}s, {:.1} MiB/s",
+            crate::ui::success(format!(
+                "Saved: {} ({}) in {:.1}s, {:.1} MiB/s",
                 dest_path.display(),
                 format_size_mb(Some(sz)),
                 elapsed,
                 rate
-            );
+            ));
         } else {
-            println!(
-                "✔ Saved: {} ({})",
+            crate::ui::success(format!(
+                "Saved: {} ({})",
                 dest_path.display(),
                 format_size_mb(Some(sz))
-            );
+            ));
         }
     } else {
-        println!(
-            "✔ Saved: {} ({})",
+        crate::ui::success(format!(
+            "Saved: {} ({})",
             dest_path.display(),
             format_size_mb(None)
-        );
+        ));
     }
 
     Ok(())
@@ -912,8 +885,10 @@ pub fn run_interactive_model_downloader() -> Result<()> {
     }
 
     ui::intro("PolyScribe model downloader");
-    ui::println_above_bars("Select a model base:");
-    for (i, base) in ordered_bases.iter().enumerate() {
+
+    // Build Select items for bases with counts and size ranges
+    let mut base_labels: Vec<String> = Vec::new();
+    for base in &ordered_bases {
         let variants = &by_base[base];
         let (min_sz, max_sz) = variants.iter().fold((None, None), |acc, m| {
             let (mut lo, mut hi) = acc;
@@ -930,51 +905,24 @@ pub fn run_interactive_model_downloader() -> Result<()> {
                 hi as f64 / 1_000_000.0
             ),
             (Some(sz), _) => format!(" ~{:.2} MB", sz as f64 / 1_000_000.0),
-            _ => "".to_string(),
+            _ => String::new(),
         };
-        ui::println_above_bars(format!(
-            "  {}. {} ({:>2} types){}",
-            i + 1,
-            base,
-            variants.len(),
-            size_info
-        ));
+        base_labels.push(format!("{} ({} types){}", base, variants.len(), size_info));
     }
+    let base_refs: Vec<&str> = base_labels.iter().map(|s| s.as_str()).collect();
+    let base_idx = ui::prompt_select("Choose a model base", &base_refs)?;
+    let chosen_base = ordered_bases[base_idx].clone();
 
-    let base_ans = ui::prompt_input("Base [1]", Some("1"))?;
-    // Robust: accept either index (1-based) or base name
-    let base_idx = base_ans.trim().parse::<usize>().ok();
-    let chosen_base = if let Some(idx) = base_idx {
-        if idx == 0 || idx > ordered_bases.len() {
-            return Err(anyhow!("invalid base selection"));
-        }
-        ordered_bases[idx - 1].clone()
-    } else {
-        // Match by name, case-insensitive
-        let ans = base_ans.trim().to_ascii_lowercase();
-        let pos = ordered_bases
-            .iter()
-            .position(|b| b.eq_ignore_ascii_case(&ans))
-            .ok_or_else(|| anyhow!("invalid base selection"))?;
-        ordered_bases[pos].clone()
-    };
-
+    // Prepare variant list for chosen base
     let mut variants = by_base.remove(&chosen_base).unwrap_or_default();
-
-    // Sort variants by a friendly order: default, en, then others alphabetically
     variants.sort_by(|a, b| {
-        let rank = |v: &str| match v {
-            "default" => 0,
-            "en" => 1,
-            _ => 2,
-        };
-        rank(&a.variant)
-            .cmp(&rank(&b.variant))
-            .then_with(|| a.variant.cmp(&b.variant))
+        let rank = |v: &str| match v { "default" => 0, "en" => 1, _ => 2 };
+        rank(&a.variant).cmp(&rank(&b.variant)).then_with(|| a.variant.cmp(&b.variant))
     });
 
-    ui::println_above_bars(format!("Select a type for '{}':", chosen_base));
-    for (i, m) in variants.iter().enumerate() {
+    // Build Multi-Select items for variants
+    let mut variant_labels: Vec<String> = Vec::new();
+    for m in &variants {
         let size = format_size_mb(m.size.as_ref().copied());
         let updated = m
             .last_modified
@@ -982,62 +930,46 @@ pub fn run_interactive_model_downloader() -> Result<()> {
             .map(short_date)
             .map(|d| format!(" • updated {}", d))
             .unwrap_or_default();
-        let variant_label = if m.variant == "default" {
-            "default"
-        } else {
-            &m.variant
-        };
-        ui::println_above_bars(format!(
-            "  {}. {} ({}{})",
-            i + 1,
-            variant_label,
-            size,
-            updated
-        ));
+        let variant_label = if m.variant == "default" { "default" } else { &m.variant };
+        variant_labels.push(format!("{} ({}{})", variant_label, size, updated));
+    }
+    let variant_refs: Vec<&str> = variant_labels.iter().map(|s| s.as_str()).collect();
+    let mut defaults = vec![false; variant_refs.len()];
+    if !defaults.is_empty() { defaults[0] = true; }
+    let picks = ui::prompt_multi_select(
+        &format!("Select types for '{}'", chosen_base),
+        &variant_refs,
+        Some(&defaults),
+    )?;
+
+    if picks.is_empty() {
+        ui::warn("No types selected; aborting.");
+        ui::outro("No changes made.");
+        return Ok(());
     }
 
-    let type_ans = ui::prompt_input("Type [1]", Some("1"))?;
-    let type_idx = type_ans
-        .trim()
-        .parse::<usize>()
-        .ok()
-        .filter(|n| *n >= 1 && *n <= variants.len())
-        .or_else(|| {
-            // Optional: allow typing the variant name
-            let ans = type_ans.trim().to_ascii_lowercase();
-            variants
-                .iter()
-                .position(|m| {
-                    let v = if m.variant == "default" {
-                        "default"
-                    } else {
-                        &m.variant
-                    };
-                    v.eq_ignore_ascii_case(&ans)
-                })
-                .map(|i| i + 1)
+    ui::println_above_bars("Downloading selected models...");
+
+    // Setup multi-progress when multiple items are selected
+    let labels: Vec<String> = picks
+        .iter()
+        .map(|&i| {
+            let m = &variants[i];
+            format!("{} ({})", m.name, format_size_mb(m.size))
         })
-        .ok_or_else(|| anyhow!("invalid type selection"))?;
-
-    let picked = variants[type_idx - 1].clone();
-
-    fn entry_label(entry: &ModelEntry) -> String {
-        format!("{} ({})", entry.name, format_size_mb(entry.size))
-    }
-
-    let labels = vec![entry_label(&picked)];
+        .collect();
     let mut pm = ui::progress::ProgressManager::default_for_files(labels.len());
     pm.init_files(&labels);
-    if let Some(pb) = pm.per_bar(0) {
-        pb.set_message("downloading");
+
+    for (bar_idx, idx) in picks.into_iter().enumerate() {
+        let picked = variants[idx].clone();
+        pm.set_per_message(bar_idx, "downloading");
+        let _path = ensure_model_available_noninteractive(&picked.name)?;
+        pm.mark_file_done(bar_idx);
+        ui::success(format!("Ready: {}", picked.name));
     }
 
-    let path = ensure_model_available_noninteractive(&picked.name)?;
-    ui::println_above_bars(format!("Ready: {}", path.display()));
-    pm.mark_file_done(0);
-    if let Some(total) = pm.total_bar() {
-        total.finish_with_message("all done");
-    }
+    pm.finish_total("all done");
     ui::outro("Model selection complete.");
     Ok(())
 }
