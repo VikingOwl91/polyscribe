@@ -27,7 +27,7 @@ Installation
 
 Quickstart
 1) Download a model (first run can prompt you):
-- ./target/release/polyscribe --download-models
+- ./target/release/polyscribe models download
   - In the interactive picker, use Up/Down to navigate, Space to toggle selections, and Enter to confirm. Models are grouped by base (e.g., tiny, base, small).
 
 2) Transcribe a file:
@@ -45,13 +45,14 @@ Model locations
 - Override via env var: POLYSCRIBE_MODELS_DIR=/path/to/models.
 - Force a specific model file via env var: WHISPER_MODEL=/path/to/model.bin.
 
-Most-used CLI flags
+Most-used CLI flags and subcommands
 - -o, --output FILE_OR_DIR: Output path base (date prefix added). If omitted, JSON prints to stdout.
 - -m, --merge: Merge all inputs into one output; otherwise one output per input.
 - --merge-and-separate: Write both merged output and separate per-input outputs (requires -o dir).
 - --set-speaker-names: Prompt for a speaker label per input file.
-- --update-models: Verify/update local models by size/hash against the upstream manifest.
-- --download-models: Interactive model list + multi-select download.
+- Subcommands:
+  - models update: Verify/update local models by size/hash against the upstream manifest.
+  - models download: Interactive model list + multi-select download.
 - --language LANG: Language code hint (e.g., en, de). English-only models reject non-en hints.
 - --gpu-backend [auto|cpu|cuda|hip|vulkan]: Select backend (auto by default).
 - --gpu-layers N: Offload N layers to GPU when supported.
@@ -65,9 +66,9 @@ Minimal usage examples
 - Merge multiple transcripts into one:
   - ./target/release/polyscribe -m -o output merged input/a.json input/b.json
 - Update local models non-interactively (good for CI):
-  - ./target/release/polyscribe --update-models --no-interaction -q
+  - ./target/release/polyscribe models update --no-interaction -q
 - Download models interactively:
-  - ./target/release/polyscribe --download-models
+  - ./target/release/polyscribe models download
 
 Troubleshooting & docs
 - docs/faq.md – common issues and solutions (missing ffmpeg, GPU selection, model paths)
@@ -77,7 +78,7 @@ Troubleshooting & docs
 - docs/release-packaging.md – packaging notes for distributions
 - CONTRIBUTING.md – PR checklist and CI workflow
 
-CI status: [CI badge placeholder]
+CI status: ![CI](https://github.com/yourusername/yourrepo/actions/workflows/ci.yml/badge.svg)
 
 License
 -------
@@ -86,7 +87,7 @@ This project is licensed under the MIT License — see the LICENSE file for deta
 ---
 
 Workspace layout
-- This repo is a Cargo workspace using resolver = "2".
+- This repo is a Cargo workspace using resolver = "3".
 - Members:
   - crates/polyscribe-core — types, errors, config service, core helpers.
   - crates/polyscribe-protocol — PSP/1 serde types for NDJSON over stdio.

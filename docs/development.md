@@ -32,18 +32,20 @@ Run locally
 
 Models during development
 - Interactive downloader:
-  - cargo run -- --download-models
+  - cargo run -- models download
 - Non-interactive update (checks sizes/hashes, downloads if missing):
-  - cargo run -- --update-models --no-interaction -q
+  - cargo run -- models update --no-interaction -q
 
 Tests
 - Run all tests:
   - cargo test
 - The test suite includes CLI-oriented integration tests and unit tests. Some tests simulate GPU detection using env vars (POLYSCRIBE_TEST_FORCE_*). Do not rely on these flags in production code.
 
-Clippy
+Clippy & formatting
 - Run lint checks and treat warnings as errors:
   - cargo clippy --all-targets -- -D warnings
+- Check formatting:
+  - cargo fmt --all -- --check
 - Common warnings can often be fixed by simplifying code, removing unused imports, and following idiomatic patterns.
 
 Code layout
@@ -61,10 +63,10 @@ Adding a feature
 
 Running the model downloader
 - Interactive:
-  - cargo run -- --download-models
+  - cargo run -- models download
 - Non-interactive suggestions for CI:
   - POLYSCRIBE_MODELS_DIR=$PWD/models \
-    cargo run -- --update-models --no-interaction -q
+    cargo run -- models update --no-interaction -q
 
 Env var examples for local testing
 - Use a local copy of models and a specific model file:

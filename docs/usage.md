@@ -30,10 +30,10 @@ CLI reference
     - Choose runtime backend. Default is auto (prefers CUDA → HIP → Vulkan → CPU), depending on detection.
   - --gpu-layers N
     - Number of layers to offload to the GPU when supported.
-  - --download-models
+  - models download
     - Launch interactive model downloader (lists Hugging Face models; multi-select to download).
     - Controls: Use Up/Down to navigate, Space to toggle selections, and Enter to confirm. Models are grouped by base (e.g., tiny, base, small).
-  - --update-models
+  - models update
     - Verify/update local models by comparing sizes and hashes with the upstream manifest.
   - -v, --verbose (repeatable)
     - Increase log verbosity; use -vv for very detailed logs.
@@ -42,6 +42,9 @@ CLI reference
   - --no-interaction
     - Disable all interactive prompts (for CI). Combine with env vars to control behavior.
   - Subcommands:
+    - models download: Launch interactive model downloader.
+    - models update: Verify/update local models (non-interactive).
+    - plugins list|info|run: Discover and run plugins.
     - completions <shell>: Write shell completion script to stdout.
     - man: Write a man page to stdout.
 

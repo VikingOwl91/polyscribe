@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::process::Stdio;
-use std::{env, fs, os::unix::fs::PermissionsExt, path::Path};
+use std::{env, fs, os::unix::fs::PermissionsExt, path::{Path, PathBuf}};
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     process::{Child as TokioChild, Command},
@@ -20,28 +20,22 @@ impl PluginManager {
     pub fn list(&self) -> Result<Vec<PluginInfo>> {
         let mut plugins = Vec::new();
 
-        // Scan PATH entries for executables starting with "polyscribe-plugin-"
+        // 1) Scan PATH entries for executables starting with "polyscribe-plugin-"
         if let Ok(path) = env::var("PATH") {
             for dir in env::split_paths(&path) {
-                if let Ok(read_dir) = fs::read_dir(&dir) {
-                    for entry in read_dir.flatten() {
-                        let path = entry.path();
-                        if let Some(fname) = path.file_name().and_then(|s| s.to_str())
-                            && fname.starts_with("polyscribe-plugin-")
-                            && is_executable(&path)
-                        {
-                            let name = fname.trim_start_matches("polyscribe-plugin-").to_string();
-                            plugins.push(PluginInfo {
-                                name,
-                                path: path.to_string_lossy().to_string(),
-                            });
-                        }
-                    }
-                }
+                scan_dir_for_plugins(&dir, &mut plugins);
             }
         }
 
-        // TODO: also scan XDG data plugins dir for symlinks/binaries
+        // 2) Scan XDG data dir: $XDG_DATA_HOME/polyscribe/plugins or platform equiv
+        if let Some(dirs) = directories::ProjectDirs::from("dev", "polyscribe", "polyscribe") {
+            let plugin_dir = dirs.data_dir().join("plugins");
+            scan_dir_for_plugins(&plugin_dir, &mut plugins);
+        }
+
+        // 3) De-duplicate by binary path
+        plugins.sort_by(|a, b| a.path.cmp(&b.path));
+        plugins.dedup_by(|a, b| a.path == b.path);
         Ok(plugins)
     }
 
@@ -105,6 +99,24 @@ fn is_executable(path: &Path) -> bool {
     }
     // Fallback for non-unix (treat files as candidates)
     true
+}
+
+fn scan_dir_for_plugins(dir: &Path, out: &mut Vec<PluginInfo>) {
+    if let Ok(read_dir) = fs::read_dir(dir) {
+        for entry in read_dir.flatten() {
+            let path = entry.path();
+            if let Some(fname) = path.file_name().and_then(|s| s.to_str())
+                && fname.starts_with("polyscribe-plugin-")
+                && is_executable(&path)
+            {
+                let name = fname.trim_start_matches("polyscribe-plugin-").to_string();
+                out.push(PluginInfo {
+                    name,
+                    path: path.to_string_lossy().to_string(),
+                });
+            }
+        }
+    }
 }
 
 #[allow(dead_code)]
