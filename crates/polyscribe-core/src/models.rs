@@ -4,7 +4,8 @@
 //! data for verification. Falls back to scraping the repository tree page
 //! if the JSON API is unavailable or incomplete. No built-in manifest.
 
-use anyhow::{anyhow, Context, Result};
+use crate::prelude::*;
+use anyhow::{Context, anyhow};
 use chrono::{DateTime, Utc};
 use hex::ToHex;
 use reqwest::blocking::Client;
@@ -34,7 +35,6 @@ fn format_size_gib(bytes: u64) -> String {
     format!("{gib:.2} GiB")
 }
 
-
 // Short date formatter (RFC -> yyyy-mm-dd)
 fn short_date(s: &str) -> String {
     DateTime::parse_from_rfc3339(s)
@@ -45,7 +45,7 @@ fn short_date(s: &str) -> String {
 
 // Free disk space using libc::statvfs (already in Cargo)
 fn free_space_bytes_for_path(path: &Path) -> Result<u64> {
-    use libc::{statvfs, statvfs as statvfs_t};
+    use libc::statvfs;
     use std::ffi::CString;
 
     // use parent dir or current dir if none
@@ -58,9 +58,9 @@ fn free_space_bytes_for_path(path: &Path) -> Result<u64> {
     let cpath = CString::new(dir.as_os_str().to_string_lossy().as_bytes())
         .map_err(|_| anyhow!("invalid path for statvfs"))?;
     unsafe {
-        let mut s: statvfs_t = std::mem::zeroed();
+        let mut s: libc::statvfs = std::mem::zeroed();
         if statvfs(cpath.as_ptr(), &mut s) != 0 {
-            return Err(anyhow!("statvfs failed for {}", dir.display()));
+            return Err(anyhow!("statvfs failed for {}", dir.display()).into());
         }
         Ok((s.f_bsize as u64) * (s.f_bavail as u64))
     }
@@ -78,9 +78,10 @@ fn mirror_label(url: &str) -> &'static str {
     }
 }
 
-
 // Perform a HEAD to get size/etag/last-modified and fill what we can
-fn head_entry(client: &Client, url: &str) -> Result<(Option<u64>, Option<String>, Option<String>, bool)> {
+type HeadMeta = (Option<u64>, Option<String>, Option<String>, bool);
+
+fn head_entry(client: &Client, url: &str) -> Result<HeadMeta> {
     let resp = client.head(url).send()?.error_for_status()?;
     let len = resp
         .headers()
@@ -189,9 +190,7 @@ fn parse_base_variant(display_name: &str) -> (String, String) {
 /// Build a manifest by calling the Hugging Face API for a repo.
 /// Prefers the plain API URL, then retries with `?expand=files` if needed.
 fn hf_repo_manifest_api(repo: &str) -> Result<Vec<ModelEntry>> {
-    let client = Client::builder()
-        .user_agent("polyscribe/0.1")
-        .build()?;
+    let client = Client::builder().user_agent("polyscribe/0.1").build()?;
 
     // 1) Try the plain API you specified
     let base = format!("https://huggingface.co/api/models/{}", repo);
@@ -208,14 +207,14 @@ fn hf_repo_manifest_api(repo: &str) -> Result<Vec<ModelEntry>> {
         let url = format!("{base}?expand=files");
         let resp2 = client.get(&url).send()?;
         if !resp2.status().is_success() {
-            return Err(anyhow!("HF API {} for {}", resp2.status(), url));
+            return Err(anyhow!("HF API {} for {}", resp2.status(), url).into());
         }
         let info: HfModelInfo = resp2.json()?;
         entries = hf_info_to_entries(repo, info)?;
     }
 
     if entries.is_empty() {
-        return Err(anyhow!("HF API returned no usable .bin files"));
+        return Err(anyhow!("HF API returned no usable .bin files").into());
     }
     Ok(entries)
 }
@@ -274,14 +273,12 @@ fn hf_info_to_entries(repo: &str, info: HfModelInfo) -> Result<Vec<ModelEntry>> 
 /// Scrape the repository tree page when the API doesn't return a usable list.
 /// Note: sizes and hashes are generally unavailable in this path.
 fn scrape_tree_manifest(repo: &str) -> Result<Vec<ModelEntry>> {
-    let client = Client::builder()
-        .user_agent("polyscribe/0.1")
-        .build()?;
+    let client = Client::builder().user_agent("polyscribe/0.1").build()?;
 
     let url = format!("https://huggingface.co/{}/tree/main?recursive=1", repo);
     let resp = client.get(&url).send()?;
     if !resp.status().is_success() {
-        return Err(anyhow!("tree page HTTP {} for {}", resp.status(), url));
+        return Err(anyhow!("tree page HTTP {} for {}", resp.status(), url).into());
     }
     let html = resp.text()?;
 
@@ -344,7 +341,7 @@ fn scrape_tree_manifest(repo: &str) -> Result<Vec<ModelEntry>> {
     }
 
     if out.is_empty() {
-        return Err(anyhow!("tree scraper found no .bin files"));
+        return Err(anyhow!("tree scraper found no .bin files").into());
     }
     Ok(out)
 }
@@ -401,50 +398,51 @@ fn enrich_entry_via_head(entry: &mut ModelEntry) -> Result<()> {
     let mut filled_lm = false;
 
     // Content-Length
-    if entry.size.is_none() {
-        if let Some(sz) = resp
+    if entry.size.is_none()
+        && let Some(sz) = resp
             .headers()
             .get(CONTENT_LENGTH)
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.parse::<u64>().ok())
-        {
-            entry.size = Some(sz);
-            filled_size = true;
-        }
+    {
+        entry.size = Some(sz);
+        filled_size = true;
     }
 
     // SHA256 from headers if available
     if entry.sha256.is_none() {
-        if let Some(v) = resp.headers().get("x-linked-etag").and_then(|v| v.to_str().ok()) {
-            if let Some(hex) = parse_sha_from_header_value(v) {
+        let _ = resp
+            .headers()
+            .get("x-linked-etag")
+            .and_then(|v| v.to_str().ok())
+            .and_then(parse_sha_from_header_value)
+            .map(|hex| {
                 entry.sha256 = Some(hex);
                 filled_sha = true;
-            }
-        }
+            });
         if !filled_sha {
-            if let Some(v) = resp
+            let _ = resp
                 .headers()
                 .get(ETAG)
                 .and_then(|v| v.to_str().ok())
-            {
-                if let Some(hex) = parse_sha_from_header_value(v) {
+                .and_then(parse_sha_from_header_value)
+                .map(|hex| {
                     entry.sha256 = Some(hex);
                     filled_sha = true;
-                }
-            }
+                });
         }
     }
 
     // Last-Modified
     if entry.last_modified.is_none() {
-        if let Some(v) = resp
+        let _ = resp
             .headers()
             .get(LAST_MODIFIED)
             .and_then(|v| v.to_str().ok())
-        {
-            entry.last_modified = Some(v.to_string());
-            filled_lm = true;
-        }
+            .map(|v| {
+                entry.last_modified = Some(v.to_string());
+                filled_lm = true;
+            });
     }
 
     let elapsed_ms = started.elapsed().as_millis();
@@ -453,9 +451,27 @@ fn enrich_entry_via_head(entry: &mut ModelEntry) -> Result<()> {
         "HEAD ok in {} ms for {} (size: {}, sha256: {}, last-modified: {})",
         elapsed_ms,
         entry.file,
-        if filled_size { "new" } else { if entry.size.is_some() { "kept" } else { "missing" } },
-        if filled_sha { "new" } else { if entry.sha256.is_some() { "kept" } else { "missing" } },
-        if filled_lm { "new" } else { if entry.last_modified.is_some() { "kept" } else { "missing" } },
+        if filled_size {
+            "new"
+        } else if entry.size.is_some() {
+            "kept"
+        } else {
+            "missing"
+        },
+        if filled_sha {
+            "new"
+        } else if entry.sha256.is_some() {
+            "kept"
+        } else {
+            "missing"
+        },
+        if filled_lm {
+            "new"
+        } else if entry.last_modified.is_some() {
+            "kept"
+        } else {
+            "missing"
+        },
     );
 
     Ok(())
@@ -511,7 +527,7 @@ fn current_manifest() -> Result<Vec<ModelEntry>> {
     );
 
     if list.is_empty() {
-        return Err(anyhow!("no usable .bin files discovered"));
+        return Err(anyhow!("no usable .bin files discovered").into());
     }
     Ok(list)
 }
@@ -535,7 +551,7 @@ pub fn pick_best_local_model(dir: &Path) -> Option<PathBuf> {
 
 /// Returns the directory where models should be stored based on platform conventions.
 fn resolve_models_dir() -> Result<PathBuf> {
-    let dirs = directories::ProjectDirs::from("org", "polyscribe", "polyscribe")
+    let dirs = directories::ProjectDirs::from("dev", "polyscribe", "polyscribe")
         .ok_or_else(|| anyhow!("could not determine platform directories"))?;
     let data_dir = dirs.data_dir().join("models");
     Ok(data_dir)
@@ -552,8 +568,7 @@ fn resolve_models_dir() -> Result<PathBuf> {
 /// # Returns
 /// * `Result<PathBuf>` - Path to the downloaded model file on success
 pub fn ensure_model_available_noninteractive(name: &str) -> Result<PathBuf> {
-    let entry = find_manifest_entry(name)?
-        .ok_or_else(|| anyhow!("unknown model: {name}"))?;
+    let entry = find_manifest_entry(name)?.ok_or_else(|| anyhow!("unknown model: {name}"))?;
 
     // Resolve destination file path; ensure XDG path (or your existing logic)
     let dir = resolve_models_dir()?; // implement or reuse your existing directory resolver
@@ -655,8 +670,8 @@ fn download_with_progress(dest_path: &Path, entry: &ModelEntry) -> Result<()> {
     crate::ui::info(format!("Resolving source: {} ({})", mirror_label(url), url));
 
     // HEAD for size/etag/ranges
-    let (mut total_len, remote_etag, _remote_last_mod, ranges_ok) = head_entry(&client, url)
-        .context("probing remote file")?;
+    let (mut total_len, remote_etag, _remote_last_mod, ranges_ok) =
+        head_entry(&client, url).context("probing remote file")?;
 
     if total_len.is_none() {
         total_len = entry.size;
@@ -670,15 +685,14 @@ fn download_with_progress(dest_path: &Path, entry: &ModelEntry) -> Result<()> {
                 "insufficient disk space: need {}, have {}",
                 format_size_mb(Some(need)),
                 format_size_gib(free)
-            ));
+            )
+            .into());
         }
     }
 
-    if dest_path.exists() {
-        if file_matches(dest_path, total_len, entry.sha256.as_deref())? {
-            crate::ui::info(format!("Already up to date: {}", dest_path.display()));
-            return Ok(());
-        }
+    if dest_path.exists() && file_matches(dest_path, total_len, entry.sha256.as_deref())? {
+        crate::ui::info(format!("Already up to date: {}", dest_path.display()));
+        return Ok(());
     }
 
     let part_path = dest_path.with_extension("part");
@@ -691,7 +705,6 @@ fn download_with_progress(dest_path: &Path, entry: &ModelEntry) -> Result<()> {
 
     let mut part_file = OpenOptions::new()
         .create(true)
-        .write(true)
         .read(true)
         .append(true)
         .open(&part_path)
@@ -719,7 +732,7 @@ fn download_with_progress(dest_path: &Path, entry: &ModelEntry) -> Result<()> {
     // Defensive: if server returns 304 but we don't have a valid cached copy, retry without conditionals.
     if resp.status().as_u16() == 304 && resume_from == 0 {
         // Fresh download must not be conditional; redo as plain GET
-        let mut req2 = client.get(url);
+        let req2 = client.get(url);
         resp = req2.send()?.error_for_status()?;
     }
 
@@ -729,10 +742,12 @@ fn download_with_progress(dest_path: &Path, entry: &ModelEntry) -> Result<()> {
         // Server did not honor range → start over
         drop(part_file);
         fs::remove_file(&part_path).ok();
-        resume_from = 0;
+        // Reset local accounting; we also reinitialize the progress bar below
+        // and reopen the part file. No need to re-read this variable afterwards.
+        let _ = 0; // avoid unused-assignment lint for resume_from
 
         // Plain GET without conditional headers
-        let mut req2 = client.get(url);
+        let req2 = client.get(url);
         resp = req2.send()?.error_for_status()?;
         bar.stop("restarting");
         bar = crate::ui::BytesProgress::start(pb_total, "Downloading", 0);
@@ -740,7 +755,6 @@ fn download_with_progress(dest_path: &Path, entry: &ModelEntry) -> Result<()> {
         // Reopen the part file since we dropped it
         part_file = OpenOptions::new()
             .create(true)
-            .write(true)
             .read(true)
             .append(true)
             .open(&part_path)
@@ -782,7 +796,8 @@ fn download_with_progress(dest_path: &Path, entry: &ModelEntry) -> Result<()> {
                 "checksum mismatch: expected {}, got {}",
                 expected_hex,
                 actual_hex
-            ));
+            )
+            .into());
         }
     } else {
         crate::ui::info("Verify: checksum not provided by source (skipped)");
@@ -830,7 +845,7 @@ fn download_with_progress(dest_path: &Path, entry: &ModelEntry) -> Result<()> {
 /// Run an interactive model downloader UI (2-step):
 /// 1) Choose model base (tiny, small, base, medium, large)
 /// 2) Choose model type/variant specific to that base
-/// Displays meta info (size and last updated). Does not show raw ggml filenames.
+///    Displays meta info (size and last updated). Does not show raw ggml filenames.
 pub fn run_interactive_model_downloader() -> Result<()> {
     use crate::ui;
 
@@ -892,8 +907,14 @@ pub fn run_interactive_model_downloader() -> Result<()> {
     // Prepare variant list for chosen base
     let mut variants = by_base.remove(&chosen_base).unwrap_or_default();
     variants.sort_by(|a, b| {
-        let rank = |v: &str| match v { "default" => 0, "en" => 1, _ => 2 };
-        rank(&a.variant).cmp(&rank(&b.variant)).then_with(|| a.variant.cmp(&b.variant))
+        let rank = |v: &str| match v {
+            "default" => 0,
+            "en" => 1,
+            _ => 2,
+        };
+        rank(&a.variant)
+            .cmp(&rank(&b.variant))
+            .then_with(|| a.variant.cmp(&b.variant))
     });
 
     // Build Multi-Select items for variants
@@ -906,12 +927,18 @@ pub fn run_interactive_model_downloader() -> Result<()> {
             .map(short_date)
             .map(|d| format!(" • updated {}", d))
             .unwrap_or_default();
-        let variant_label = if m.variant == "default" { "default" } else { &m.variant };
+        let variant_label = if m.variant == "default" {
+            "default"
+        } else {
+            &m.variant
+        };
         variant_labels.push(format!("{} ({}{})", variant_label, size, updated));
     }
     let variant_refs: Vec<&str> = variant_labels.iter().map(|s| s.as_str()).collect();
     let mut defaults = vec![false; variant_refs.len()];
-    if !defaults.is_empty() { defaults[0] = true; }
+    if !defaults.is_empty() {
+        defaults[0] = true;
+    }
     let picks = ui::prompt_multi_select(
         &format!("Select types for '{}'", chosen_base),
         &variant_refs,
@@ -984,8 +1011,8 @@ pub fn update_local_models() -> Result<()> {
     let rd = fs::read_dir(&dir).with_context(|| format!("reading models dir {}", dir.display()))?;
     let entries: Vec<_> = rd.flatten().collect();
 
-    if entries.len() == 0 {
-        ui::info("No local models found.".to_string());
+    if entries.is_empty() {
+        ui::info("No local models found.");
     } else {
         for ent in entries {
             let path = ent.path();

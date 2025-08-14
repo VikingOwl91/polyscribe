@@ -1,7 +1,7 @@
 use thiserror::Error;
 
-#[derive(Debug, Error)]
 /// Error types for the polyscribe-core crate.
+#[derive(Debug, Error)]
 ///
 /// This enum represents various error conditions that can occur during
 /// operations in this crate, including I/O errors, serialization/deserialization
@@ -26,6 +26,10 @@ pub enum Error {
     #[error("env var error: {0}")]
     /// Represents an error that occurred during environment variable access
     EnvVar(#[from] std::env::VarError),
+
+    #[error("http error: {0}")]
+    /// Represents an HTTP client error from reqwest
+    Http(#[from] reqwest::Error),
 
     #[error("other: {0}")]
     /// Represents a general error condition with a custom message

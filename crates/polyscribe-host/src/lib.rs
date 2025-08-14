@@ -1,16 +1,11 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use std::{
-    env,
-    fs,
-    os::unix::fs::PermissionsExt,
-    path::Path,
-};
+use std::process::Stdio;
+use std::{env, fs, os::unix::fs::PermissionsExt, path::Path};
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     process::{Child as TokioChild, Command},
 };
-use std::process::Stdio;
 
 #[derive(Debug, Clone)]
 pub struct PluginInfo {
@@ -31,14 +26,15 @@ impl PluginManager {
                 if let Ok(read_dir) = fs::read_dir(&dir) {
                     for entry in read_dir.flatten() {
                         let path = entry.path();
-                        if let Some(fname) = path.file_name().and_then(|s| s.to_str()) {
-                            if fname.starts_with("polyscribe-plugin-") && is_executable(&path) {
-                                let name = fname.trim_start_matches("polyscribe-plugin-").to_string();
-                                plugins.push(PluginInfo {
-                                    name,
-                                    path: path.to_string_lossy().to_string(),
-                                });
-                            }
+                        if let Some(fname) = path.file_name().and_then(|s| s.to_str())
+                            && fname.starts_with("polyscribe-plugin-")
+                            && is_executable(&path)
+                        {
+                            let name = fname.trim_start_matches("polyscribe-plugin-").to_string();
+                            plugins.push(PluginInfo {
+                                name,
+                                path: path.to_string_lossy().to_string(),
+                            });
                         }
                     }
                 }
@@ -89,7 +85,8 @@ impl PluginManager {
 
     fn resolve(&self, name: &str) -> Result<String> {
         let bin = format!("polyscribe-plugin-{name}");
-        let path = which::which(&bin).with_context(|| format!("plugin not found in PATH: {bin}"))?;
+        let path =
+            which::which(&bin).with_context(|| format!("plugin not found in PATH: {bin}"))?;
         Ok(path.to_string_lossy().to_string())
     }
 }

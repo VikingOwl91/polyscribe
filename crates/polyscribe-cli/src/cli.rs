@@ -11,7 +11,11 @@ pub enum GpuBackend {
 }
 
 #[derive(Debug, Parser)]
-#[command(name = "polyscribe", version, about = "PolyScribe – local-first transcription and plugins")]
+#[command(
+    name = "polyscribe",
+    version,
+    about = "PolyScribe – local-first transcription and plugins"
+)]
 pub struct Cli {
     /// Increase verbosity (-v, -vv)
     #[arg(short, long, action = clap::ArgAction::Count)]

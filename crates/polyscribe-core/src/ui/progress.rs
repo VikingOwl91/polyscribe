@@ -15,12 +15,21 @@ pub struct ProgressManager {
 impl ProgressManager {
     /// Create a new manager with the given enabled flag.
     pub fn new(enabled: bool) -> Self {
-        Self { enabled, per: Vec::new(), total: None, completed: 0, total_len: 0 }
+        Self {
+            enabled,
+            per: Vec::new(),
+            total: None,
+            completed: 0,
+            total_len: 0,
+        }
     }
 
     /// Create a manager that enables bars when `n > 1`, stderr is a TTY, and not quiet.
     pub fn default_for_files(n: usize) -> Self {
-        let enabled = n > 1 && std::io::stderr().is_terminal() && !crate::is_quiet() && !crate::is_no_progress();
+        let enabled = n > 1
+            && std::io::stderr().is_terminal()
+            && !crate::is_quiet()
+            && !crate::is_no_progress();
         Self::new(enabled)
     }
 
@@ -33,23 +42,27 @@ impl ProgressManager {
             return;
         }
         // Aggregate bar at the top
-        let mut total = cliclack::progress_bar(labels.len() as u64);
+        let total = cliclack::progress_bar(labels.len() as u64);
         total.start("Total");
         self.total = Some(total);
         // Per-file bars (100% scale for each)
         for label in labels {
-            let mut pb = cliclack::progress_bar(100);
+            let pb = cliclack::progress_bar(100);
             pb.start(label);
             self.per.push(pb);
         }
     }
 
     /// Returns true when bars are enabled (multi-file TTY mode).
-    pub fn is_enabled(&self) -> bool { self.enabled }
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
 
     /// Update a per-file bar message.
     pub fn set_per_message(&mut self, idx: usize, message: &str) {
-        if !self.enabled { return; }
+        if !self.enabled {
+            return;
+        }
         if let Some(pb) = self.per.get_mut(idx) {
             pb.set_message(message);
         }
@@ -57,16 +70,20 @@ impl ProgressManager {
 
     /// Update a per-file bar percent (0..=100).
     pub fn set_per_percent(&mut self, idx: usize, percent: u64) {
-        if !self.enabled { return; }
+        if !self.enabled {
+            return;
+        }
         if let Some(pb) = self.per.get_mut(idx) {
             let p = percent.min(100);
-            pb.set_message(&format!("{p}%"));
+            pb.set_message(format!("{p}%"));
         }
     }
 
     /// Mark a file as finished (set to 100% and update total counter).
     pub fn mark_file_done(&mut self, idx: usize) {
-        if !self.enabled { return; }
+        if !self.enabled {
+            return;
+        }
         if let Some(pb) = self.per.get_mut(idx) {
             pb.stop("done");
         }
@@ -81,7 +98,9 @@ impl ProgressManager {
 
     /// Finish the aggregate bar with a custom message.
     pub fn finish_total(&mut self, message: &str) {
-        if !self.enabled { return; }
+        if !self.enabled {
+            return;
+        }
         if let Some(total) = &mut self.total {
             total.stop(message);
         }
@@ -96,7 +115,9 @@ pub struct ProgressReporter {
 
 impl ProgressReporter {
     /// Creates a new progress reporter.
-    pub fn new(non_interactive: bool) -> Self { Self { non_interactive } }
+    pub fn new(non_interactive: bool) -> Self {
+        Self { non_interactive }
+    }
 
     /// Displays a progress step message.
     pub fn step(&mut self, message: &str) {

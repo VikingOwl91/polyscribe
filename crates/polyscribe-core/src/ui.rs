@@ -62,27 +62,32 @@ pub fn prompt_input(prompt: &str, default: Option<&str>) -> io::Result<String> {
         return Ok(default.unwrap_or("").to_string());
     }
     let mut q = cliclack::input(prompt);
-    if let Some(def) = default { q = q.default_input(def); }
-    q.interact().map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
+    if let Some(def) = default {
+        q = q.default_input(def);
+    }
+    q.interact().map_err(|e| io::Error::other(e.to_string()))
 }
 
 /// Present a single-choice selector and return the selected index.
-pub fn prompt_select<'a>(prompt: &str, items: &[&'a str]) -> io::Result<usize> {
+pub fn prompt_select(prompt: &str, items: &[&str]) -> io::Result<usize> {
     if crate::is_no_interaction() || !crate::stdin_is_tty() {
-        return Err(io::Error::new(io::ErrorKind::Other, "interactive prompt disabled"));
+        return Err(io::Error::other("interactive prompt disabled"));
     }
     let mut sel = cliclack::select::<usize>(prompt);
     for (idx, label) in items.iter().enumerate() {
         sel = sel.item(idx, *label, "");
     }
-    sel.interact()
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
+    sel.interact().map_err(|e| io::Error::other(e.to_string()))
 }
 
 /// Present a multi-choice selector and return indices of selected items.
-pub fn prompt_multi_select<'a>(prompt: &str, items: &[&'a str], defaults: Option<&[bool]>) -> io::Result<Vec<usize>> {
+pub fn prompt_multi_select(
+    prompt: &str,
+    items: &[&str],
+    defaults: Option<&[bool]>,
+) -> io::Result<Vec<usize>> {
     if crate::is_no_interaction() || !crate::stdin_is_tty() {
-        return Err(io::Error::new(io::ErrorKind::Other, "interactive prompt disabled"));
+        return Err(io::Error::other("interactive prompt disabled"));
     }
     let mut ms = cliclack::multiselect::<usize>(prompt);
     for (idx, label) in items.iter().enumerate() {
@@ -98,8 +103,7 @@ pub fn prompt_multi_select<'a>(prompt: &str, items: &[&'a str], defaults: Option
             ms = ms.initial_values(selected);
         }
     }
-    ms.interact()
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
+    ms.interact().map_err(|e| io::Error::other(e.to_string()))
 }
 
 /// Confirm prompt with default, respecting non-interactive mode.
@@ -109,32 +113,42 @@ pub fn prompt_confirm(prompt: &str, default: bool) -> io::Result<bool> {
     }
     let mut q = cliclack::confirm(prompt);
     // If `cliclack::confirm` lacks default, we simply ask; caller can handle ESC/cancel if needed.
-    q.interact().map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
+    q.interact().map_err(|e| io::Error::other(e.to_string()))
 }
 
 /// Read a secret/password without echoing, respecting non-interactive mode.
 pub fn prompt_password(prompt: &str) -> io::Result<String> {
     if crate::is_no_interaction() || !crate::stdin_is_tty() {
-        return Err(io::Error::new(io::ErrorKind::Other, "password prompt disabled in non-interactive mode"));
+        return Err(io::Error::other(
+            "password prompt disabled in non-interactive mode",
+        ));
     }
     let mut q = cliclack::password(prompt);
-    q.interact().map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
+    q.interact().map_err(|e| io::Error::other(e.to_string()))
 }
 
 /// Input with validation closure; on non-interactive returns default or error when no default.
-pub fn prompt_input_validated<F>(prompt: &str, default: Option<&str>, validate: F) -> io::Result<String>
+pub fn prompt_input_validated<F>(
+    prompt: &str,
+    default: Option<&str>,
+    validate: F,
+) -> io::Result<String>
 where
     F: Fn(&str) -> Result<(), String> + 'static,
 {
     if crate::is_no_interaction() || !crate::stdin_is_tty() {
-        if let Some(def) = default { return Ok(def.to_string()); }
-        return Err(io::Error::new(io::ErrorKind::Other, "interactive prompt disabled"));
+        if let Some(def) = default {
+            return Ok(def.to_string());
+        }
+        return Err(io::Error::other("interactive prompt disabled"));
     }
     let mut q = cliclack::input(prompt);
-    if let Some(def) = default { q = q.default_input(def); }
+    if let Some(def) = default {
+        q = q.default_input(def);
+    }
     q.validate(move |s: &String| validate(s))
         .interact()
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
+        .map_err(|e| io::Error::other(e.to_string()))
 }
 
 /// A simple spinner wrapper built on top of `cliclack::spinner()`.
@@ -146,7 +160,8 @@ pub struct Spinner(cliclack::ProgressBar);
 impl Spinner {
     /// Creates and starts a new spinner with the provided status text.
     pub fn start(text: impl AsRef<str>) -> Self {
-        if crate::is_no_progress() || crate::is_no_interaction() || !std::io::stderr().is_terminal() {
+        if crate::is_no_progress() || crate::is_no_interaction() || !std::io::stderr().is_terminal()
+        {
             // Fallback: no spinner, but log start
             let _ = cliclack::log::info(text.as_ref());
             let s = cliclack::spinner();
@@ -193,28 +208,44 @@ pub struct BytesProgress(Option<cliclack::ProgressBar>);
 impl BytesProgress {
     /// Start a new progress bar with a total and initial position.
     pub fn start(total: u64, text: &str, initial: u64) -> Self {
-        if crate::is_no_progress() || crate::is_no_interaction() || !std::io::stderr().is_terminal() || total == 0 {
+        if crate::is_no_progress()
+            || crate::is_no_interaction()
+            || !std::io::stderr().is_terminal()
+            || total == 0
+        {
             let _ = cliclack::log::info(text);
             return Self(None);
         }
-        let mut b = cliclack::progress_bar(total);
+        let b = cliclack::progress_bar(total);
         b.start(text);
-        if initial > 0 { b.inc(initial); }
+        if initial > 0 {
+            b.inc(initial);
+        }
         Self(Some(b))
     }
 
     /// Increment by delta bytes.
     pub fn inc(&mut self, delta: u64) {
-        if let Some(b) = self.0.as_mut() { b.inc(delta); }
+        if let Some(b) = self.0.as_mut() {
+            b.inc(delta);
+        }
     }
 
     /// Stop with a message.
     pub fn stop(mut self, text: &str) {
-        if let Some(b) = self.0.take() { b.stop(text); } else { let _ = cliclack::log::info(text); }
+        if let Some(b) = self.0.take() {
+            b.stop(text);
+        } else {
+            let _ = cliclack::log::info(text);
+        }
     }
 
     /// Mark as error with a message.
     pub fn error(mut self, text: &str) {
-        if let Some(b) = self.0.take() { b.error(text); } else { let _ = cliclack::log::error(text); }
+        if let Some(b) = self.0.take() {
+            b.error(text);
+        } else {
+            let _ = cliclack::log::error(text);
+        }
     }
 }

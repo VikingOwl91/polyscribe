@@ -12,7 +12,8 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
-use anyhow::{anyhow, Context, Result};
+use crate::prelude::*;
+use anyhow::{Context, anyhow};
 use chrono::Local;
 use std::env;
 use std::path::{Path, PathBuf};
@@ -193,13 +194,13 @@ macro_rules! qlog {
 }
 
 pub mod backend;
-pub mod models;
 /// Configuration handling for PolyScribe
 pub mod config;
+pub mod models;
 // Use the file-backed ui.rs module, which also declares its own `progress` submodule.
-pub mod ui;
 /// Error definitions for the PolyScribe library
 pub mod error;
+pub mod ui;
 pub use error::Error;
 pub mod prelude;
 
@@ -266,19 +267,19 @@ pub fn models_dir_path() -> PathBuf {
     if cfg!(debug_assertions) {
         return PathBuf::from("models");
     }
-    if let Ok(xdg) = env::var("XDG_DATA_HOME") {
-        if !xdg.is_empty() {
-            return PathBuf::from(xdg).join("polyscribe").join("models");
-        }
+    if let Ok(xdg) = env::var("XDG_DATA_HOME")
+        && !xdg.is_empty()
+    {
+        return PathBuf::from(xdg).join("polyscribe").join("models");
     }
-    if let Ok(home) = env::var("HOME") {
-        if !home.is_empty() {
-            return PathBuf::from(home)
-                .join(".local")
-                .join("share")
-                .join("polyscribe")
-                .join("models");
-        }
+    if let Ok(home) = env::var("HOME")
+        && !home.is_empty()
+    {
+        return PathBuf::from(home)
+            .join(".local")
+            .join("share")
+            .join("polyscribe")
+            .join("models");
     }
     PathBuf::from("models")
 }
@@ -364,13 +365,15 @@ pub fn find_model_file() -> Result<PathBuf> {
             return Err(anyhow!(
                 "WHISPER_MODEL points to a non-existing path: {}",
                 p.display()
-            ));
+            )
+            .into());
         }
         if !p.is_file() {
             return Err(anyhow!(
                 "WHISPER_MODEL must point to a file, but is not: {}",
                 p.display()
-            ));
+            )
+            .into());
         }
         return Ok(p);
     }
@@ -381,17 +384,21 @@ pub fn find_model_file() -> Result<PathBuf> {
         return Err(anyhow!(
             "Models path exists but is not a directory: {}",
             models_dir.display()
-        ));
+        )
+        .into());
     }
     std::fs::create_dir_all(&models_dir).with_context(|| {
-        format!("Failed to ensure models dir exists: {}", models_dir.display())
+        format!(
+            "Failed to ensure models dir exists: {}",
+            models_dir.display()
+        )
     })?;
 
     // 3) Gather candidate .bin files (regular files only), prefer largest
     let mut candidates = Vec::new();
-    for entry in std::fs::read_dir(&models_dir).with_context(|| {
-        format!("Failed to read models dir: {}", models_dir.display())
-    })? {
+    for entry in std::fs::read_dir(&models_dir)
+        .with_context(|| format!("Failed to read models dir: {}", models_dir.display()))?
+    {
         let entry = entry?;
         let path = entry.path();
 
@@ -423,7 +430,8 @@ pub fn find_model_file() -> Result<PathBuf> {
             "No Whisper model files (*.bin) found in {}. \
              Please download a model or set WHISPER_MODEL.",
             models_dir.display()
-        ));
+        )
+        .into());
     }
 
     candidates.sort_by_key(|(size, _)| *size);
@@ -465,7 +473,8 @@ pub fn decode_audio_to_pcm_f32_ffmpeg(audio_path: &Path) -> Result<Vec<f32>> {
         return Err(anyhow!(
             "ffmpeg exited with non-zero status when decoding {}",
             in_path
-        ));
+        )
+        .into());
     }
 
     let raw = std::fs::read(&tmp_raw)
@@ -476,10 +485,7 @@ pub fn decode_audio_to_pcm_f32_ffmpeg(audio_path: &Path) -> Result<Vec<f32>> {
 
     // Interpret raw bytes as f32 little-endian
     if raw.len() % 4 != 0 {
-        return Err(anyhow!(
-            "Decoded PCM file length not multiple of 4: {}",
-            raw.len()
-        ));
+        return Err(anyhow!("Decoded PCM file length not multiple of 4: {}", raw.len()).into());
     }
     let mut samples = Vec::with_capacity(raw.len() / 4);
     for chunk in raw.chunks_exact(4) {

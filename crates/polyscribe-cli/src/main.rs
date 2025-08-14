@@ -1,10 +1,10 @@
 mod cli;
 
-use anyhow::{anyhow, Context, Result};
-use clap::{Parser, CommandFactory};
+use anyhow::{Context, Result, anyhow};
+use clap::{CommandFactory, Parser};
 use cli::{Cli, Commands, GpuBackend, ModelsCmd, PluginsCmd};
-use polyscribe_core::{config::ConfigService, ui::progress::ProgressReporter};
 use polyscribe_core::models; // Added: call into core models
+use polyscribe_core::{config::ConfigService, ui::progress::ProgressReporter};
 use polyscribe_host::PluginManager;
 use tokio::io::AsyncWriteExt;
 use tracing_subscriber::EnvFilter;
@@ -81,26 +81,25 @@ async fn main() -> Result<()> {
             match cmd {
                 ModelsCmd::Update => {
                     polyscribe_core::ui::info("verifying/updating local models");
-                    tokio::task::spawn_blocking(|| models::update_local_models())
+                    tokio::task::spawn_blocking(models::update_local_models)
                         .await
                         .map_err(|e| anyhow!("blocking task join error: {e}"))?
                         .context("updating models")?;
                 }
                 ModelsCmd::Download => {
                     polyscribe_core::ui::info("interactive model selection and download");
-                    tokio::task::spawn_blocking(|| models::run_interactive_model_downloader())
+                    tokio::task::spawn_blocking(models::run_interactive_model_downloader)
                         .await
                         .map_err(|e| anyhow!("blocking task join error: {e}"))?
                         .context("running downloader")?;
                     polyscribe_core::ui::success("Model download complete.");
                 }
-
             }
             Ok(())
         }
 
         Commands::Plugins { cmd } => {
-            let pm = PluginManager::default();
+            let pm = PluginManager;
 
             match cmd {
                 PluginsCmd::List => {
@@ -111,12 +110,18 @@ async fn main() -> Result<()> {
                     Ok(())
                 }
                 PluginsCmd::Info { name } => {
-                    let info = pm.info(&name).with_context(|| format!("getting info for {}", name))?;
+                    let info = pm
+                        .info(&name)
+                        .with_context(|| format!("getting info for {}", name))?;
                     let s = serde_json::to_string_pretty(&info)?;
                     polyscribe_core::ui::info(s);
                     Ok(())
                 }
-                PluginsCmd::Run { name, command, json } => {
+                PluginsCmd::Run {
+                    name,
+                    command,
+                    json,
+                } => {
                     let payload = json.unwrap_or_else(|| "{}".to_string());
                     let mut child = pm
                         .spawn(&name, &command)
@@ -131,7 +136,10 @@ async fn main() -> Result<()> {
 
                     let status = pm.forward_stdio(&mut child).await?;
                     if !status.success() {
-                        polyscribe_core::ui::error(format!("plugin returned non-zero exit code: {}", status));
+                        polyscribe_core::ui::error(format!(
+                            "plugin returned non-zero exit code: {}",
+                            status
+                        ));
                         return Err(anyhow!("plugin failed"));
                     }
                     Ok(())

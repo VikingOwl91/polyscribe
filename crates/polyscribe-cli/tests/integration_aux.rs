@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025 <COPYRIGHT HOLDER>. All rights reserved.
 
-use std::process::Command;
 use assert_cmd::cargo::cargo_bin;
+use std::process::Command;
 
-fn bin() -> std::path::PathBuf { cargo_bin("polyscribe") }
+fn bin() -> std::path::PathBuf {
+    cargo_bin("polyscribe")
+}
 
 #[test]
 fn aux_completions_bash_outputs_script() {

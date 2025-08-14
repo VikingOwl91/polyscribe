@@ -3,8 +3,9 @@
 
 //! Transcription backend selection and implementations (CPU/GPU) used by PolyScribe.
 use crate::OutputEntry;
+use crate::prelude::*;
 use crate::{decode_audio_to_pcm_f32_ffmpeg, find_model_file};
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, anyhow};
 use std::env;
 use std::path::Path;
 
@@ -95,7 +96,9 @@ pub struct VulkanBackend;
 macro_rules! impl_whisper_backend {
     ($ty:ty, $kind:expr) => {
         impl TranscribeBackend for $ty {
-            fn kind(&self) -> BackendKind { $kind }
+            fn kind(&self) -> BackendKind {
+                $kind
+            }
             fn transcribe(
                 &self,
                 audio_path: &Path,
@@ -128,7 +131,7 @@ impl TranscribeBackend for VulkanBackend {
     ) -> Result<Vec<OutputEntry>> {
         Err(anyhow!(
             "Vulkan backend not yet wired to whisper.cpp FFI. Build with --features gpu-vulkan and ensure Vulkan SDK is installed. How to fix: install Vulkan loader (libvulkan), set VULKAN_SDK, and run cargo build --features gpu-vulkan."
-        ))
+        ).into())
     }
 }
 
@@ -164,11 +167,11 @@ pub fn select_backend(requested: BackendKind, verbose: bool) -> Result<Selection
 
     let instantiate_backend = |k: BackendKind| -> Box<dyn TranscribeBackend + Send + Sync> {
         match k {
-            BackendKind::Cpu => Box::new(CpuBackend::default()),
-            BackendKind::Cuda => Box::new(CudaBackend::default()),
-            BackendKind::Hip => Box::new(HipBackend::default()),
-            BackendKind::Vulkan => Box::new(VulkanBackend::default()),
-            BackendKind::Auto => Box::new(CpuBackend::default()), // placeholder for Auto
+            BackendKind::Cpu => Box::new(CpuBackend),
+            BackendKind::Cuda => Box::new(CudaBackend),
+            BackendKind::Hip => Box::new(HipBackend),
+            BackendKind::Vulkan => Box::new(VulkanBackend),
+            BackendKind::Auto => Box::new(CpuBackend), // placeholder for Auto
         }
     };
 
@@ -190,7 +193,7 @@ pub fn select_backend(requested: BackendKind, verbose: bool) -> Result<Selection
             } else {
                 return Err(anyhow!(
                     "Requested CUDA backend but CUDA libraries/devices not detected. How to fix: install NVIDIA driver + CUDA toolkit, ensure libcudart/libcublas are in loader path, and build with --features gpu-cuda."
-                ));
+                ).into());
             }
         }
         BackendKind::Hip => {
@@ -199,7 +202,7 @@ pub fn select_backend(requested: BackendKind, verbose: bool) -> Result<Selection
             } else {
                 return Err(anyhow!(
                     "Requested ROCm/HIP backend but libraries/devices not detected. How to fix: install ROCm hipBLAS/rocBLAS, ensure libs are in loader path, and build with --features gpu-hip."
-                ));
+                ).into());
             }
         }
         BackendKind::Vulkan => {
@@ -208,7 +211,7 @@ pub fn select_backend(requested: BackendKind, verbose: bool) -> Result<Selection
             } else {
                 return Err(anyhow!(
                     "Requested Vulkan backend but libvulkan not detected. How to fix: install Vulkan loader/SDK and build with --features gpu-vulkan."
-                ));
+                ).into());
             }
         }
         BackendKind::Cpu => BackendKind::Cpu,
@@ -235,7 +238,9 @@ pub(crate) fn transcribe_with_whisper_rs(
     progress: Option<&(dyn Fn(i32) + Send + Sync)>,
 ) -> Result<Vec<OutputEntry>> {
     let report = |p: i32| {
-        if let Some(cb) = progress { cb(p); }
+        if let Some(cb) = progress {
+            cb(p);
+        }
     };
     report(0);
 
@@ -248,14 +253,15 @@ pub(crate) fn transcribe_with_whisper_rs(
         .and_then(|s| s.to_str())
         .map(|s| s.contains(".en.") || s.ends_with(".en.bin"))
         .unwrap_or(false);
-    if let Some(lang) = language {
-        if english_only_model && lang != "en" {
-            return Err(anyhow!(
-                "Selected model is English-only ({}), but a non-English language hint '{}' was provided. Please use a multilingual model or set WHISPER_MODEL.",
-                model_path.display(),
-                lang
-            ));
-        }
+    if let Some(lang) = language
+        && english_only_model
+        && lang != "en"
+    {
+        return Err(anyhow!(
+            "Selected model is English-only ({}), but a non-English language hint '{}' was provided. Please use a multilingual model or set WHISPER_MODEL.",
+            model_path.display(),
+            lang
+        ).into());
     }
     let model_path_str = model_path
         .to_str()
