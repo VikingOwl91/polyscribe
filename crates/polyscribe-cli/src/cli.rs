@@ -25,6 +25,10 @@ pub struct Cli {
     #[arg(long, default_value_t = false)]
     pub no_interaction: bool,
 
+    /// Disable progress bars/spinners
+    #[arg(long, default_value_t = false)]
+    pub no_progress: bool,
+
     #[command(subcommand)]
     pub command: Commands,
 }

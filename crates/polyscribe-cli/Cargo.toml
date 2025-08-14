@@ -3,6 +3,10 @@ name = "polyscribe-cli"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "polyscribe"
+path = "src/main.rs"
+
 [dependencies]
 anyhow = "1.0.99"
 clap = { version = "4.5.44", features = ["derive"] }
@@ -23,3 +27,6 @@ polyscribe-protocol = { path = "../polyscribe-protocol" }
 [features]
 # Optional GPU-specific flags can be forwarded down to core/host if needed
 default = []
+
+[dev-dependencies]
+assert_cmd = "2.0.16"

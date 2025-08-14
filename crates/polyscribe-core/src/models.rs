@@ -17,7 +17,6 @@ use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::thread;
 use std::time::{Duration, Instant};
 
 fn format_size_mb(size: Option<u64>) -> String {
@@ -712,16 +711,7 @@ fn download_with_progress(dest_path: &Path, entry: &ModelEntry) -> Result<()> {
     crate::ui::info(format!("Download: {}", part_path.display()));
 
     let pb_total = total_len.unwrap_or(0);
-    let mut bar = None;
-    let mut sp: Option<crate::ui::Spinner> = None;
-    if pb_total > 0 {
-        let mut b = cliclack::progress_bar(pb_total);
-        b.start("Downloading");
-        if resume_from > 0 { b.inc(resume_from); }
-        bar = Some(b);
-    } else {
-        sp = Some(crate::ui::Spinner::start("Downloading"));
-    }
+    let mut bar = crate::ui::BytesProgress::start(pb_total, "Downloading", resume_from);
 
     let start = Instant::now();
     let mut resp = req.send()?.error_for_status()?;
@@ -744,12 +734,8 @@ fn download_with_progress(dest_path: &Path, entry: &ModelEntry) -> Result<()> {
         // Plain GET without conditional headers
         let mut req2 = client.get(url);
         resp = req2.send()?.error_for_status()?;
-        if let Some(b) = bar.as_mut() {
-            b.stop("restarting");
-        }
-        let mut b2 = cliclack::progress_bar(pb_total);
-        b2.start("Downloading");
-        bar = Some(b2);
+        bar.stop("restarting");
+        bar = crate::ui::BytesProgress::start(pb_total, "Downloading", 0);
 
         // Reopen the part file since we dropped it
         part_file = OpenOptions::new()
@@ -770,23 +756,13 @@ fn download_with_progress(dest_path: &Path, entry: &ModelEntry) -> Result<()> {
                 break;
             }
             part_file.write_all(&buf[..read])?;
-            if pb_total > 0 {
-                if let Some(b) = bar.as_mut() {
-                    b.inc(read as u64);
-                }
-            } else {
-                // spinner: nothing to update per chunk beyond the animation
-            }
+            bar.inc(read as u64);
         }
         part_file.flush()?;
         part_file.sync_all()?;
     }
 
-    if pb_total > 0 {
-        if let Some(b) = bar.as_mut() { b.stop("done"); }
-    } else {
-        if let Some(s) = sp.take() { s.success("done"); }
-    }
+    bar.stop("done");
 
     if let Some(expected_hex) = entry.sha256.as_deref() {
         crate::ui::info("Verify: SHA-256");

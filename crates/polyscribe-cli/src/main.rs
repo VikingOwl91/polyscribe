@@ -35,10 +35,11 @@ async fn main() -> Result<()> {
 
     init_tracing(args.quiet, args.verbose);
 
-    // Optionally propagate quiet/no-interaction/verbosity to core if your lib exposes setters.
-    // polyscribe_core::set_quiet(args.quiet);
-    // polyscribe_core::set_no_interaction(args.no_interaction);
-    // polyscribe_core::set_verbose(args.verbose);
+    // Propagate UI flags to core so ui facade can apply policy
+    polyscribe_core::set_quiet(args.quiet);
+    polyscribe_core::set_no_interaction(args.no_interaction);
+    polyscribe_core::set_verbose(args.verbose);
+    polyscribe_core::set_no_progress(args.no_progress);
 
     let _cfg = ConfigService::load_or_default().context("loading configuration")?;
 

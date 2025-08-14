@@ -2,11 +2,9 @@
 // Copyright (c) 2025 <COPYRIGHT HOLDER>. All rights reserved.
 
 use std::process::Command;
+use assert_cmd::cargo::cargo_bin;
 
-fn bin() -> String {
-    std::env::var("CARGO_BIN_EXE_polyscribe")
-        .unwrap_or_else(|_| "polyscribe".to_string())
-}
+fn bin() -> std::path::PathBuf { cargo_bin("polyscribe") }
 
 #[test]
 fn aux_completions_bash_outputs_script() {
