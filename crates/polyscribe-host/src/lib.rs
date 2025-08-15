@@ -1,7 +1,10 @@
 use anyhow::{Context, Result};
-use serde::Deserialize;
 use std::process::Stdio;
-use std::{env, fs, os::unix::fs::PermissionsExt, path::{Path, PathBuf}};
+use std::{
+    env, fs,
+    os::unix::fs::PermissionsExt,
+    path::Path,
+};
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     process::{Child as TokioChild, Command},
@@ -20,20 +23,17 @@ impl PluginManager {
     pub fn list(&self) -> Result<Vec<PluginInfo>> {
         let mut plugins = Vec::new();
 
-        // 1) Scan PATH entries for executables starting with "polyscribe-plugin-"
         if let Ok(path) = env::var("PATH") {
             for dir in env::split_paths(&path) {
                 scan_dir_for_plugins(&dir, &mut plugins);
             }
         }
 
-        // 2) Scan XDG data dir: $XDG_DATA_HOME/polyscribe/plugins or platform equiv
         if let Some(dirs) = directories::ProjectDirs::from("dev", "polyscribe", "polyscribe") {
             let plugin_dir = dirs.data_dir().join("plugins");
             scan_dir_for_plugins(&plugin_dir, &mut plugins);
         }
 
-        // 3) De-duplicate by binary path
         plugins.sort_by(|a, b| a.path.cmp(&b.path));
         plugins.dedup_by(|a, b| a.path == b.path);
         Ok(plugins)
@@ -93,11 +93,9 @@ fn is_executable(path: &Path) -> bool {
     {
         if let Ok(meta) = fs::metadata(path) {
             let mode = meta.permissions().mode();
-            // if any execute bit is set
             return mode & 0o111 != 0;
         }
     }
-    // Fallback for non-unix (treat files as candidates)
     true
 }
 
@@ -119,9 +117,3 @@ fn scan_dir_for_plugins(dir: &Path, out: &mut Vec<PluginInfo>) {
     }
 }
 
-#[allow(dead_code)]
-#[derive(Debug, Deserialize)]
-struct Capability {
-    command: String,
-    summary: String,
-}

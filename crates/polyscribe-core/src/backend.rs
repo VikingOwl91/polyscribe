@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2025 <COPYRIGHT HOLDER>. All rights reserved.
 
-//! Transcription backend selection and implementations (CPU/GPU) used by PolyScribe.
 use crate::OutputEntry;
 use crate::prelude::*;
 use crate::{decode_audio_to_pcm_f32_ffmpeg, find_model_file};
@@ -9,27 +7,17 @@ use anyhow::{Context, anyhow};
 use std::env;
 use std::path::Path;
 
-// Re-export a public enum for CLI parsing usage
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// Kind of transcription backend to use.
 pub enum BackendKind {
-    /// Automatically detect the best available backend (CUDA > HIP > Vulkan > CPU).
     Auto,
-    /// Pure CPU backend using whisper-rs.
     Cpu,
-    /// NVIDIA CUDA backend (requires CUDA runtime available at load time and proper feature build).
     Cuda,
-    /// AMD ROCm/HIP backend (requires hip/rocBLAS libraries available and proper feature build).
     Hip,
-    /// Vulkan backend (experimental; requires Vulkan loader/SDK and feature build).
     Vulkan,
 }
 
-/// Abstraction for a transcription backend.
 pub trait TranscribeBackend {
-    /// Backend kind implemented by this type.
     fn kind(&self) -> BackendKind;
-    /// Transcribe the given audio and return transcript entries.
     fn transcribe(
         &self,
         audio_path: &Path,
@@ -40,15 +28,13 @@ pub trait TranscribeBackend {
     ) -> Result<Vec<OutputEntry>>;
 }
 
-fn check_lib(_names: &[&str]) -> bool {
+fn is_library_available(_names: &[&str]) -> bool {
     #[cfg(test)]
     {
-        // During unit tests, avoid touching system libs to prevent loader crashes in CI.
         false
     }
     #[cfg(not(test))]
     {
-        // Disabled runtime dlopen probing to avoid loader instability; rely on environment overrides.
         false
     }
 }
@@ -57,7 +43,7 @@ fn cuda_available() -> bool {
     if let Ok(x) = env::var("POLYSCRIBE_TEST_FORCE_CUDA") {
         return x == "1";
     }
-    check_lib(&[
+    is_library_available(&[
         "libcudart.so",
         "libcudart.so.12",
         "libcudart.so.11",
@@ -70,26 +56,22 @@ fn hip_available() -> bool {
     if let Ok(x) = env::var("POLYSCRIBE_TEST_FORCE_HIP") {
         return x == "1";
     }
-    check_lib(&["libhipblas.so", "librocblas.so"])
+    is_library_available(&["libhipblas.so", "librocblas.so"])
 }
 
 fn vulkan_available() -> bool {
     if let Ok(x) = env::var("POLYSCRIBE_TEST_FORCE_VULKAN") {
         return x == "1";
     }
-    check_lib(&["libvulkan.so.1", "libvulkan.so"])
+    is_library_available(&["libvulkan.so.1", "libvulkan.so"])
 }
 
-/// CPU-based transcription backend using whisper-rs.
 #[derive(Default)]
 pub struct CpuBackend;
-/// CUDA-accelerated transcription backend for NVIDIA GPUs.
 #[derive(Default)]
 pub struct CudaBackend;
-/// ROCm/HIP-accelerated transcription backend for AMD GPUs.
 #[derive(Default)]
 pub struct HipBackend;
-/// Vulkan-based transcription backend (experimental/incomplete).
 #[derive(Default)]
 pub struct VulkanBackend;
 
@@ -135,25 +117,13 @@ impl TranscribeBackend for VulkanBackend {
     }
 }
 
-/// Result of choosing a transcription backend.
-pub struct SelectionResult {
-    /// The constructed backend instance to perform transcription with.
+pub struct BackendSelection {
     pub backend: Box<dyn TranscribeBackend + Send + Sync>,
-    /// Which backend kind was ultimately selected.
     pub chosen: BackendKind,
-    /// Which backend kinds were detected as available on this system.
     pub detected: Vec<BackendKind>,
 }
 
-/// Select an appropriate backend based on user request and system detection.
-///
-/// If `requested` is `BackendKind::Auto`, the function prefers CUDA, then HIP,
-/// then Vulkan, falling back to CPU when no GPU backend is detected. When a
-/// specific GPU backend is requested but unavailable, an error is returned with
-/// guidance on how to enable it.
-///
-/// Set `verbose` to true to print detection/selection info to stderr.
-pub fn select_backend(requested: BackendKind, verbose: bool) -> Result<SelectionResult> {
+pub fn select_backend(requested: BackendKind, verbose: bool) -> Result<BackendSelection> {
     let mut detected = Vec::new();
     if cuda_available() {
         detected.push(BackendKind::Cuda);
@@ -171,7 +141,7 @@ pub fn select_backend(requested: BackendKind, verbose: bool) -> Result<Selection
             BackendKind::Cuda => Box::new(CudaBackend),
             BackendKind::Hip => Box::new(HipBackend),
             BackendKind::Vulkan => Box::new(VulkanBackend),
-            BackendKind::Auto => Box::new(CpuBackend), // placeholder for Auto
+            BackendKind::Auto => Box::new(CpuBackend),
         }
     };
 
@@ -222,14 +192,13 @@ pub fn select_backend(requested: BackendKind, verbose: bool) -> Result<Selection
         crate::dlog!(1, "Selected backend: {:?}", chosen);
     }
 
-    Ok(SelectionResult {
+    Ok(BackendSelection {
         backend: instantiate_backend(chosen),
         chosen,
         detected,
     })
 }
 
-// Internal helper: transcription using whisper-rs with CPU/GPU (depending on build features)
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn transcribe_with_whisper_rs(
     audio_path: &Path,
@@ -268,7 +237,6 @@ pub(crate) fn transcribe_with_whisper_rs(
         .ok_or_else(|| anyhow!("Model path not valid UTF-8: {}", model_path.display()))?;
 
     if crate::verbose_level() < 2 {
-        // Some builds of whisper/ggml expect these env vars; harmless if unknown
         unsafe {
             std::env::set_var("GGML_LOG_LEVEL", "0");
             std::env::set_var("WHISPER_PRINT_PROGRESS", "0");

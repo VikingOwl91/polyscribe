@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MIT
-// Stub plugin: tubescribe
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -36,7 +35,6 @@ fn main() -> Result<()> {
         serve_once()?;
         return Ok(());
     }
-    // Default: show capabilities (friendly behavior if run without flags)
     let caps = psp::Capabilities {
         name: "tubescribe".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -49,14 +47,12 @@ fn main() -> Result<()> {
 }
 
 fn serve_once() -> Result<()> {
-    // Read exactly one line (one request)
     let stdin = std::io::stdin();
     let mut reader = BufReader::new(stdin.lock());
     let mut line = String::new();
     reader.read_line(&mut line).context("failed to read request line")?;
     let req: psp::JsonRpcRequest = serde_json::from_str(line.trim()).context("invalid JSON-RPC request")?;
 
-    // Simulate doing some work with progress
     emit(&psp::StreamItem::progress(5, Some("start".into()), Some("initializing".into())))?;
     std::thread::sleep(std::time::Duration::from_millis(50));
     emit(&psp::StreamItem::progress(25, Some("probe".into()), Some("probing sources".into())))?;
@@ -65,7 +61,6 @@ fn serve_once() -> Result<()> {
     std::thread::sleep(std::time::Duration::from_millis(50));
     emit(&psp::StreamItem::progress(90, Some("finalize".into()), Some("finalizing".into())))?;
 
-    // Handle method and produce result
     let result = match req.method.as_str() {
         "generate_metadata" => {
             let title = "Canned title";
@@ -78,7 +73,6 @@ fn serve_once() -> Result<()> {
             })
         }
         other => {
-            // Unknown method
             let err = psp::StreamItem::err(req.id.clone(), -32601, format!("Method not found: {}", other), None);
             emit(&err)?;
             return Ok(());

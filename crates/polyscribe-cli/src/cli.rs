@@ -103,6 +103,8 @@ pub enum ModelsCmd {
     Update,
     /// Interactive multi-select downloader
     Download,
+    /// Clear the cached Hugging Face manifest
+    ClearCache,
 }
 
 #[derive(Debug, Subcommand)]

@@ -3,14 +3,14 @@ mod cli;
 use anyhow::{Context, Result, anyhow};
 use clap::{CommandFactory, Parser};
 use cli::{Cli, Commands, GpuBackend, ModelsCmd, PluginsCmd};
-use polyscribe_core::models; // Added: call into core models
-use polyscribe_core::{config::ConfigService, ui::progress::ProgressReporter};
+use polyscribe_core::models;
+use polyscribe_core::ui::progress::ProgressReporter;
 use polyscribe_host::PluginManager;
 use tokio::io::AsyncWriteExt;
 use tracing_subscriber::EnvFilter;
 
 fn init_tracing(quiet: bool, verbose: u8) {
-    let level = if quiet {
+    let log_level = if quiet {
         "error"
     } else {
         match verbose {
@@ -20,7 +20,7 @@ fn init_tracing(quiet: bool, verbose: u8) {
         }
     };
 
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(log_level));
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
@@ -35,24 +35,17 @@ async fn main() -> Result<()> {
 
     init_tracing(args.quiet, args.verbose);
 
-    // Propagate UI flags to core so ui facade can apply policy
     polyscribe_core::set_quiet(args.quiet);
     polyscribe_core::set_no_interaction(args.no_interaction);
     polyscribe_core::set_verbose(args.verbose);
     polyscribe_core::set_no_progress(args.no_progress);
 
-    let _cfg = ConfigService::load_or_default().context("loading configuration")?;
-
     match args.command {
         Commands::Transcribe {
-            output: _output,
-            merge: _merge,
-            merge_and_separate: _merge_and_separate,
-            language: _language,
-            set_speaker_names: _set_speaker_names,
             gpu_backend,
             gpu_layers,
             inputs,
+            ..
         } => {
             polyscribe_core::ui::info("starting transcription workflow");
             let mut progress = ProgressReporter::new(args.no_interaction);
@@ -94,27 +87,35 @@ async fn main() -> Result<()> {
                         .context("running downloader")?;
                     polyscribe_core::ui::success("Model download complete.");
                 }
+                ModelsCmd::ClearCache => {
+                    polyscribe_core::ui::info("clearing manifest cache");
+                    tokio::task::spawn_blocking(models::clear_manifest_cache)
+                        .await
+                        .map_err(|e| anyhow!("blocking task join error: {e}"))?
+                        .context("clearing cache")?;
+                    polyscribe_core::ui::success("Manifest cache cleared.");
+                }
             }
             Ok(())
         }
 
         Commands::Plugins { cmd } => {
-            let pm = PluginManager;
+            let plugin_manager = PluginManager;
 
             match cmd {
                 PluginsCmd::List => {
-                    let list = pm.list().context("discovering plugins")?;
+                    let list = plugin_manager.list().context("discovering plugins")?;
                     for item in list {
                         polyscribe_core::ui::info(item.name);
                     }
                     Ok(())
                 }
                 PluginsCmd::Info { name } => {
-                    let info = pm
+                    let info = plugin_manager
                         .info(&name)
                         .with_context(|| format!("getting info for {}", name))?;
-                    let s = serde_json::to_string_pretty(&info)?;
-                    polyscribe_core::ui::info(s);
+                    let info_json = serde_json::to_string_pretty(&info)?;
+                    polyscribe_core::ui::info(info_json);
                     Ok(())
                 }
                 PluginsCmd::Run {
@@ -123,7 +124,7 @@ async fn main() -> Result<()> {
                     json,
                 } => {
                     let payload = json.unwrap_or_else(|| "{}".to_string());
-                    let mut child = pm
+                    let mut child = plugin_manager
                         .spawn(&name, &command)
                         .with_context(|| format!("spawning plugin {name} {command}"))?;
 
@@ -134,7 +135,7 @@ async fn main() -> Result<()> {
                             .context("writing JSON payload to plugin stdin")?;
                     }
 
-                    let status = pm.forward_stdio(&mut child).await?;
+                    let status = plugin_manager.forward_stdio(&mut child).await?;
                     if !status.success() {
                         polyscribe_core::ui::error(format!(
                             "plugin returned non-zero exit code: {}",
