@@ -1,8 +1,10 @@
 mod cli;
+mod output;
 
 use anyhow::{Context, Result, anyhow};
 use clap::{CommandFactory, Parser};
 use cli::{Cli, Commands, GpuBackend, ModelsCmd, ModelCommon, PluginsCmd};
+use output::OutputMode;
 use polyscribe_core::model_manager::{ModelManager, Settings, ReqwestClient};
 use polyscribe_core::ui;
 fn normalized_similarity(a: &str, b: &str) -> f64 {
@@ -50,22 +52,15 @@ use polyscribe_host::PluginManager;
 use tokio::io::AsyncWriteExt;
 use tracing_subscriber::EnvFilter;
 
-fn init_tracing(quiet: bool, verbose: u8) {
-    let log_level = if quiet {
-        "error"
-    } else {
-        match verbose {
-            0 => "info",
-            1 => "debug",
-            _ => "trace",
-        }
-    };
-
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(log_level));
+fn init_tracing(json_mode: bool, quiet: bool, verbose: u8) {
+    // In JSON mode, suppress human logs; route errors to stderr only.
+    let level = if json_mode || quiet { "error" } else { match verbose { 0 => "info", 1 => "debug", _ => "trace" } };
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
         .with_level(true)
+        .with_writer(std::io::stderr)
         .compact()
         .init();
 }
@@ -73,9 +68,17 @@ fn init_tracing(quiet: bool, verbose: u8) {
 fn main() -> Result<()> {
     let args = Cli::parse();
 
-    init_tracing(args.quiet, args.verbose);
+    // Determine output mode early for logging and UI configuration
+    let output_mode = if args.output.json {
+        OutputMode::Json
+    } else {
+        OutputMode::Human { quiet: args.output.quiet }
+    };
 
-    polyscribe_core::set_quiet(args.quiet);
+    init_tracing(matches!(output_mode, OutputMode::Json), args.output.quiet, args.verbose);
+
+    // Suppress decorative UI output in JSON mode as well
+    polyscribe_core::set_quiet(args.output.quiet || matches!(output_mode, OutputMode::Json));
     polyscribe_core::set_no_interaction(args.no_interaction);
     polyscribe_core::set_verbose(args.verbose);
     polyscribe_core::set_no_progress(args.no_progress);
@@ -128,15 +131,19 @@ fn main() -> Result<()> {
                 ModelsCmd::Ls { common } => {
                     let mm: ModelManager<ReqwestClient> = ModelManager::new(handle_common(&common))?;
                     let list = mm.ls()?;
-                    if list.is_empty() {
-                        println!("No models installed.");
-                    } else {
-                        if common.json {
-                            println!("{}", serde_json::to_string_pretty(&list)?);
-                        } else {
-                            println!("Model (Repo)");
-                            for r in list {
-                                println!("{} ({})", r.file, r.repo);
+                    match output_mode {
+                        OutputMode::Json => {
+                            // Always emit JSON array (possibly empty)
+                            output_mode.print_json(&list);
+                        }
+                        OutputMode::Human { quiet } => {
+                            if list.is_empty() {
+                                if !quiet { println!("No models installed."); }
+                            } else {
+                                if !quiet { println!("Model (Repo)"); }
+                                for r in list {
+                                    if !quiet { println!("{} ({})", r.file, r.repo); }
+                                }
                             }
                         }
                     }
@@ -158,15 +165,27 @@ fn main() -> Result<()> {
                     let alias = derive_alias(&repo, &file);
                     match mm.add_or_update(&alias, &repo, &file) {
                         Ok(rec) => {
-                            if common.json { println!("{}", serde_json::to_string_pretty(&rec)?); }
-                            else { println!("installed: {} -> {}/{}", alias, repo, rec.file); }
+                            match output_mode {
+                                OutputMode::Json => output_mode.print_json(&rec),
+                                OutputMode::Human { quiet } => {
+                                    if !quiet { println!("installed: {} -> {}/{}", alias, repo, rec.file); }
+                                }
+                            }
                             EXIT_OK
                         }
                         Err(e) => {
                             // On not found or similar errors, try suggesting close matches interactively
-                            if common.json || polyscribe_core::is_no_interaction() {
-                                if common.json { println!("{{\"error\":{}}}", serde_json::to_string(&e.to_string())?); }
-                                else { eprintln!("error: {e}"); }
+                            if matches!(output_mode, OutputMode::Json) || polyscribe_core::is_no_interaction() {
+                                match output_mode {
+                                    OutputMode::Json => {
+                                        // Emit error JSON object
+                                        #[derive(serde::Serialize)]
+                                        struct ErrObj<'a> { error: &'a str }
+                                        let eo = ErrObj { error: &e.to_string() };
+                                        output_mode.print_json(&eo);
+                                    }
+                                    _ => { eprintln!("error: {e}"); }
+                                }
                                 EXIT_NOT_FOUND
                             } else {
                                 ui::warn(format!("{}", e));
@@ -204,7 +223,13 @@ fn main() -> Result<()> {
                                                     let mm2: ModelManager<ReqwestClient> = ModelManager::new(settings)?;
                                                     let alias2 = derive_alias(&repo, cand);
                                                     match mm2.add_or_update(&alias2, &repo, cand) {
-                                                        Ok(rec) => { println!("installed: {} -> {}/{}", alias2, repo, rec.file); EXIT_OK }
+                                                        Ok(rec) => {
+                                                            match output_mode {
+                                                                OutputMode::Json => output_mode.print_json(&rec),
+                                                                OutputMode::Human { quiet } => { if !quiet { println!("installed: {} -> {}/{}", alias2, repo, rec.file); } }
+                                                            }
+                                                            EXIT_OK
+                                                        }
                                                         Err(e2) => { eprintln!("error: {e2}"); EXIT_NETWORK }
                                                     }
                                                 }
@@ -233,7 +258,13 @@ fn main() -> Result<()> {
                                                         let mm2: ModelManager<ReqwestClient> = ModelManager::new(settings)?;
                                                         let alias2 = derive_alias(&repo, chosen);
                                                         match mm2.add_or_update(&alias2, &repo, chosen) {
-                                                            Ok(rec) => { println!("installed: {} -> {}/{}", alias2, repo, rec.file); EXIT_OK }
+                                                            Ok(rec) => {
+                                                                match output_mode {
+                                                                    OutputMode::Json => output_mode.print_json(&rec),
+                                                                    OutputMode::Human { quiet } => { if !quiet { println!("installed: {} -> {}/{}", alias2, repo, rec.file); } }
+                                                                }
+                                                                EXIT_OK
+                                                            }
                                                             Err(e2) => { eprintln!("error: {e2}"); EXIT_NETWORK }
                                                         }
                                                     }
@@ -254,19 +285,41 @@ fn main() -> Result<()> {
                 ModelsCmd::Rm { alias, common } => {
                     let mm: ModelManager<ReqwestClient> = ModelManager::new(handle_common(&common))?;
                     let ok = mm.rm(&alias)?;
-                    if common.json { println!("{{\"removed\":{}}}", ok); }
-                    else { println!("{}", if ok { "removed" } else { "not found" }); }
+                    match output_mode {
+                        OutputMode::Json => {
+                            #[derive(serde::Serialize)]
+                            struct R { removed: bool }
+                            output_mode.print_json(&R { removed: ok });
+                        }
+                        OutputMode::Human { quiet } => {
+                            if !quiet { println!("{}", if ok { "removed" } else { "not found" }); }
+                        }
+                    }
                     if ok { EXIT_OK } else { EXIT_NOT_FOUND }
                 }
                 ModelsCmd::Verify { alias, common } => {
                     let mm: ModelManager<ReqwestClient> = ModelManager::new(handle_common(&common))?;
                     let found = mm.ls()?.into_iter().any(|r| r.alias == alias);
                     if !found {
-                        if common.json { println!("{{\"ok\":false,\"error\":\"not found\"}}"); } else { println!("not found"); }
+                        match output_mode {
+                            OutputMode::Json => {
+                                #[derive(serde::Serialize)]
+                                struct R<'a> { ok: bool, error: &'a str }
+                                output_mode.print_json(&R { ok: false, error: "not found" });
+                            }
+                            OutputMode::Human { quiet } => { if !quiet { println!("not found"); } }
+                        }
                         EXIT_NOT_FOUND
                     } else {
                         let ok = mm.verify(&alias)?;
-                        if common.json { println!("{{\"ok\":{}}}", ok); } else { println!("{}", if ok { "ok" } else { "corrupt" }); }
+                        match output_mode {
+                            OutputMode::Json => {
+                                #[derive(serde::Serialize)]
+                                struct R { ok: bool }
+                                output_mode.print_json(&R { ok });
+                            }
+                            OutputMode::Human { quiet } => { if !quiet { println!("{}", if ok { "ok" } else { "corrupt" }); } }
+                        }
                         if ok { EXIT_OK } else { EXIT_VERIFY_FAILED }
                     }
                 }
@@ -276,7 +329,17 @@ fn main() -> Result<()> {
                     for rec in mm.ls()? {
                         match mm.add_or_update(&rec.alias, &rec.repo, &rec.file) {
                             Ok(_) => {}
-                            Err(e) => { rc = EXIT_NETWORK; if common.json { println!("{{\"alias\":\"{}\",\"error\":{}}}", rec.alias, serde_json::to_string(&e.to_string())?); } else { eprintln!("update {}: {e}", rec.alias); } }
+                            Err(e) => {
+                                rc = EXIT_NETWORK;
+                                match output_mode {
+                                    OutputMode::Json => {
+                                        #[derive(serde::Serialize)]
+                                        struct R<'a> { alias: &'a str, error: String }
+                                        output_mode.print_json(&R { alias: &rec.alias, error: e.to_string() });
+                                    }
+                                    _ => { eprintln!("update {}: {e}", rec.alias); }
+                                }
+                            }
                         }
                     }
                     rc
@@ -284,15 +347,37 @@ fn main() -> Result<()> {
                 ModelsCmd::Gc { common } => {
                     let mm: ModelManager<ReqwestClient> = ModelManager::new(handle_common(&common))?;
                     let (files_removed, entries_removed) = mm.gc()?;
-                    if common.json { println!("{{\"files_removed\":{},\"entries_removed\":{}}}", files_removed, entries_removed); }
-                    else { println!("files_removed={} entries_removed={}", files_removed, entries_removed); }
+                    match output_mode {
+                        OutputMode::Json => {
+                            #[derive(serde::Serialize)]
+                            struct R { files_removed: usize, entries_removed: usize }
+                            output_mode.print_json(&R { files_removed, entries_removed });
+                        }
+                        OutputMode::Human { quiet } => { if !quiet { println!("files_removed={} entries_removed={}", files_removed, entries_removed); } }
+                    }
                     EXIT_OK
                 }
                 ModelsCmd::Search { repo, query, common } => {
                     let res = polyscribe_core::model_manager::search_repo(&repo, query.as_deref());
                     match res {
-                        Ok(files) => { if common.json { println!("{}", serde_json::to_string_pretty(&files)?); } else { for f in files { println!("{}", f); } } EXIT_OK }
-                        Err(e) => { if common.json { println!("{{\"error\":{}}}", serde_json::to_string(&e.to_string())?); } else { eprintln!("error: {e}"); } EXIT_NETWORK }
+                        Ok(files) => {
+                            match output_mode {
+                                OutputMode::Json => output_mode.print_json(&files),
+                                OutputMode::Human { quiet } => { for f in files { if !quiet { println!("{}", f); } } }
+                            }
+                            EXIT_OK
+                        }
+                        Err(e) => {
+                            match output_mode {
+                                OutputMode::Json => {
+                                    #[derive(serde::Serialize)]
+                                    struct R { error: String }
+                                    output_mode.print_json(&R { error: e.to_string() });
+                                }
+                                _ => { eprintln!("error: {e}"); }
+                            }
+                            EXIT_NETWORK
+                        }
                     }
                 }
             };

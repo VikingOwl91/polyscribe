@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -10,20 +10,32 @@ pub enum GpuBackend {
     Vulkan,
 }
 
+#[derive(Debug, Clone, Args)]
+pub struct OutputOpts {
+    /// Emit machine-readable JSON to stdout; suppress decorative logs
+    #[arg(long, global = true, action = clap::ArgAction::SetTrue)]
+    pub json: bool,
+    /// Reduce log chatter (errors only unless --json)
+    #[arg(long, global = true, action = clap::ArgAction::SetTrue)]
+    pub quiet: bool,
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "polyscribe",
     version,
-    about = "PolyScribe – local-first transcription and plugins"
+    about = "PolyScribe – local-first transcription and plugins",
+    propagate_version = true,
+    arg_required_else_help = true,
 )]
 pub struct Cli {
+    /// Global output options
+    #[command(flatten)]
+    pub output: OutputOpts,
+
     /// Increase verbosity (-v, -vv)
     #[arg(short, long, action = clap::ArgAction::Count)]
     pub verbose: u8,
-
-    /// Quiet mode (suppresses non-error logs)
-    #[arg(short, long, default_value_t = false)]
-    pub quiet: bool,
 
     /// Never prompt for user input (non-interactive mode)
     #[arg(long, default_value_t = false)]
@@ -105,9 +117,6 @@ pub struct ModelCommon {
     /// Limit download rate in bytes/sec (approximate)
     #[arg(long)]
     pub limit_rate: Option<u64>,
-    /// Emit machine JSON output
-    #[arg(long, default_value_t = false)]
-    pub json: bool,
 }
 
 #[derive(Debug, Subcommand)]
