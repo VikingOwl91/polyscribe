@@ -792,6 +792,13 @@ fn download_with_progress(dest_path: &Path, entry: &ModelEntry) -> Result<()> {
     }
 
     let part_path = dest_path.with_extension("part");
+    // Guard to cleanup .part on errors
+    struct TempGuard { path: std::path::PathBuf, armed: bool }
+    impl TempGuard { fn disarm(&mut self) { self.armed = false; } }
+    impl Drop for TempGuard {
+        fn drop(&mut self) { if self.armed { let _ = fs::remove_file(&self.path); } }
+    }
+    let mut _tmp_guard = TempGuard { path: part_path.clone(), armed: true };
 
     let mut resume_from: u64 = 0;
     if part_path.exists() && ranges_ok {
@@ -893,6 +900,7 @@ fn download_with_progress(dest_path: &Path, entry: &ModelEntry) -> Result<()> {
     drop(part_file);
     fs::rename(&part_path, dest_path)
         .with_context(|| format!("renaming {} → {}", part_path.display(), dest_path.display()))?;
+    _tmp_guard.disarm();
 
     let final_size = fs::metadata(dest_path).map(|m| m.len()).ok();
     let elapsed = start.elapsed().as_secs_f64();

@@ -74,7 +74,7 @@ pub enum Commands {
         inputs: Vec<PathBuf>,
     },
 
-    /// Manage Whisper models
+    /// Manage Whisper GGUF models (Hugging Face)
     Models {
         #[command(subcommand)]
         cmd: ModelsCmd,
@@ -97,14 +97,67 @@ pub enum Commands {
     Man,
 }
 
+#[derive(Debug, Clone, Parser)]
+pub struct ModelCommon {
+    /// Concurrency for ranged downloads
+    #[arg(long, default_value_t = 4)]
+    pub concurrency: usize,
+    /// Limit download rate in bytes/sec (approximate)
+    #[arg(long)]
+    pub limit_rate: Option<u64>,
+    /// Emit machine JSON output
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum ModelsCmd {
-    /// Verify or update local models non-interactively
-    Update,
-    /// Interactive multi-select downloader
-    Download,
-    /// Clear the cached Hugging Face manifest
-    ClearCache,
+    /// List installed models (from manifest)
+    Ls {
+        #[command(flatten)]
+        common: ModelCommon,
+    },
+    /// Add or update a model
+    Add {
+        /// Hugging Face repo, e.g. ggml-org/models
+        repo: String,
+        /// File name in repo (e.g., gguf-tiny-q4_0.bin)
+        file: String,
+        #[command(flatten)]
+        common: ModelCommon,
+    },
+    /// Remove a model by alias
+    Rm {
+        alias: String,
+        #[command(flatten)]
+        common: ModelCommon,
+    },
+    /// Verify model file integrity by alias
+    Verify {
+        alias: String,
+        #[command(flatten)]
+        common: ModelCommon,
+    },
+    /// Update all models (HEAD + ETag; skip if unchanged)
+    Update {
+        #[command(flatten)]
+        common: ModelCommon,
+    },
+    /// Garbage-collect unreferenced files and stale manifest entries
+    Gc {
+        #[command(flatten)]
+        common: ModelCommon,
+    },
+    /// Search a repo for GGUF files
+    Search {
+        /// Hugging Face repo, e.g. ggml-org/models
+        repo: String,
+        /// Optional substring to filter filenames
+        #[arg(long)]
+        query: Option<String>,
+        #[command(flatten)]
+        common: ModelCommon,
+    },
 }
 
 #[derive(Debug, Subcommand)]

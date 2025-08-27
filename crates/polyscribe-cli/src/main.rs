@@ -2,8 +2,49 @@ mod cli;
 
 use anyhow::{Context, Result, anyhow};
 use clap::{CommandFactory, Parser};
-use cli::{Cli, Commands, GpuBackend, ModelsCmd, PluginsCmd};
-use polyscribe_core::models;
+use cli::{Cli, Commands, GpuBackend, ModelsCmd, ModelCommon, PluginsCmd};
+use polyscribe_core::model_manager::{ModelManager, Settings, ReqwestClient};
+use polyscribe_core::ui;
+fn normalized_similarity(a: &str, b: &str) -> f64 {
+    // simple Levenshtein distance; normalized to [0,1]
+    let a_bytes = a.as_bytes();
+    let b_bytes = b.as_bytes();
+    let n = a_bytes.len();
+    let m = b_bytes.len();
+    if n == 0 && m == 0 { return 1.0; }
+    if n == 0 || m == 0 { return 0.0; }
+    let mut prev: Vec<usize> = (0..=m).collect();
+    let mut curr: Vec<usize> = vec![0; m + 1];
+    for i in 1..=n {
+        curr[0] = i;
+        for j in 1..=m {
+            let cost = if a_bytes[i - 1] == b_bytes[j - 1] { 0 } else { 1 };
+            curr[j] = (prev[j] + 1)
+                .min(curr[j - 1] + 1)
+                .min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    let dist = prev[m] as f64;
+    let max_len = n.max(m) as f64;
+    1.0 - (dist / max_len)
+}
+
+fn human_size(bytes: Option<u64>) -> String {
+    match bytes {
+        Some(n) => {
+            let x = n as f64;
+            const KB: f64 = 1024.0;
+            const MB: f64 = 1024.0 * KB;
+            const GB: f64 = 1024.0 * MB;
+            if x >= GB { format!("{:.2} GiB", x / GB) }
+            else if x >= MB { format!("{:.2} MiB", x / MB) }
+            else if x >= KB { format!("{:.2} KiB", x / KB) }
+            else { format!("{} B", n) }
+        }
+        None => "?".to_string(),
+    }
+}
 use polyscribe_core::ui::progress::ProgressReporter;
 use polyscribe_host::PluginManager;
 use tokio::io::AsyncWriteExt;
@@ -29,8 +70,7 @@ fn init_tracing(quiet: bool, verbose: u8) {
         .init();
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let args = Cli::parse();
 
     init_tracing(args.quiet, args.verbose);
@@ -71,32 +111,188 @@ async fn main() -> Result<()> {
         }
 
         Commands::Models { cmd } => {
-            match cmd {
-                ModelsCmd::Update => {
-                    polyscribe_core::ui::info("verifying/updating local models");
-                    tokio::task::spawn_blocking(models::update_local_models)
-                        .await
-                        .map_err(|e| anyhow!("blocking task join error: {e}"))?
-                        .context("updating models")?;
+            // predictable exit codes
+            const EXIT_OK: i32 = 0;
+            const EXIT_NOT_FOUND: i32 = 2;
+            const EXIT_NETWORK: i32 = 3;
+            const EXIT_VERIFY_FAILED: i32 = 4;
+            // const EXIT_NO_CHANGE: i32 = 5; // reserved
+
+            let handle_common = |c: &ModelCommon| Settings {
+                concurrency: c.concurrency.max(1),
+                limit_rate: c.limit_rate,
+                ..Default::default()
+            };
+
+            let exit = match cmd {
+                ModelsCmd::Ls { common } => {
+                    let mm: ModelManager<ReqwestClient> = ModelManager::new(handle_common(&common))?;
+                    let list = mm.ls()?;
+                    if common.json {
+                        println!("{}", serde_json::to_string_pretty(&list)?);
+                    } else {
+                        println!("Model (Repo)");
+                        for r in list {
+                            println!("{} ({})", r.file, r.repo);
+                        }
+                    }
+                    EXIT_OK
                 }
-                ModelsCmd::Download => {
-                    polyscribe_core::ui::info("interactive model selection and download");
-                    tokio::task::spawn_blocking(models::run_interactive_model_downloader)
-                        .await
-                        .map_err(|e| anyhow!("blocking task join error: {e}"))?
-                        .context("running downloader")?;
-                    polyscribe_core::ui::success("Model download complete.");
+                ModelsCmd::Add { repo, file, common } => {
+                    let settings = handle_common(&common);
+                    let mm: ModelManager<ReqwestClient> = ModelManager::new(settings.clone())?;
+                    // Derive an alias automatically from repo and file
+                    fn derive_alias(repo: &str, file: &str) -> String {
+                        use std::path::Path;
+                        let repo_tail = repo.rsplit('/').next().unwrap_or(repo);
+                        let stem = Path::new(file)
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or(file);
+                        format!("{}-{}", repo_tail, stem)
+                    }
+                    let alias = derive_alias(&repo, &file);
+                    match mm.add_or_update(&alias, &repo, &file) {
+                        Ok(rec) => {
+                            if common.json { println!("{}", serde_json::to_string_pretty(&rec)?); }
+                            else { println!("installed: {} -> {}/{}", alias, repo, rec.file); }
+                            EXIT_OK
+                        }
+                        Err(e) => {
+                            // On not found or similar errors, try suggesting close matches interactively
+                            if common.json || polyscribe_core::is_no_interaction() {
+                                if common.json { println!("{{\"error\":{}}}", serde_json::to_string(&e.to_string())?); }
+                                else { eprintln!("error: {e}"); }
+                                EXIT_NOT_FOUND
+                            } else {
+                                ui::warn(format!("{}", e));
+                                ui::info("Searching for similar model filenames…");
+                                match polyscribe_core::model_manager::search_repo(&repo, None) {
+                                    Ok(mut files) => {
+                                        if files.is_empty() {
+                                            ui::warn("No files found in repository.");
+                                            EXIT_NOT_FOUND
+                                        } else {
+                                            // rank by similarity
+                                            files.sort_by(|a, b| normalized_similarity(&file, b)
+                                                .partial_cmp(&normalized_similarity(&file, a))
+                                                .unwrap_or(std::cmp::Ordering::Equal));
+                                            let top: Vec<String> = files.into_iter().take(5).collect();
+                                            if top.is_empty() {
+                                                EXIT_NOT_FOUND
+                                            } else if top.len() == 1 {
+                                                let cand = &top[0];
+                                                // Fetch repo size list once
+                                                let size_map: std::collections::HashMap<String, Option<u64>> =
+                                                    polyscribe_core::model_manager::list_repo_files_with_meta(&repo)
+                                                    .unwrap_or_default()
+                                                    .into_iter().collect();
+                                                let mut size = size_map.get(cand).cloned().unwrap_or(None);
+                                                if size.is_none() {
+                                                    size = polyscribe_core::model_manager::head_len_for_file(&repo, cand);
+                                                }
+                                                let local_files: std::collections::HashSet<String> = mm.ls()?.into_iter().map(|r| r.file).collect();
+                                                let is_local = local_files.contains(cand);
+                                                let label = format!("{} [{}]{}", cand, human_size(size), if is_local { " (local)" } else { "" });
+                                                let ok = ui::prompt_confirm(&format!("Did you mean {}?", label), true)
+                                                    .unwrap_or(false);
+                                                if !ok { EXIT_NOT_FOUND } else {
+                                                    let mm2: ModelManager<ReqwestClient> = ModelManager::new(settings)?;
+                                                    let alias2 = derive_alias(&repo, cand);
+                                                    match mm2.add_or_update(&alias2, &repo, cand) {
+                                                        Ok(rec) => { println!("installed: {} -> {}/{}", alias2, repo, rec.file); EXIT_OK }
+                                                        Err(e2) => { eprintln!("error: {e2}"); EXIT_NETWORK }
+                                                    }
+                                                }
+                                            } else {
+                                                let opts: Vec<String> = top;
+                                                let local_files: std::collections::HashSet<String> = mm.ls()?.into_iter().map(|r| r.file).collect();
+                                                // Enrich labels with size and local tag using a single API call
+                                                let size_map: std::collections::HashMap<String, Option<u64>> =
+                                                    polyscribe_core::model_manager::list_repo_files_with_meta(&repo)
+                                                    .unwrap_or_default()
+                                                    .into_iter().collect();
+                                                let mut labels_owned: Vec<String> = Vec::new();
+                                                for f in &opts {
+                                                    let mut size = size_map.get(f).cloned().unwrap_or(None);
+                                                    if size.is_none() {
+                                                        size = polyscribe_core::model_manager::head_len_for_file(&repo, f);
+                                                    }
+                                                    let is_local = local_files.contains(f);
+                                                    let suffix = if is_local { " (local)" } else { "" };
+                                                    labels_owned.push(format!("{} [{}]{}", f, human_size(size), suffix));
+                                                }
+                                                let labels: Vec<&str> = labels_owned.iter().map(|s| s.as_str()).collect();
+                                                match ui::prompt_select("Pick a model", &labels) {
+                                                    Ok(idx) => {
+                                                        let chosen = &opts[idx];
+                                                        let mm2: ModelManager<ReqwestClient> = ModelManager::new(settings)?;
+                                                        let alias2 = derive_alias(&repo, chosen);
+                                                        match mm2.add_or_update(&alias2, &repo, chosen) {
+                                                            Ok(rec) => { println!("installed: {} -> {}/{}", alias2, repo, rec.file); EXIT_OK }
+                                                            Err(e2) => { eprintln!("error: {e2}"); EXIT_NETWORK }
+                                                        }
+                                                    }
+                                                    Err(_) => EXIT_NOT_FOUND,
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Err(e2) => {
+                                        eprintln!("error: {}", e2);
+                                        EXIT_NETWORK
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
-                ModelsCmd::ClearCache => {
-                    polyscribe_core::ui::info("clearing manifest cache");
-                    tokio::task::spawn_blocking(models::clear_manifest_cache)
-                        .await
-                        .map_err(|e| anyhow!("blocking task join error: {e}"))?
-                        .context("clearing cache")?;
-                    polyscribe_core::ui::success("Manifest cache cleared.");
+                ModelsCmd::Rm { alias, common } => {
+                    let mm: ModelManager<ReqwestClient> = ModelManager::new(handle_common(&common))?;
+                    let ok = mm.rm(&alias)?;
+                    if common.json { println!("{{\"removed\":{}}}", ok); }
+                    else { println!("{}", if ok { "removed" } else { "not found" }); }
+                    if ok { EXIT_OK } else { EXIT_NOT_FOUND }
                 }
-            }
-            Ok(())
+                ModelsCmd::Verify { alias, common } => {
+                    let mm: ModelManager<ReqwestClient> = ModelManager::new(handle_common(&common))?;
+                    let found = mm.ls()?.into_iter().any(|r| r.alias == alias);
+                    if !found {
+                        if common.json { println!("{{\"ok\":false,\"error\":\"not found\"}}"); } else { println!("not found"); }
+                        EXIT_NOT_FOUND
+                    } else {
+                        let ok = mm.verify(&alias)?;
+                        if common.json { println!("{{\"ok\":{}}}", ok); } else { println!("{}", if ok { "ok" } else { "corrupt" }); }
+                        if ok { EXIT_OK } else { EXIT_VERIFY_FAILED }
+                    }
+                }
+                ModelsCmd::Update { common } => {
+                    let mm: ModelManager<ReqwestClient> = ModelManager::new(handle_common(&common))?;
+                    let mut rc = EXIT_OK;
+                    for rec in mm.ls()? {
+                        match mm.add_or_update(&rec.alias, &rec.repo, &rec.file) {
+                            Ok(_) => {}
+                            Err(e) => { rc = EXIT_NETWORK; if common.json { println!("{{\"alias\":\"{}\",\"error\":{}}}", rec.alias, serde_json::to_string(&e.to_string())?); } else { eprintln!("update {}: {e}", rec.alias); } }
+                        }
+                    }
+                    rc
+                }
+                ModelsCmd::Gc { common } => {
+                    let mm: ModelManager<ReqwestClient> = ModelManager::new(handle_common(&common))?;
+                    let (files_removed, entries_removed) = mm.gc()?;
+                    if common.json { println!("{{\"files_removed\":{},\"entries_removed\":{}}}", files_removed, entries_removed); }
+                    else { println!("files_removed={} entries_removed={}", files_removed, entries_removed); }
+                    EXIT_OK
+                }
+                ModelsCmd::Search { repo, query, common } => {
+                    let res = polyscribe_core::model_manager::search_repo(&repo, query.as_deref());
+                    match res {
+                        Ok(files) => { if common.json { println!("{}", serde_json::to_string_pretty(&files)?); } else { for f in files { println!("{}", f); } } EXIT_OK }
+                        Err(e) => { if common.json { println!("{{\"error\":{}}}", serde_json::to_string(&e.to_string())?); } else { eprintln!("error: {e}"); } EXIT_NETWORK }
+                    }
+                }
+            };
+            std::process::exit(exit);
         }
 
         Commands::Plugins { cmd } => {
@@ -123,27 +319,35 @@ async fn main() -> Result<()> {
                     command,
                     json,
                 } => {
-                    let payload = json.unwrap_or_else(|| "{}".to_string());
-                    let mut child = plugin_manager
-                        .spawn(&name, &command)
-                        .with_context(|| format!("spawning plugin {name} {command}"))?;
+                    // Use a local Tokio runtime only for this async path
+                    let rt = tokio::runtime::Builder::new_multi_thread()
+                        .enable_all()
+                        .build()
+                        .context("building tokio runtime")?;
 
-                    if let Some(mut stdin) = child.stdin.take() {
-                        stdin
-                            .write_all(payload.as_bytes())
-                            .await
-                            .context("writing JSON payload to plugin stdin")?;
-                    }
+                    rt.block_on(async {
+                        let payload = json.unwrap_or_else(|| "{}".to_string());
+                        let mut child = plugin_manager
+                            .spawn(&name, &command)
+                            .with_context(|| format!("spawning plugin {name} {command}"))?;
 
-                    let status = plugin_manager.forward_stdio(&mut child).await?;
-                    if !status.success() {
-                        polyscribe_core::ui::error(format!(
-                            "plugin returned non-zero exit code: {}",
-                            status
-                        ));
-                        return Err(anyhow!("plugin failed"));
-                    }
-                    Ok(())
+                        if let Some(mut stdin) = child.stdin.take() {
+                            stdin
+                                .write_all(payload.as_bytes())
+                                .await
+                                .context("writing JSON payload to plugin stdin")?;
+                        }
+
+                        let status = plugin_manager.forward_stdio(&mut child).await?;
+                        if !status.success() {
+                            polyscribe_core::ui::error(format!(
+                                "plugin returned non-zero exit code: {}",
+                                status
+                            ));
+                            return Err(anyhow!("plugin failed"));
+                        }
+                        Ok(())
+                    })
                 }
             }
         }

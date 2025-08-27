@@ -214,6 +214,8 @@ pub fn render_srt(entries: &[OutputEntry]) -> String {
     srt
 }
 
+pub mod model_manager;
+
 pub fn models_dir_path() -> PathBuf {
     if let Ok(env_val) = env::var("POLYSCRIBE_MODELS_DIR") {
         let env_path = PathBuf::from(env_val);
