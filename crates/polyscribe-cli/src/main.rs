@@ -128,12 +128,16 @@ fn main() -> Result<()> {
                 ModelsCmd::Ls { common } => {
                     let mm: ModelManager<ReqwestClient> = ModelManager::new(handle_common(&common))?;
                     let list = mm.ls()?;
-                    if common.json {
-                        println!("{}", serde_json::to_string_pretty(&list)?);
+                    if list.is_empty() {
+                        println!("No models installed.");
                     } else {
-                        println!("Model (Repo)");
-                        for r in list {
-                            println!("{} ({})", r.file, r.repo);
+                        if common.json {
+                            println!("{}", serde_json::to_string_pretty(&list)?);
+                        } else {
+                            println!("Model (Repo)");
+                            for r in list {
+                                println!("{} ({})", r.file, r.repo);
+                            }
                         }
                     }
                     EXIT_OK
