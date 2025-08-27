@@ -7,6 +7,12 @@ members = [
 ]
 resolver = "3"
 
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "MIT"
+rust-version = "1.89"
+
 # Optional: Keep dependency versions consistent across members
 [workspace.dependencies]
 thiserror = "1.0.69"
@@ -25,6 +31,14 @@ whisper-rs = "0.14.3"
 cliclack = "0.3.6"
 clap_complete = "4.5.57"
 clap_mangen = "0.2.29"
+
+# Additional shared deps used across members
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+reqwest = { version = "0.12.7", default-features = false, features = ["blocking", "rustls-tls", "gzip", "json"] }
+hex = "0.4.3"
+tempfile = "3.12.0"
+assert_cmd = "2.0.16"
 
 [workspace.lints.rust]
 unused_imports = "deny"

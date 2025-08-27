@@ -1,22 +1,22 @@
 [package]
 name = "polyscribe-core"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 
 [dependencies]
-anyhow = "1.0.99"
-thiserror = "1.0.69"
-serde = { version = "1.0.219", features = ["derive"] }
-serde_json = "1.0.142"
-toml = "0.8.23"
-directories = "5.0.1"
-chrono = "0.4.41"
-libc = "0.2.175"
-whisper-rs = "0.14.3"
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+toml = { workspace = true }
+directories = { workspace = true }
+chrono = { workspace = true }
+libc = { workspace = true }
+whisper-rs = { workspace = true }
 # UI and progress
 cliclack = { workspace = true }
-# New: HTTP downloads + hashing
-reqwest = { version = "0.12.7", default-features = false, features = ["blocking", "rustls-tls", "gzip", "json"] }
-sha2 = "0.10.8"
-hex = "0.4.3"
-tempfile = "3.12.0"
+# HTTP downloads + hashing
+reqwest = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+tempfile = { workspace = true }

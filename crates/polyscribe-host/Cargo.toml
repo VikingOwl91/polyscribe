@@ -1,12 +1,12 @@
 [package]
 name = "polyscribe-host"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 
 [dependencies]
-anyhow = "1.0.99"
-serde = { version = "1.0.219", features = ["derive"] }
-serde_json = "1.0.142"
-tokio = { version = "1.47.1", features = ["rt-multi-thread", "process", "io-util"] }
-which = "6.0.3"
+anyhow = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "process", "io-util"] }
+which = { workspace = true }
 directories = { workspace = true }
