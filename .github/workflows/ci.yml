@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+    branches: [dev, main]
+
+jobs:
+  test:
+    name: fmt, build, test, clippy (stable)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Build
+        run: cargo build --all-targets --locked
+      - name: Test
+        run: cargo test --all --locked
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+  msrv:
+    name: check on MSRV (1.88)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - name: Check
+        run: cargo check --all-targets --locked
