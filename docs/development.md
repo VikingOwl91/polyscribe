@@ -45,6 +45,8 @@ Tests
 - The test suite includes CLI-oriented integration tests and unit tests. Integration tests use the deterministic fixtures in `tests/fixtures/` and need no network, models, or GPU. One test exercises the ffmpeg failure path and is skipped (with a note) when ffmpeg is not on PATH.
 - Some unit tests simulate GPU detection using env vars (`POLYSCRIBE_TEST_FORCE_*`). Do not rely on these flags in production code.
 - Tests that mutate environment variables take a shared lock (`ENV_LOCK`) so they can run in parallel safely.
+- The suite is feature-independent: run it with default features and, on hosts with ROCm, also with `cargo test --features gpu-hip` (the backend selection tests force detection explicitly, so both configurations pass).
+- `cargo test --release` additionally compiles and runs the release-only tests (XDG models-dir resolution).
 
 Clippy and formatting
 - Run lint checks and treat warnings as errors:
