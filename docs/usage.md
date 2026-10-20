@@ -2,19 +2,23 @@
 
 PolyScribe is a command-line tool. Run `polyscribe -h` at any time to see the latest help.
 
-Common patterns
-- Single file to transcript (JSON + TOML + SRT):
-  - `polyscribe -o output --language en path/to/audio_or_video.mp3`
-- Multiple files → merged transcript:
-  - `polyscribe -m -o output merged path/a.mp3 path/b.mp4`
-- Multiple files → both merged and separate outputs:
-  - `polyscribe --merge-and-separate -o output path/a.json path/b.json`
-- Prompt for speaker names per input (manual labeling; no automatic diarization):
-  - `polyscribe --set-speaker-names -o output path/a.mp3 path/b.mp4`
+The CLI is organized into subcommands: `transcribe`, `models`, `plugins`, `completions`, and `man`. Global flags `--json` and `--quiet` are accepted before or after the subcommand; `-v/--verbose`, `--no-interaction`, and `--no-progress` are top-level flags (before the subcommand).
 
-CLI reference
+## Common patterns
+
+- Single file to transcript (JSON + TOML + SRT):
+  - `polyscribe transcribe --language en -o output path/to/audio_or_video.mp3`
+- Multiple files → merged transcript:
+  - `polyscribe transcribe -m -o output merged path/a.mp3 path/b.mp4`
+- Multiple files → both merged and separate outputs:
+  - `polyscribe transcribe --merge-and-separate -o output path/a.json path/b.json`
+- Prompt for speaker names per input (manual labeling; no automatic diarization):
+  - `polyscribe transcribe --set-speaker-names -o output path/a.mp3 path/b.mp4`
+
+## transcribe
+
 - Positional arguments:
-  - `inputs`: One or more `.json` transcripts or media files (audio/video). Media files are decoded to 16 kHz mono PCM via ffmpeg.
+  - `inputs`: One or more `.json` transcripts or media files (audio/video), required. Media files are decoded to 16 kHz mono PCM via ffmpeg.
   - With at least two inputs and no `-o`, a trailing argument that does not exist on disk is treated as the output path.
 - Flags:
   - `-o, --output FILE_OR_DIR`
@@ -29,59 +33,94 @@ CLI reference
     - Language hint (e.g., `en`, `de`). Required when transcribing audio. English-only models reject non-`en` hints.
   - `--gpu-backend [auto|cpu|cuda|hip]`
     - Choose the backend among those compiled into the binary. Default is `auto` (prefers CUDA → HIP → CPU). Requesting a GPU backend that was not compiled in is an error that explains how to rebuild.
-  - `--download-models`
-    - Launch the interactive model downloader (lists Hugging Face models; multi-select to download).
-  - `--update-models`
-    - Verify/update local models by comparing sizes and SHA-256 hashes with the upstream manifest.
-  - `-v, --verbose` (repeatable)
-    - Increase log verbosity; use `-vv` for very detailed logs.
-  - `-q, --quiet`
-    - Suppress non-error logs to stderr; does not affect stdout outputs.
-  - `--no-interaction`
-    - Disable all interactive prompts (for CI). Combine with env vars to control behavior.
-  - Subcommands:
-    - `completions <shell>`: Write a shell completion script to stdout.
-    - `man`: Write a man page to stdout.
 
-Expected outputs
-- For each processed input or merged group, PolyScribe produces:
+## models
+
+Manage Whisper models (downloads come from Hugging Face, verified by SHA-256 when the hash is known):
+
+- `models ls` — list installed models (from the manifest).
+- `models add <repo> <file>` — add or update a model (e.g., `models add ggerganov/whisper.cpp ggml-tiny.en.bin`); the alias is derived from repo and file.
+- `models rm <alias>` — remove a model by alias.
+- `models verify <alias>` — verify a model file's SHA-256.
+- `models update` — update all installed models (HEAD + ETag; skips unchanged).
+- `models download` — launch the interactive model downloader (lists Hugging Face models; two-stage select; skipped in `--no-interaction`).
+- `models clear-cache` — clear the cached Hugging Face manifest (force a fresh fetch).
+- `models gc` — garbage-collect unreferenced files and stale manifest entries.
+- `models search <repo> [--query <substr>]` — search a repo for `.bin`/`.gguf` files.
+- `models` subcommands accept `--concurrency N` and `--limit-rate BYTES_PER_SEC`.
+- Exit codes: `0` ok, `2` not found, `3` network error, `4` verification failed.
+
+Model files live in `$XDG_CACHE_HOME/polyscribe/models` (override `POLYSCRIBE_CACHE_DIR`); the manifest is `$XDG_CONFIG_HOME/polyscribe/models.json` (override `POLYSCRIBE_CONFIG_DIR`). Set `HF_TOKEN` for authenticated requests.
+
+## plugins
+
+- `plugins list` — discover plugins on `PATH` and in `$XDG_DATA_HOME/polyscribe/plugins`.
+- `plugins info <name>` — show a plugin's capabilities (JSON).
+- `plugins run <name> <command> [--payload '<json>']` — run a plugin command: the host sends one JSON-RPC (PSP/1) request over the plugin's stdin and forwards its NDJSON stdout stream.
+
+## completions / man
+
+- `completions <bash|zsh|fish|powershell|elvish>` — write a shell completion script to stdout.
+- `man` — write a man page to stdout.
+
+## Global flags
+
+- `--json` — emit machine-readable JSON on stdout; suppress decorative logs.
+- `--quiet` — reduce log chatter (errors only).
+- `-v, --verbose` (repeatable, top-level) — increase log verbosity; `-vv` shows very detailed logs.
+- `--no-interaction` (top-level) — never prompt; suitable for CI.
+- `--no-progress` (top-level) — disable progress bars/spinners.
+
+## Expected outputs
+
+- For each processed input or merged group, `transcribe` produces:
   - A JSON transcript file with segments (`id`, `speaker`, `start`, `end`, `text`).
   - A TOML transcript file with the same content.
   - An SRT subtitle file with timestamps and text (`speaker:`-prefixed when a label is set).
 - When `-o` is used with a directory, outputs are written into that directory with a `YYYY-MM-DD` prefix.
 - When no `-o` is given, pretty-printed JSON is written to stdout (JSON only).
 
-Typical workflows
+## Typical workflows
+
 1) Single file → transcript:
-- `polyscribe -o output --language en media/example.mp3`
+- `polyscribe transcribe --language en -o output media/example.mp3`
 
 2) Multiple files → merged transcript:
-- `polyscribe -m -o output merged --language en media/a.mp3 media/b.mp4`
+- `polyscribe transcribe -m -o output merged --language en media/a.mp3 media/b.mp4`
 
 3) Multiple files → both merged and individual transcripts:
-- `polyscribe --merge-and-separate -o output media/a.json media/b.json`
+- `polyscribe transcribe --merge-and-separate -o output media/a.json media/b.json`
 
 4) Video → extract audio automatically:
-- `polyscribe -o output --language en videos/talk.mp4`
+- `polyscribe transcribe --language en -o output videos/talk.mp4`
 (Requires ffmpeg on PATH.)
 
-Model locations
-- Development builds (debug): `./models` is used by default.
-- Packaged releases: `$XDG_DATA_HOME/polyscribe/models` or `~/.local/share/polyscribe/models`.
+5) Prepare a model non-interactively (good for CI):
+- `polyscribe models add ggerganov/whisper.cpp ggml-tiny.en.bin`
+
+## Model locations
+
+- Transcription models (used by `transcribe`): `./models` in debug builds, `$XDG_DATA_HOME/polyscribe/models` or `~/.local/share/polyscribe/models` in release builds.
 - Override:
   - `POLYSCRIBE_MODELS_DIR=/path/to/models`
   - `WHISPER_MODEL=/path/to/specific_model.bin` (forces exact model file).
 
-Environment variables
-- `POLYSCRIBE_MODELS_DIR`: Override the default models directory.
-- `WHISPER_MODEL`: Point directly to a model file.
-- `XDG_DATA_HOME`/`HOME`: Used to resolve the default model path for release builds.
-- `CI`/`GITHUB_ACTIONS`: When set, PolyScribe assumes non-TTY in some paths and may avoid prompts.
-- Test-only toggles (used by our tests; not recommended in production):
-  - `POLYSCRIBE_TEST_FORCE_CUDA=1`
-  - `POLYSCRIBE_TEST_FORCE_HIP=1`
+## Environment variables
 
-Notes
-- GPU support is a build-time property: build with `--features gpu-cuda` or `--features gpu-hip` (see development.md). A Vulkan backend is not currently wired up; `--gpu-backend vulkan` is rejected.
+- `POLYSCRIBE_MODELS_DIR`: Override the transcription models directory.
+- `WHISPER_MODEL`: Point directly to a model file.
+- `POLYSCRIBE_CACHE_DIR` / `POLYSCRIBE_CONFIG_DIR`: Override the `models` subcommand cache/config locations.
+- `POLYSCRIBE_NO_CACHE_MANIFEST=1`: Disable the manifest cache.
+- `POLYSCRIBE_MANIFEST_TTL_SECONDS`: Manifest cache TTL (default 24 h).
+- `POLYSCRIBE_HF_REPO`: Override the default Hugging Face repo (`ggerganov/whisper.cpp`).
+- `HF_TOKEN`: Hugging Face access token for authenticated requests.
+- `XDG_DATA_HOME` / `XDG_CACHE_HOME` / `XDG_CONFIG_HOME` / `HOME`: Used to resolve default paths.
+- Test-only toggles (used by our tests; not recommended in production):
+  - `POLYSCRIBE_TEST_FORCE_CUDA=1` / `=0`
+  - `POLYSCRIBE_TEST_FORCE_HIP=1` / `=0`
+
+## Notes
+
+- GPU support is a build-time property: build with `--features gpu-cuda` or `--features gpu-hip` (see development.md). A Vulkan backend is not wired up; `--gpu-backend vulkan` is rejected.
 - English-only models cannot be used with non-English language hints.
-- Network access happens only for `--download-models` and `--update-models` (Hugging Face over HTTPS). All other operations are fully offline.
+- Network access happens only for the `models` subcommands (Hugging Face over HTTPS). `transcribe`, `plugins`, `completions`, and `man` are fully offline.

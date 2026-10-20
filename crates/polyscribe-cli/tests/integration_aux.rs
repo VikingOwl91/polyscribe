@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025 <COPYRIGHT HOLDER>. All rights reserved.
 
+use assert_cmd::cargo::cargo_bin;
 use std::process::Command;
 
-fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_polyscribe")
+fn bin() -> std::path::PathBuf {
+    cargo_bin("polyscribe")
 }
 
 #[test]

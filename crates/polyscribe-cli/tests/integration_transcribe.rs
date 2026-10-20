@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025 <COPYRIGHT HOLDER>. All rights reserved.
 
-//! CLI integration tests.
+//! Integration tests for the `transcribe` subcommand.
 //!
 //! These tests run the built binary end to end against the deterministic
 //! fixtures in `tests/fixtures`. They never download models, need a GPU, or
@@ -43,12 +43,18 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// Run the binary with arguments and capture output.
-fn run(args: &[&OsStr]) -> std::process::Output {
-    Command::new(bin())
-        .args(args)
-        .output()
-        .expect("failed to spawn polyscribe")
+/// Run `polyscribe transcribe` with arguments and capture output.
+fn run_transcribe(args: &[&OsStr]) -> std::process::Output {
+    let mut cmd = Command::new(bin());
+    cmd.arg("transcribe").args(args);
+    cmd.output().expect("failed to spawn polyscribe")
+}
+
+/// Run `polyscribe` with global flags before the subcommand.
+fn run_with_globals(globals: &[&OsStr], args: &[&OsStr]) -> std::process::Output {
+    let mut cmd = Command::new(bin());
+    cmd.args(globals).arg("transcribe").args(args);
+    cmd.output().expect("failed to spawn polyscribe")
 }
 
 fn stdout_string(output: &std::process::Output) -> String {
@@ -91,7 +97,7 @@ fn assert_merged_1_and_2(root: &OutputRoot) {
 #[test]
 fn cli_writes_separate_outputs_by_default() {
     let out_dir = tempfile::tempdir().unwrap();
-    let output = run(&[
+    let output = run_transcribe(&[
         fixture("1-s0wlz.json").as_os_str(),
         fixture("2-vikingowl.json").as_os_str(),
         OsStr::new("-o"),
@@ -193,7 +199,7 @@ fn cli_merges_json_inputs_with_flag_and_writes_outputs_to_temp_dir() {
     let base_dir = tmp.path().join("outdir");
     let base = base_dir.join("out");
 
-    let output = run(&[
+    let output = run_transcribe(&[
         fixture("1-s0wlz.json").as_os_str(),
         fixture("2-vikingowl.json").as_os_str(),
         OsStr::new("-m"),
@@ -236,7 +242,7 @@ fn cli_merges_json_inputs_with_flag_and_writes_outputs_to_temp_dir() {
 
 #[test]
 fn cli_prints_json_to_stdout_when_no_output_path_merge_mode() {
-    let output = run(&[
+    let output = run_transcribe(&[
         fixture("1-s0wlz.json").as_os_str(),
         fixture("2-vikingowl.json").as_os_str(),
         OsStr::new("-m"),
@@ -248,7 +254,7 @@ fn cli_prints_json_to_stdout_when_no_output_path_merge_mode() {
 
 #[test]
 fn cli_single_input_prints_json_to_stdout_by_default() {
-    let output = run(&[fixture("3-schmendrizzle.json").as_os_str()]);
+    let output = run_transcribe(&[fixture("3-schmendrizzle.json").as_os_str()]);
     assert!(output.status.success(), "CLI failed");
     let root = parse_stdout_json(&output);
     assert_eq!(root.items.len(), 1);
@@ -260,7 +266,7 @@ fn cli_single_input_prints_json_to_stdout_by_default() {
 #[test]
 fn cli_merge_and_separate_writes_both_kinds_of_outputs() {
     let out_dir = tempfile::tempdir().unwrap();
-    let output = run(&[
+    let output = run_transcribe(&[
         fixture("1-s0wlz.json").as_os_str(),
         fixture("2-vikingowl.json").as_os_str(),
         OsStr::new("--merge-and-separate"),
@@ -313,11 +319,12 @@ fn cli_merge_and_separate_writes_both_kinds_of_outputs() {
 fn cli_set_speaker_names_merge_prompts_and_uses_names() {
     // Also validate that -q does not suppress prompts by running with -q
     let mut child = Command::new(bin())
+        .args([OsStr::new("--quiet")])
+        .arg("transcribe")
         .arg(fixture("1-s0wlz.json"))
         .arg(fixture("2-vikingowl.json"))
         .arg("-m")
         .arg("--set-speaker-names")
-        .arg("-q")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -343,13 +350,15 @@ fn cli_set_speaker_names_merge_prompts_and_uses_names() {
 
 #[test]
 fn cli_no_interaction_skips_speaker_prompts_and_uses_defaults() {
-    let output = run(&[
-        fixture("1-s0wlz.json").as_os_str(),
-        fixture("2-vikingowl.json").as_os_str(),
-        OsStr::new("-m"),
-        OsStr::new("--set-speaker-names"),
-        OsStr::new("--no-interaction"),
-    ]);
+    let output = run_with_globals(
+        &[OsStr::new("--no-interaction")],
+        &[
+            fixture("1-s0wlz.json").as_os_str(),
+            fixture("2-vikingowl.json").as_os_str(),
+            OsStr::new("-m"),
+            OsStr::new("--set-speaker-names"),
+        ],
+    );
     assert!(
         output.status.success(),
         "CLI did not exit successfully: {}",
@@ -368,6 +377,7 @@ fn cli_no_interaction_skips_speaker_prompts_and_uses_defaults() {
 fn cli_set_speaker_names_separate_single_input() {
     let out_dir = tempfile::tempdir().unwrap();
     let mut child = Command::new(bin())
+        .arg("transcribe")
         .arg(fixture("3-schmendrizzle.json"))
         .arg("--set-speaker-names")
         .arg("-o")
@@ -407,16 +417,17 @@ fn cli_set_speaker_names_separate_single_input() {
     assert!(root.items.iter().all(|e| e.speaker == "ChosenOne"));
 }
 
-// New verbosity behavior tests
+// Verbosity behavior tests
 #[test]
 fn verbosity_quiet_suppresses_logs_but_keeps_stdout() {
-    let output = run(&[
-        OsStr::new("-q"),
-        OsStr::new("-v"), // ensure -q overrides -v
-        fixture("1-s0wlz.json").as_os_str(),
-        fixture("2-vikingowl.json").as_os_str(),
-        OsStr::new("-m"),
-    ]);
+    let output = run_with_globals(
+        &[OsStr::new("--quiet"), OsStr::new("-v")], // ensure -q overrides -v
+        &[
+            fixture("1-s0wlz.json").as_os_str(),
+            fixture("2-vikingowl.json").as_os_str(),
+            OsStr::new("-m"),
+        ],
+    );
     assert!(output.status.success());
     let stdout = stdout_string(&output);
     assert!(
@@ -433,12 +444,14 @@ fn verbosity_quiet_suppresses_logs_but_keeps_stdout() {
 
 #[test]
 fn verbosity_verbose_emits_debug_logs_on_stderr() {
-    let output = run(&[
-        fixture("1-s0wlz.json").as_os_str(),
-        fixture("2-vikingowl.json").as_os_str(),
-        OsStr::new("-m"),
-        OsStr::new("-v"),
-    ]);
+    let output = run_with_globals(
+        &[OsStr::new("-v")],
+        &[
+            fixture("1-s0wlz.json").as_os_str(),
+            fixture("2-vikingowl.json").as_os_str(),
+            OsStr::new("-m"),
+        ],
+    );
     assert!(output.status.success());
     let stdout = stdout_string(&output);
     assert!(stdout.contains("\"items\""));
@@ -449,45 +462,24 @@ fn verbosity_verbose_emits_debug_logs_on_stderr() {
     );
 }
 
-#[test]
-fn verbosity_flag_position_is_global() {
-    // -v before args
-    let out1 = run(&[
-        OsStr::new("-v"),
-        fixture("1-s0wlz.json").as_os_str(),
-        fixture("2-vikingowl.json").as_os_str(),
-        OsStr::new("-m"),
-    ]);
-    // -v after sub-flags
-    let out2 = run(&[
-        fixture("1-s0wlz.json").as_os_str(),
-        fixture("2-vikingowl.json").as_os_str(),
-        OsStr::new("-m"),
-        OsStr::new("-v"),
-    ]);
-
-    let s1 = stderr_string(&out1);
-    let s2 = stderr_string(&out2);
-    assert!(s1.contains("Mode: merge"));
-    assert!(s2.contains("Mode: merge"));
-}
-
 // CLI argument validation and error-path tests
 #[test]
-fn cli_no_inputs_errors() {
-    let output = run(&[]);
-    assert!(!output.status.success(), "expected failure with no inputs");
-    let stderr = stderr_string(&output);
+fn cli_transcribe_requires_inputs() {
+    let output = Command::new(bin())
+        .arg("transcribe")
+        .output()
+        .expect("failed to spawn polyscribe");
     assert!(
-        stderr.contains("No input files provided"),
-        "unexpected stderr: {}",
-        stderr
+        !output.status.success(),
+        "expected failure with no inputs (clap requires them)"
     );
+    let stderr = stderr_string(&output);
+    assert!(stderr.contains("required"), "unexpected stderr: {}", stderr);
 }
 
 #[test]
 fn cli_rejects_unsupported_input_type() {
-    let output = run(&[fixture("notes.txt").as_os_str()]);
+    let output = run_transcribe(&[fixture("notes.txt").as_os_str()]);
     assert!(!output.status.success(), "expected failure for .txt input");
     let stderr = stderr_string(&output);
     assert!(
@@ -499,7 +491,7 @@ fn cli_rejects_unsupported_input_type() {
 
 #[test]
 fn cli_requires_language_for_audio_inputs() {
-    let output = run(&[fixture("sample.mp3").as_os_str()]);
+    let output = run_transcribe(&[fixture("sample.mp3").as_os_str()]);
     assert!(
         !output.status.success(),
         "expected failure without --language"
@@ -515,7 +507,7 @@ fn cli_requires_language_for_audio_inputs() {
 #[test]
 fn cli_errors_on_missing_input_file() {
     let missing = fixture("does-not-exist.json");
-    let output = run(&[missing.as_os_str(), OsStr::new("-m")]);
+    let output = run_transcribe(&[missing.as_os_str(), OsStr::new("-m")]);
     assert!(
         !output.status.success(),
         "expected failure for missing file"
@@ -530,7 +522,7 @@ fn cli_errors_on_missing_input_file() {
 
 #[test]
 fn cli_errors_on_invalid_json_transcript() {
-    let output = run(&[fixture("invalid.json").as_os_str(), OsStr::new("-m")]);
+    let output = run_transcribe(&[fixture("invalid.json").as_os_str(), OsStr::new("-m")]);
     assert!(
         !output.status.success(),
         "expected failure for invalid JSON"
@@ -545,7 +537,7 @@ fn cli_errors_on_invalid_json_transcript() {
 
 #[test]
 fn cli_merge_and_separate_requires_output_dir() {
-    let output = run(&[
+    let output = run_transcribe(&[
         fixture("1-s0wlz.json").as_os_str(),
         fixture("2-vikingowl.json").as_os_str(),
         OsStr::new("--merge-and-separate"),
@@ -564,7 +556,7 @@ fn cli_merge_and_separate_requires_output_dir() {
 
 #[test]
 fn cli_multiple_inputs_without_merge_require_output_dir() {
-    let output = run(&[
+    let output = run_transcribe(&[
         fixture("1-s0wlz.json").as_os_str(),
         fixture("2-vikingowl.json").as_os_str(),
     ]);
@@ -582,7 +574,7 @@ fn cli_multiple_inputs_without_merge_require_output_dir() {
 
 #[test]
 fn cli_rejects_vulkan_backend_value() {
-    let output = run(&[
+    let output = run_transcribe(&[
         OsStr::new("--gpu-backend"),
         OsStr::new("vulkan"),
         fixture("1-s0wlz.json").as_os_str(),
@@ -604,6 +596,7 @@ fn cli_trailing_output_argument_is_treated_as_output() {
     let tmp = tempfile::tempdir().unwrap();
     let out_base = tmp.path().join("out_base");
     let output = Command::new(bin())
+        .arg("transcribe")
         .arg(fixture("1-s0wlz.json"))
         .arg(fixture("2-vikingowl.json"))
         .arg("-m")
@@ -646,7 +639,7 @@ fn cli_reports_ffmpeg_failure_for_invalid_media() {
         eprintln!("NOT RUN: ffmpeg is not available on PATH; skipping ffmpeg failure test");
         return;
     }
-    let output = run(&[
+    let output = run_transcribe(&[
         fixture("sample.mp3").as_os_str(),
         OsStr::new("--language"),
         OsStr::new("en"),

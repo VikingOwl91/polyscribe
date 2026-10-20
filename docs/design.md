@@ -1,40 +1,59 @@
 # Design
 
-Overview
-PolyScribe is a CLI that orchestrates:
-- CLI parsing and prompting (main.rs)
-- Core library (lib.rs) exposing reusable logic: logging, runtime flags, model discovery, audio decoding
-- Output module (output.rs): transcript types, sorting, and JSON/TOML/SRT rendering
-- Backends for transcription (backend.rs) that bind to whisper-rs
-- Model management (models.rs) that discovers/downloads/verifies models
+## Overview
 
-Data flow
+PolyScribe is a Cargo workspace CLI that orchestrates:
+
+- `polyscribe-cli` (`crates/polyscribe-cli`): CLI parsing (`cli.rs`), command orchestration (`main.rs`), the `transcribe` pipeline (`transcribe.rs`), and stdout modes (`output.rs`).
+- `polyscribe-core` (`crates/polyscribe-core`): the engine —
+  - `backend.rs`: backend selection and the `TranscribeBackend` implementations (CPU/CUDA/HIP via whisper-rs),
+  - `models.rs`: model discovery, manifest caching, downloads, and the interactive downloader,
+  - `model_manager.rs`: `ModelManager` (manifest, cache, ranged concurrent downloads, SHA-256 verification, gc/rm/verify),
+  - `output.rs`: transcript types helpers, sorting/id reassignment, and JSON/TOML/SRT serialization,
+  - `lib.rs`: runtime flags, logging macros, stderr silencing, model discovery, and ffmpeg audio decoding,
+  - `ui.rs` / `ui/progress.rs`: cliclack-based interactive UI (prompts, spinners, progress bars),
+  - `config.rs` / `error.rs`: env-var configuration and the core error type.
+- `polyscribe-host` / `polyscribe-protocol` (`crates/`): plugin discovery/process management and the PSP/1 protocol types.
+- `plugins/polyscribe-plugin-tubescribe`: reference plugin.
+
+## Data flow (transcribe)
+
 1) CLI collects inputs (media or JSON), options (merge, speaker names, language, backend), and output path.
 2) For media, audio is streamed from ffmpeg and decoded to 16 kHz mono PCM f32 in memory.
-3) A Whisper model is selected (env var override, last-used, interactive download, or non-interactive default).
+3) A Whisper model is located (`WHISPER_MODEL`, or the largest `*.bin` in the models dir).
 4) The selected backend transcribes via whisper-rs, producing segments.
 5) Segments are sorted, reindexed, and written to JSON + TOML + SRT (or JSON to stdout).
 
-Key decisions
-- Local-first: default to local models in `./models` (debug) or the XDG data dir (release) for predictable behavior. Network access happens only for `--download-models` / `--update-models` (Hugging Face over HTTPS, rustls).
-- Whisper model selection: last-used cache (`.last_model`) provides a stable default across runs.
-- Non-interactive mode: avoid prompts for CI; download a sensible default if needed.
-- Logging: simple macros (`elog!`/`wlog!`/`ilog!`/`dlog!`) with quiet/verbose controls; stderr is used for diagnostics, stdout for results.
-- GPU selection: availability is a build-time property. A binary built with `gpu-cuda`/`gpu-hip` links the corresponding runtime and can use it; without the feature the backend is unavailable and requesting it produces an actionable error. Runtime dlopen probing was tried and removed (it was unstable and never detected anything). A Vulkan backend is not wired up.
+## Data flow (models)
+
+1) The Hugging Face manifest is fetched (API, with an on-disk ETag/TTL cache and an HTML-scrape fallback), enriched via HEAD requests.
+2) `ModelManager` downloads files with concurrent ranged GETs (streaming fallback), verifies SHA-256, and renames `.part` into place atomically.
+3) The manifest (`models.json`) tracks aliases, revisions, hashes, and sizes; `ls/rm/verify/update/gc` operate on it.
+
+## Data flow (plugins)
+
+1) The host discovers `polyscribe-plugin-*` executables on `PATH` and in the XDG plugin dir.
+2) `plugins run` spawns `<plugin> run`, writes one JSON-RPC request line to its stdin, and forwards its NDJSON stdout stream.
+3) `<plugin> info` prints capabilities JSON.
+
+## Key decisions
+
+- Local-first: network access only for the `models` subcommands (Hugging Face over HTTPS, rustls). Everything else runs fully offline.
+- GPU selection is a build-time property: a binary built with `gpu-cuda`/`gpu-hip` links the corresponding runtime and can use it; without the feature the backend is unavailable and requesting it produces an actionable error. Runtime dlopen probing was tried and removed (unstable, never detected anything). A Vulkan backend is not wired up.
 - Speaker labels are manual (per-input prompts). There is no automatic speaker diarization.
+- Logging: `elog!`/`ilog!`/`dlog!` macros plus `ui::*` helpers; quiet mode suppresses info/success/progress, errors and warnings remain. stderr is used for diagnostics, stdout for results.
+- Model integrity: downloads verify SHA-256 when the hash is known and use atomic `.part` → final renames; temp files are guarded against leaks.
+- Path safety: model file names from remote listings/manifests are validated (no path separators in `ModelManager` cache names; no absolute paths or `..` components for manifest file paths).
 
-Model discovery & verification (conceptual)
-- Remote model list pulled from Hugging Face repositories (tree API, with per-file size/SHA-256 metadata; HEAD requests fill gaps).
-- Downloads go to a `.part` file and are verified by SHA-256 when the hash is known; the file is renamed into place only after verification.
-- Updates compare local files against the manifest (hash first, size as fallback).
-- Best local model is chosen by largest file size (tie-break: lexicographic filename) to balance quality and speed.
+## Extensibility
 
-Extensibility
-- New transcription engines: implement `TranscribeBackend` and register them in `select_backend` (backend.rs).
+- New transcription engines: implement `TranscribeBackend` and register them in `select_backend` (`backend.rs`).
 - New output formats: extend `output.rs` (`render_srt` is the pattern for text formats).
-- New model sources: extend `models.rs` to read additional manifests or repositories.
-- Packaging: respect `XDG_DATA_HOME`/`HOME`; allow `POLYSCRIBE_MODELS_DIR` override; avoid hard-coding system paths.
+- New model sources: extend `models.rs` / `model_manager.rs` (the `HttpClient` trait makes the manager testable with stub clients).
+- New plugins: implement the PSP/1 interface (`info` + `run`); see `plugins/polyscribe-plugin-tubescribe`.
+- Packaging: respect XDG dirs; allow `POLYSCRIBE_*` overrides; avoid hard-coding system paths.
 
-Binary naming and CLI surface
-- Binary is `polyscribe`.
+## Binary naming and CLI surface
+
+- Binary is `polyscribe`; subcommands are `transcribe`, `models`, `plugins`, `completions`, `man`.
 - Keep CLI flags stable and documented; add new flags conservatively.

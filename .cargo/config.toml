@@ -1,0 +1,5 @@
+# SPDX-License-Identifier: MIT
+
+[build]
+# Make target-dir consistent across workspace for better cache reuse.
+target-dir = "target"

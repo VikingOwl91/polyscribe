@@ -2,80 +2,88 @@
 
 This document describes how to build, test, and run PolyScribe locally, and how to work with models during development.
 
-Prerequisites
-- Rust 1.88 or newer (the MSRV; `rustup` recommended).
-- A C/C++ toolchain, `cmake`, and `libclang` — the `whisper-rs-sys` build script compiles whisper.cpp and generates Rust bindings with bindgen.
-- `ffmpeg` installed and on `PATH` (needed at runtime for media transcription, and by one integration test).
+## Prerequisites
+
+- Rust 1.88 or newer (the MSRV; `rustup` recommended). `rust-toolchain.toml` pins 1.89 for development/CI.
+- A C/C++ toolchain, `cmake`, and `libclang` — `whisper-rs-sys` compiles whisper.cpp and generates Rust bindings with bindgen.
+- `ffmpeg` installed and on `PATH` (runtime for media transcription, and one integration test).
 - For GPU builds: the matching toolchains and libraries (CUDA, ROCm).
 
-Rust toolchain
-- Target stable Rust; the MSRV is 1.88 (`rust-version` in `Cargo.toml`).
-- Recommended:
-  - `rustup install stable`
-  - `rustup default stable`
-- Verify the MSRV after dependency changes:
-  - `cargo +1.88 check --all-targets`
+## Workspace layout
 
-Build
+- `crates/polyscribe-core`: engine — backends (`backend.rs`), transcription glue, model discovery (`models.rs`), `ModelManager` (`model_manager.rs`), config (`config.rs`), error type (`error.rs`), output rendering (`output.rs`), and the cliclack UI helpers (`ui.rs`, `ui/progress.rs`).
+- `crates/polyscribe-cli`: the `polyscribe` binary — CLI parsing (`cli.rs`), command orchestration (`main.rs`), the `transcribe` pipeline (`transcribe.rs`), and stdout modes (`output.rs`).
+- `crates/polyscribe-host`: plugin discovery and process management.
+- `crates/polyscribe-protocol`: PSP/1 plugin protocol types.
+- `plugins/polyscribe-plugin-tubescribe`: reference plugin (workspace member; built and tested with the workspace).
+- `crates/polyscribe-cli/tests/fixtures/`: deterministic fixtures for the integration tests.
+
+## Build
+
 - CPU-only (default):
   - `cargo build`
-  - `cargo test`
+  - `cargo test --workspace`
 - Enable GPU features at build time (availability is a build-time property):
-  - CUDA: `cargo build --features gpu-cuda`
-  - HIP: `cargo build --features gpu-hip`
+  - CUDA: `cargo build -p polyscribe-cli --features gpu-cuda`
+  - HIP: `cargo build -p polyscribe-cli --features gpu-hip`
 - There is no `gpu-vulkan` feature: the Vulkan backend is not wired up.
+- MSRV check after dependency changes:
+  - `cargo +1.88 check --workspace --all-targets`
 
-Run locally
+## Run locally
+
 - Development model directory defaults to `./models` when built in debug mode.
 - You can override:
   - `POLYSCRIBE_MODELS_DIR=/path/to/models`
   - `WHISPER_MODEL=/path/to/model.bin` (forces a specific file)
 - Example run:
-  - `cargo run -- -v -o output --language en samples/example.mp3`
+  - `cargo run -p polyscribe-cli -- transcribe -v -o output --language en samples/example.mp3`
 
-Models during development
+## Models during development
+
 - Interactive downloader:
-  - `cargo run -- --download-models`
-- Non-interactive update (checks sizes/hashes, downloads if missing):
-  - `cargo run -- --update-models --no-interaction -q`
+  - `cargo run -p polyscribe-cli -- models download`
+- Non-interactive add/update (verifies sizes/hashes, downloads if missing):
+  - `cargo run -p polyscribe-cli -- models add ggerganov/whisper.cpp ggml-tiny.en.bin`
+  - `cargo run -p polyscribe-cli -- models update`
+- The `models` subcommands use `$XDG_CACHE_HOME/polyscribe/models` for files and `$XDG_CONFIG_HOME/polyscribe/models.json` for the manifest; override with `POLYSCRIBE_CACHE_DIR` / `POLYSCRIBE_CONFIG_DIR`.
 
-Tests
+## Tests
+
 - Run all tests:
-  - `cargo test`
-- The test suite includes CLI-oriented integration tests and unit tests. Integration tests use the deterministic fixtures in `tests/fixtures/` and need no network, models, or GPU. One test exercises the ffmpeg failure path and is skipped (with a note) when ffmpeg is not on PATH.
+  - `cargo test --workspace`
+- The suite needs no network, models, or GPU. It uses the deterministic fixtures in `crates/polyscribe-cli/tests/fixtures/`.
+- Run with `--workspace` (not `-p polyscribe-cli`) so the plugin end-to-end tests run; they are skipped with a note when the plugin binary is not built.
+- One test exercises the ffmpeg failure path and is skipped (with a note) when ffmpeg is not on PATH.
 - Some unit tests simulate GPU detection using env vars (`POLYSCRIBE_TEST_FORCE_*`). Do not rely on these flags in production code.
 - Tests that mutate environment variables take a shared lock (`ENV_LOCK`) so they can run in parallel safely.
-- The suite is feature-independent: run it with default features and, on hosts with ROCm, also with `cargo test --features gpu-hip` (the backend selection tests force detection explicitly, so both configurations pass).
-- `cargo test --release` additionally compiles and runs the release-only tests (XDG models-dir resolution).
+- The suite is feature-independent: run it with default features and, on hosts with ROCm, also with `cargo test --workspace --features polyscribe-cli/gpu-hip`.
+- `cargo test --workspace --release` additionally compiles and runs the release-only tests.
 
-Clippy and formatting
+## Clippy and formatting
+
 - Run lint checks and treat warnings as errors:
-  - `cargo clippy --all-targets -- -D warnings`
+  - `cargo clippy --workspace --all-targets -- -D warnings`
 - Format:
   - `cargo fmt --all -- --check`
+- The workspace lints (`[workspace.lints]` in the root `Cargo.toml`) deny unused imports and warn on dead code; each crate opts in with `[lints] workspace = true`.
 
-Code layout
-- `src/lib.rs`: core library surface: runtime flags, logging macros, model discovery (`find_model_file`), audio decoding (`decode_audio_to_pcm_f32_ffmpeg`), input classification, and module re-exports.
-- `src/output.rs`: transcript types (`OutputEntry`, `OutputRoot`), SRT rendering, sorting/id reassignment, output writing (JSON/TOML/SRT, stdout), and JSON transcript loading.
-- `src/backend.rs`: backend selection (`select_backend`), the `TranscribeBackend` trait and CPU/CUDA/HIP implementations, per-input entry collection (`collect_entries_for_input`), and the whisper-rs transcription glue.
-- `src/models.rs`: model discovery, manifest, download/update logic (Hugging Face).
-- `src/main.rs`: CLI parsing, prompting, and the three output modes (separate, merge, merge-and-separate).
-- `tests/`: integration tests (`integration_cli.rs`, `integration_aux.rs`) and fixtures (`tests/fixtures/`).
+## Adding a feature
 
-Adding a feature
-- Find the closest existing module (output/backend/models/main) and add a small, focused unit test.
-- Keep user-facing changes documented in README/docs.
+- Find the closest existing module (core: backend/models/model_manager/output; cli: transcribe/cli) and add a small, focused unit test.
+- Keep user-facing changes documented in README/docs and update `CHANGELOG.md`.
 - Prefer small functions with clear responsibilities; avoid exposing unnecessary items publicly.
-- Follow the existing logging style (`elog!`/`wlog!`/`ilog!`/`dlog!`).
+- Follow the existing logging style (`elog!`/`ilog!`/`dlog!` macros in core; `ui::*` helpers for interactive output).
 
-Running the model downloader
-- Interactive:
-  - `cargo run -- --download-models`
-- Non-interactive suggestions for CI:
-  - `POLYSCRIBE_MODELS_DIR=$PWD/models cargo run -- --update-models --no-interaction -q`
+## Plugin development
 
-Env var examples for local testing
+- A plugin is an executable named `polyscribe-plugin-<name>` on `PATH` or in `$XDG_DATA_HOME/polyscribe/plugins`.
+- Interface: `<plugin> info` prints capabilities JSON (`polyscribe_protocol::Capabilities`); `<plugin> run` reads one JSON-RPC request line from stdin and writes NDJSON `StreamItem`s (progress/result/error) to stdout.
+- `plugins/polyscribe-plugin-tubescribe` is the reference implementation; `crates/polyscribe-cli/tests/integration_plugins.rs` exercises it end to end.
+
+## Env var examples for local testing
+
 - Use a local copy of models and a specific model file:
   - `export POLYSCRIBE_MODELS_DIR=$PWD/models`
-  - `export WHISPER_MODEL=$PWD/models/large-v3-turbo-q8_0.bin`
-- Test manifests/offline copies are handled internally (`POLYSCRIBE_MODELS_MANIFEST`, `POLYSCRIBE_MODELS_BASE_COPY_DIR`). For full offline runs, pre-populate `models/` with the desired `.bin` files.
+  - `export WHISPER_MODEL=$PWD/models/ggml-tiny.en.bin`
+- For full offline runs of the `models` subcommands, pre-populate the cache dir or use `models add` with a repo reachable on your network.

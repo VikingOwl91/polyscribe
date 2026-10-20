@@ -1,0 +1,17 @@
+[package]
+name = "polyscribe-host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "process", "io-util"] }
+which = { workspace = true }
+directories = { workspace = true }

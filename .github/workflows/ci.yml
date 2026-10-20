@@ -2,31 +2,46 @@ name: CI
 
 on:
   push:
-    branches: [dev, main]
   pull_request:
-    branches: [dev, main]
 
 jobs:
   test:
     name: fmt, build, test, clippy (stable)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install components
+        run: rustup component add clippy rustfmt
+
       - name: Format
         run: cargo fmt --all -- --check
+
       - name: Build
-        run: cargo build --all-targets --locked
+        run: cargo build --workspace --all-targets --locked
+
       - name: Test
-        run: cargo test --all --locked
+        run: cargo test --workspace --locked
+
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
   msrv:
     name: check on MSRV (1.88)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.88
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Rust (MSRV)
+        uses: dtolnay/rust-toolchain@1.88
+
       - name: Check
-        run: cargo check --all-targets --locked
+        run: cargo check --workspace --all-targets --locked

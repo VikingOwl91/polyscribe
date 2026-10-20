@@ -1,90 +1,116 @@
 # PolyScribe
 
-PolyScribe is a fast, local-first CLI for transcribing audio/video and merging existing JSON transcripts. It uses whisper.cpp (via the `whisper-rs` crate) under the hood, can discover and download Whisper models automatically, and supports CPU and optional GPU builds (CUDA, ROCm/HIP).
+PolyScribe is a fast, local-first CLI for transcribing audio/video and merging existing JSON transcripts, with a plugin system for extensibility. It uses whisper.cpp (via the `whisper-rs` crate) under the hood, can discover and download Whisper models automatically (with caching and integrity verification), and supports CPU and optional GPU builds (CUDA, ROCm/HIP).
 
-Key features
-- Transcribe audio and common video files; audio extraction is done with ffmpeg.
-- Merge multiple JSON transcripts, or merge and also keep per-file outputs.
-- Model management: interactive downloader and non-interactive updater with SHA-256 verification.
-- GPU backend selection at runtime among the backends compiled into the binary (CUDA, ROCm/HIP); CPU-only by default.
-- Outputs JSON, TOML, and SRT; speaker labels via per-file prompts (manual labeling only — there is no automatic speaker diarization).
-- Useful logging controls (`-v`/`-q`, `--no-interaction`).
+## Features
 
-Prerequisites
-- Rust 1.88 or newer (MSRV; `rustup` recommended)
+- **Local-first**: transcription runs fully offline once a model is present; network access is only used by the `models` subcommands (Hugging Face over HTTPS).
+- **Transcription**: audio and common video files are decoded to 16 kHz mono PCM via ffmpeg and transcribed with whisper.cpp.
+- **Transcript merging**: merge multiple JSON transcripts, or merge and also keep per-file outputs.
+- **Model management**: `polyscribe models` subcommands to list, add, remove, verify, update, search, and download models, with a manifest cache, concurrent ranged downloads, and SHA-256 verification.
+- **Plugin system**: extensible via JSON-RPC (NDJSON) plugins discovered on `PATH` or in the XDG plugin directory.
+- **GPU backends**: CPU, CUDA, and ROCm/HIP; availability is a build-time property (`--features gpu-cuda` / `--features gpu-hip`).
+- **Outputs**: JSON, TOML, and SRT; speaker labels via per-file prompts (manual labeling only — there is no automatic speaker diarization).
+- **Machine-readable mode**: global `--json` flag for scripts.
+
+## Workspace layout
+
+- `crates/polyscribe-core`: engine — backends, transcription, models, model manager, output rendering, UI helpers.
+- `crates/polyscribe-cli`: the `polyscribe` binary — CLI parsing and command orchestration.
+- `crates/polyscribe-host`: plugin discovery and process management.
+- `crates/polyscribe-protocol`: the PSP/1 plugin protocol types.
+- `plugins/polyscribe-plugin-tubescribe`: reference plugin (builds with the workspace).
+
+## Prerequisites
+
+- Rust 1.88 or newer (MSRV; `rustup` recommended; `rust-toolchain.toml` pins 1.89 for development)
 - A C/C++ toolchain, `cmake`, and `libclang` (needed to build whisper.cpp and its Rust bindings)
 - `ffmpeg` available on `PATH` at runtime
 - Optional for GPU builds at build and run time: CUDA toolkit/driver (NVIDIA) or ROCm (AMD)
 
-Installation
-- Build from source (CPU-only by default):
-  - `rustup install stable`
-  - `cargo build --release`
-- Binary path: `./target/release/polyscribe`
-- GPU builds (optional):
-  - CUDA: `cargo build --release --features gpu-cuda`
-  - HIP (ROCm): `cargo build --release --features gpu-hip`
+## Installation
 
-Quickstart
-1) Download a model (first run can prompt you):
-- `./target/release/polyscribe --download-models`
+```bash
+# Build the CLI from source (CPU-only by default)
+cargo build --release
+# Binary: ./target/release/polyscribe
 
-2) Transcribe a file (requires `--language`):
-- `./target/release/polyscribe -v -o output my_audio.mp3 --language en`
-- This writes JSON, TOML, and SRT into the output directory with a date prefix.
+# GPU builds (optional)
+cargo build --release -p polyscribe-cli --features gpu-cuda   # NVIDIA
+cargo build --release -p polyscribe-cli --features gpu-hip    # AMD ROCm
 
-Shell completions and man page
-- Completions: `./target/release/polyscribe completions <bash|zsh|fish|powershell|elvish> > polyscribe.<ext>`
-  - Then install into your shell's completion directory.
-- Man page: `./target/release/polyscribe man > polyscribe.1` (then copy to your manpath)
+# Install
+cargo install --path crates/polyscribe-cli
+```
 
-Model locations
-- Development (debug builds): `./models` next to the project.
-- Packaged/release builds: `$XDG_DATA_HOME/polyscribe/models` or `~/.local/share/polyscribe/models`.
-- Override via env var: `POLYSCRIBE_MODELS_DIR=/path/to/models`.
-- Force a specific model file via env var: `WHISPER_MODEL=/path/to/model.bin`.
+## Usage
 
-Most-used CLI flags
-- `-o, --output FILE_OR_DIR`: Output path. In the default (separate) mode this is a directory; with `-m` it is a file base name. A date prefix is added to file names. If omitted, JSON prints to stdout.
-- `-m, --merge`: Merge all inputs into one output; otherwise one output per input.
-- `--merge-and-separate`: Write both merged output and separate per-input outputs (requires `-o` dir).
-- `--set-speaker-names`: Prompt for a speaker label per input file (manual labeling; no automatic diarization).
-- `--update-models`: Verify/update local models by size/hash against the upstream manifest.
-- `--download-models`: Interactive model list + multi-select download.
-- `--language LANG`: Language code hint (e.g., `en`, `de`). Required when transcribing audio; English-only models reject non-`en` hints.
-- `--gpu-backend [auto|cpu|cuda|hip]`: Select backend among those compiled in (default: `auto`, prefers CUDA, then HIP, then CPU).
-- `-v/--verbose` (repeatable): Increase log verbosity. `-vv` shows very detailed logs.
-- `-q/--quiet`: Suppress non-error logs (stderr); does not silence stdout results.
-- `--no-interaction`: Never prompt; suitable for CI.
+```bash
+# Transcribe audio/video (requires --language)
+polyscribe transcribe --language en -o output input.mp4
 
-Minimal usage examples
-- Transcribe an audio file to JSON/TOML/SRT:
-  - `./target/release/polyscribe -o output --language en samples/podcast_clip.mp3`
-- Merge multiple transcripts into one:
-  - `./target/release/polyscribe -m -o output merged input/a.json input/b.json`
-- Update local models non-interactively (good for CI):
-  - `./target/release/polyscribe --update-models --no-interaction -q`
+# Merge multiple transcripts
+polyscribe transcribe -m -o output merged input1.json input2.json
 
-Notes and limitations
-- Vulkan is not currently supported: PolyScribe does not wire up whisper.cpp's Vulkan backend, and `--gpu-backend vulkan` is rejected. CUDA and HIP builds are supported.
-- Speaker labels are assigned manually per input file (`--set-speaker-names`); PolyScribe does not perform automatic speaker diarization.
-- Network access is only used by `--download-models` and `--update-models` (Hugging Face API and model downloads over HTTPS). Everything else runs fully offline.
+# Merge and also keep per-file outputs
+polyscribe transcribe --merge-and-separate -o output input1.json input2.json
 
-Troubleshooting & docs
-- `docs/faq.md` – common issues and solutions (missing ffmpeg, GPU selection, model paths)
-- `docs/usage.md` – complete CLI reference and workflows
-- `docs/development.md` – build, test, and contribute locally
-- `docs/design.md` – architecture overview and decisions
-- `docs/release-packaging.md` – packaging notes for distributions
-- `docs/ci.md` – CI checklist and job outline
-- `CONTRIBUTING.md` – PR checklist and workflow
+# Model management
+polyscribe models ls
+polyscribe models search ggerganov/whisper.cpp --query tiny
+polyscribe models add ggerganov/whisper.cpp ggml-tiny.en.bin
+polyscribe models verify ggml-tiny.en
+polyscribe models update
+polyscribe models download        # interactive downloader
+polyscribe models clear-cache     # force a fresh manifest fetch
 
-Examples
-See the `examples/` directory for copy-paste scripts:
-- `examples/transcribe_file.sh`
-- `examples/update_models.sh`
-- `examples/download_models_interactive.sh`
+# Plugins
+polyscribe plugins list
+polyscribe plugins info tubescribe
+polyscribe plugins run tubescribe generate_metadata --payload '{"url":"..."}'
 
-License
--------
+# Shell completions and man page
+polyscribe completions bash > polyscribe.bash
+polyscribe man > polyscribe.1
+```
+
+Run `polyscribe -h` or `polyscribe <subcommand> -h` for the full reference; `docs/usage.md` has the details.
+
+## Model locations and caching
+
+- Transcription models: `./models` in debug builds, `$XDG_DATA_HOME/polyscribe/models` (or `~/.local/share/polyscribe/models`) in release builds. Override with `POLYSCRIBE_MODELS_DIR`; force a specific file with `WHISPER_MODEL`.
+- `models` subcommands use a separate cache: `$XDG_CACHE_HOME/polyscribe/models` for model files and `$XDG_CONFIG_HOME/polyscribe/models.json` for the manifest. Override with `POLYSCRIBE_CACHE_DIR` / `POLYSCRIBE_CONFIG_DIR`.
+- The Hugging Face manifest is cached (`$XDG_CACHE_HOME/polyscribe/manifest/`, 24 h TTL); `POLYSCRIBE_NO_CACHE_MANIFEST=1` disables it, `POLYSCRIBE_MANIFEST_TTL_SECONDS` changes the TTL.
+- `HF_TOKEN` is used for authenticated Hugging Face API/download requests when set.
+
+## Notes and limitations
+
+- **No Vulkan backend**: PolyScribe does not wire up whisper.cpp's Vulkan backend; `--gpu-backend vulkan` is rejected. CUDA and HIP builds are supported.
+- **No automatic speaker diarization**: speaker labels are assigned manually per input file (`--set-speaker-names`); the downloader lists `tinydiarize` models but diarization is not wired into transcription.
+- GPU availability is a build-time property: build with `--features gpu-cuda` / `--features gpu-hip` and install the matching runtime; `--gpu-backend auto` picks CUDA → HIP → CPU among the backends compiled in.
+
+## Development
+
+```bash
+cargo build                 # build the workspace
+cargo test --workspace      # run all tests (no network/models/GPU needed)
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all -- --check
+```
+
+See `CONTRIBUTING.md` for the full checklist and `docs/development.md` for details.
+
+## Troubleshooting & docs
+
+- `docs/faq.md` — common issues and solutions
+- `docs/usage.md` — complete CLI reference and workflows
+- `docs/development.md` — build, test, and contribute locally
+- `docs/design.md` — architecture overview and decisions
+- `docs/release-packaging.md` — packaging notes for distributions
+- `docs/ci.md` — CI checklist and job outline
+- `CONTRIBUTING.md` — PR checklist and workflow
+- `CHANGELOG.md` — notable changes
+
+## License
+
 This project is licensed under the MIT License — see the LICENSE file for details.

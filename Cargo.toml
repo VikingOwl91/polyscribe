@@ -1,45 +1,67 @@
-[package]
-name = "polyscribe"
-version = "0.1.0"
+[workspace]
+members = [
+    "crates/polyscribe-core",
+    "crates/polyscribe-protocol",
+    "crates/polyscribe-host",
+    "crates/polyscribe-cli",
+    "plugins/polyscribe-plugin-tubescribe",
+]
+resolver = "3"
+
+[workspace.package]
 edition = "2024"
-# MSRV: matches whisper-rs-sys 0.15 (the newest supported whisper.cpp bindings).
-rust-version = "1.88"
+version = "0.1.0"
 license = "MIT"
+# MSRV: matches whisper-rs-sys 0.15 (the whisper.cpp bindings crate).
+rust-version = "1.88"
 
-[features]
-# Default: CPU only; no GPU features enabled.
-default = []
-# GPU backends map to whisper-rs features. Availability is a build-time
-# property: a binary built with a GPU feature links the corresponding
-# runtime and can use it; without the feature the backend is unavailable.
-gpu-cuda = ["whisper-rs/cuda"]
-gpu-hip = ["whisper-rs/hipblas"]
-
-[dependencies]
-anyhow = "1.0.98"
-clap = { version = "4.5.43", features = ["derive"] }
-clap_complete = "4.5.28"
-clap_mangen = "0.2"
+# Optional: Keep dependency versions consistent across members
+[workspace.dependencies]
+thiserror = "1.0.69"
 serde = { version = "1.0.219", features = ["derive"] }
+anyhow = "1.0.99"
+libc = "0.2.175"
+toml = "0.8.23"
 serde_json = "1.0.142"
-toml = "0.8"
-chrono = { version = "0.4", features = ["clock"] }
+chrono = { version = "0.4.41", features = ["serde"] }
+sha2 = "0.10.9"
+which = "6.0.3"
+tokio = { version = "1.47.1", features = ["rt-multi-thread", "macros"] }
+clap = { version = "4.5.44", features = ["derive"] }
+directories = "5.0.1"
+# Versioned crates.io release (not an unpinned git rev) keeps builds
+# reproducible via Cargo.lock checksums.
+whisper-rs = "0.16"
+cliclack = "0.3.6"
+clap_complete = "4.5.57"
+clap_mangen = "0.2.29"
+
+# Additional shared deps used across members
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 # rustls-tls instead of the default native-tls: pure-Rust TLS with bundled
 # Mozilla roots, so building does not require system OpenSSL.
-reqwest = { version = "0.12", default-features = false, features = [
+reqwest = { version = "0.12.7", default-features = false, features = [
     "blocking",
-    "json",
     "rustls-tls",
+    "gzip",
+    "json",
     "charset",
     "http2",
     "system-proxy",
 ] }
-sha2 = "0.10"
-# whisper-rs is always used (CPU-only by default); GPU features map onto it.
-# Versioned crates.io release (not an unpinned git rev) keeps builds reproducible
-# via Cargo.lock checksums.
-whisper-rs = "0.16"
-libc = "0.2"
+hex = "0.4.3"
+tempfile = "3.12.0"
+assert_cmd = "2.0.16"
 
-[dev-dependencies]
-tempfile = "3"
+[workspace.lints.rust]
+unused_imports = "deny"
+dead_code = "warn"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+
+[profile.dev]
+panic = "unwind"

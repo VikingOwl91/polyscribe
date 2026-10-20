@@ -1,34 +1,16 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2025 <COPYRIGHT HOLDER>. All rights reserved.
 
-//! Transcript data types and output rendering (JSON, TOML, SRT).
-//!
-//! This module owns the on-disk transcript schema and everything needed to
-//! turn a list of [`OutputEntry`] segments into the files PolyScribe writes:
-//! pretty-printed JSON, TOML, and SRT subtitles, or JSON on stdout.
+//! Transcript output handling: sorting, JSON/TOML/SRT serialization, and
+//! writing transcript files (or JSON to stdout).
 
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use chrono::Local;
 use serde::{Deserialize, Serialize};
 
-/// Transcript entry for a single segment.
-#[derive(Debug, Serialize, Clone, PartialEq)]
-pub struct OutputEntry {
-    /// Sequential id in output ordering.
-    pub id: u64,
-    /// Speaker label associated with the segment.
-    pub speaker: String,
-    /// Start time in seconds.
-    pub start: f64,
-    /// End time in seconds.
-    pub end: f64,
-    /// Text content.
-    pub text: String,
-}
+use crate::OutputEntry;
 
 /// Root object of a PolyScribe transcript file (JSON and TOML outputs).
 #[derive(Debug, Serialize)]
@@ -37,41 +19,25 @@ pub struct OutputRoot {
     pub items: Vec<OutputEntry>,
 }
 
-/// Return a YYYY-MM-DD date prefix string for output file naming.
-pub fn date_prefix() -> String {
-    Local::now().format("%Y-%m-%d").to_string()
+/// Determine whether a path has a JSON transcript extension (case-insensitive).
+pub fn is_json_file(path: &Path) -> bool {
+    matches!(path.extension().and_then(|s| s.to_str()).map(|s| s.to_lowercase()), Some(ext) if ext == "json")
 }
 
-/// Format a floating-point number of seconds as SRT timestamp (HH:MM:SS,mmm).
-pub fn format_srt_time(seconds: f64) -> String {
-    let total_ms = (seconds * 1000.0).round() as i64;
-    let ms = total_ms % 1000;
-    let total_secs = total_ms / 1000;
-    let s = total_secs % 60;
-    let m = (total_secs / 60) % 60;
-    let h = total_secs / 3600;
-    format!("{h:02}:{m:02}:{s:02},{ms:03}")
-}
-
-/// Render a list of transcript entries to SRT format.
-pub fn render_srt(items: &[OutputEntry]) -> String {
-    let mut out = String::new();
-    for (i, e) in items.iter().enumerate() {
-        let idx = i + 1;
-        out.push_str(&format!("{idx}\n"));
-        out.push_str(&format!(
-            "{} --> {}\n",
-            format_srt_time(e.start),
-            format_srt_time(e.end)
-        ));
-        if !e.speaker.is_empty() {
-            out.push_str(&format!("{}: {}\n", e.speaker, e.text));
-        } else {
-            out.push_str(&format!("{}\n", e.text));
-        }
-        out.push('\n');
+/// Determine whether a path has a supported audio/video extension (case-insensitive).
+pub fn is_audio_file(path: &Path) -> bool {
+    if let Some(ext) = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_lowercase())
+    {
+        let exts = [
+            "mp3", "wav", "m4a", "mp4", "aac", "flac", "ogg", "wma", "webm", "mkv", "mov", "avi",
+            "m4b", "3gp", "opus", "aiff", "alac",
+        ];
+        return exts.contains(&ext.as_str());
     }
-    out
+    false
 }
 
 /// Sort entries by (start, end) and reassign sequential ids starting at 0.
@@ -113,7 +79,7 @@ pub fn write_output_files(dir: &Path, base_name: &str, out: &OutputRoot) -> Resu
         writeln!(&mut toml_file)?;
     }
 
-    let srt_str = render_srt(&out.items);
+    let srt_str = crate::render_srt(&out.items);
     let mut srt_file = File::create(&srt_path)
         .with_context(|| format!("Failed to create output file: {}", srt_path.display()))?;
     srt_file.write_all(srt_str.as_bytes())?;
@@ -263,5 +229,20 @@ mod tests {
         // Missing file errors with context
         let err = load_json_transcript(&tmp.path().join("nope.json")).unwrap_err();
         assert!(format!("{err:#}").contains("Failed to open"));
+    }
+
+    #[test]
+    fn test_is_json_file_and_is_audio_file() {
+        assert!(is_json_file(Path::new("foo.json")));
+        assert!(is_json_file(Path::new("foo.JSON")));
+        assert!(!is_json_file(Path::new("foo.txt")));
+        assert!(!is_json_file(Path::new("foo")));
+
+        assert!(is_audio_file(Path::new("a.mp3")));
+        assert!(is_audio_file(Path::new("b.WAV")));
+        assert!(is_audio_file(Path::new("c.m4a")));
+        assert!(is_audio_file(Path::new("video.mp4")));
+        assert!(is_audio_file(Path::new("clip.WEBM")));
+        assert!(!is_audio_file(Path::new("d.txt")));
     }
 }
