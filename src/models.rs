@@ -726,8 +726,8 @@ fn download_one_model(client: &Client, models_dir: &Path, entry: &ModelEntry) ->
     Ok(())
 }
 
-// Update locally stored models by re-downloading when size or hash does not match online metadata.
-fn qlog_size_comparison(fname: &str, local: u64, remote: u64) -> bool {
+/// Log a size comparison and return whether the local file is up to date.
+fn size_up_to_date(fname: &str, local: u64, remote: u64) -> bool {
     if local == remote {
         ilog!("{} appears up-to-date by size ({}).", fname, remote);
         true
@@ -823,7 +823,7 @@ pub fn update_local_models() -> Result<()> {
             } else if remote.size > 0 {
                 match std::fs::metadata(&path) {
                     Ok(md) => {
-                        if qlog_size_comparison(&fname, md.len(), remote.size) {
+                        if size_up_to_date(&fname, md.len(), remote.size) {
                             continue;
                         }
                         download_one_model(&client, models_dir, remote)?;
