@@ -318,49 +318,80 @@ pub fn normalize_lang_code(input: &str) -> Option<String> {
 }
 
 pub fn find_model_file() -> Result<PathBuf> {
-    if let Ok(path) = env::var("WHISPER_MODEL") {
-        let p = PathBuf::from(path);
+    let whisper_model = env::var("WHISPER_MODEL").ok().map(PathBuf::from);
+    let models_dir = models_dir_path();
+    let cache_dir = crate::model_manager::Paths::resolve()
+        .ok()
+        .map(|paths| paths.cache_dir);
+    Ok(find_model_file_in(
+        whisper_model.as_deref(),
+        &models_dir,
+        cache_dir.as_deref(),
+    )?)
+}
+
+/// Model discovery with explicit inputs, so tests do not have to touch the
+/// process environment.
+///
+/// `whisper_model` is the `WHISPER_MODEL` override (must point at an existing
+/// file), `models_dir` the primary transcription models dir, and `cache_dir`
+/// the optional ModelManager cache dir used as a fallback so models installed
+/// via `polyscribe models add` are found.
+fn find_model_file_in(
+    whisper_model: Option<&Path>,
+    models_dir: &Path,
+    cache_dir: Option<&Path>,
+) -> anyhow::Result<PathBuf> {
+    if let Some(p) = whisper_model {
         if !p.exists() {
             return Err(anyhow!(
                 "WHISPER_MODEL points to a non-existing path: {}",
                 p.display()
-            )
-            .into());
+            ));
         }
         if !p.is_file() {
             return Err(anyhow!(
                 "WHISPER_MODEL must point to a file, but is not: {}",
                 p.display()
-            )
-            .into());
+            ));
         }
-        return Ok(p);
+        return Ok(p.to_path_buf());
     }
 
-    let models_dir = models_dir_path();
     if models_dir.exists() && !models_dir.is_dir() {
         return Err(anyhow!(
             "Models path exists but is not a directory: {}",
             models_dir.display()
-        )
-        .into());
+        ));
     }
-    std::fs::create_dir_all(&models_dir).with_context(|| {
+    std::fs::create_dir_all(models_dir).with_context(|| {
         format!(
             "Failed to ensure models dir exists: {}",
             models_dir.display()
         )
     })?;
 
-    let mut candidates = scan_model_dir(&models_dir)?;
+    let mut candidates = scan_model_dir(models_dir)
+        .with_context(|| format!("Failed to read models dir: {}", models_dir.display()))?;
 
     // Fall back to the ModelManager cache dir so models installed via
-    // `polyscribe models add` are found by transcribe.
+    // `polyscribe models add` are found by transcribe. A missing cache dir
+    // simply holds no models and must not mask the actionable "no model"
+    // message; genuine I/O failures on an existing dir still propagate.
     if candidates.is_empty()
-        && let Ok(paths) = crate::model_manager::Paths::resolve()
-        && paths.cache_dir != models_dir
+        && let Some(cache_dir) = cache_dir
+        && cache_dir != models_dir
     {
-        candidates = scan_model_dir(&paths.cache_dir)?;
+        match scan_model_dir(cache_dir) {
+            Ok(found) => candidates = found,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(e).context(format!(
+                    "Failed to read models dir: {}",
+                    cache_dir.display()
+                ));
+            }
+        }
     }
 
     if candidates.is_empty() {
@@ -368,8 +399,7 @@ pub fn find_model_file() -> Result<PathBuf> {
             "No Whisper model files (*.bin) found in {}. \
              Please download a model (polyscribe models add) or set WHISPER_MODEL.",
             models_dir.display()
-        )
-        .into());
+        ));
     }
 
     candidates.sort_by_key(|(size, _)| *size);
@@ -378,11 +408,9 @@ pub fn find_model_file() -> Result<PathBuf> {
 }
 
 /// List `*.bin` model files in a directory as (size, path) pairs.
-fn scan_model_dir(dir: &Path) -> Result<Vec<(u64, PathBuf)>> {
+fn scan_model_dir(dir: &Path) -> std::io::Result<Vec<(u64, PathBuf)>> {
     let mut candidates = Vec::new();
-    for entry in std::fs::read_dir(dir)
-        .with_context(|| format!("Failed to read models dir: {}", dir.display()))?
-    {
+    for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
 
@@ -549,5 +577,202 @@ mod tests {
         assert_eq!(normalize_lang_code("AUTO"), None);
         assert_eq!(normalize_lang_code("  \t  "), None);
         assert_eq!(normalize_lang_code("zh"), Some("zh".to_string()));
+    }
+
+    // --- model discovery (find_model_file_in) ---
+
+    fn write_file(path: &Path, bytes: &[u8]) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    /// Assert the actionable "no model installed" error (audit F-01): it must
+    /// name the models dir, hint at `models add` / `WHISPER_MODEL`, and never
+    /// surface as a raw filesystem error.
+    fn assert_actionable_no_model_error(err: anyhow::Error, models_dir: &Path) {
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("No Whisper model files (*.bin) found"),
+            "unexpected error: {msg}"
+        );
+        assert!(
+            msg.contains(models_dir.to_str().unwrap()),
+            "error should name the models dir: {msg}"
+        );
+        assert!(msg.contains("polyscribe models add"), "missing hint: {msg}");
+        assert!(msg.contains("WHISPER_MODEL"), "missing hint: {msg}");
+        assert!(
+            !msg.contains("Failed to read models dir"),
+            "filesystem error must not mask the actionable message: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_find_model_file_empty_models_dir_no_cache_dir_is_actionable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let models_dir = tmp.path().join("models");
+        std::fs::create_dir_all(&models_dir).unwrap();
+
+        let err = find_model_file_in(None, &models_dir, None).unwrap_err();
+        assert_actionable_no_model_error(err, &models_dir);
+    }
+
+    #[test]
+    fn test_find_model_file_missing_cache_dir_does_not_mask_actionable_error() {
+        // F-01 regression: the ModelManager cache-dir fallback used to
+        // propagate the read_dir error when the cache dir did not exist.
+        let tmp = tempfile::tempdir().unwrap();
+        let models_dir = tmp.path().join("models");
+        std::fs::create_dir_all(&models_dir).unwrap();
+        let missing_cache = tmp.path().join("missing-cache");
+
+        let err = find_model_file_in(None, &models_dir, Some(&missing_cache)).unwrap_err();
+        assert_actionable_no_model_error(err, &models_dir);
+    }
+
+    #[test]
+    fn test_find_model_file_empty_cache_dir_is_actionable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let models_dir = tmp.path().join("models");
+        std::fs::create_dir_all(&models_dir).unwrap();
+        let cache_dir = tmp.path().join("cache");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+
+        let err = find_model_file_in(None, &models_dir, Some(&cache_dir)).unwrap_err();
+        assert_actionable_no_model_error(err, &models_dir);
+    }
+
+    #[test]
+    fn test_find_model_file_falls_back_to_cache_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let models_dir = tmp.path().join("models");
+        std::fs::create_dir_all(&models_dir).unwrap();
+        let cache_dir = tmp.path().join("cache");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        let model = cache_dir.join("ggml-tiny.en.bin");
+        write_file(&model, b"fake model bytes");
+        // Non-.bin files are ignored.
+        write_file(&cache_dir.join("notes.txt"), b"not a model");
+
+        let found = find_model_file_in(None, &models_dir, Some(&cache_dir)).unwrap();
+        assert_eq!(found, model);
+    }
+
+    #[test]
+    fn test_find_model_file_picks_largest_bin_in_models_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let models_dir = tmp.path().join("models");
+        std::fs::create_dir_all(&models_dir).unwrap();
+        write_file(&models_dir.join("small.bin"), &[0u8; 8]);
+        let large = models_dir.join("large.bin");
+        write_file(&large, &[0u8; 64]);
+        write_file(&models_dir.join("ignore.txt"), b"not a model");
+        // A subdirectory named *.bin is not a candidate.
+        std::fs::create_dir_all(models_dir.join("dir.bin")).unwrap();
+
+        let found = find_model_file_in(None, &models_dir, None).unwrap();
+        assert_eq!(found, large);
+    }
+
+    #[test]
+    fn test_find_model_file_creates_missing_models_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let models_dir = tmp.path().join("fresh-models");
+
+        let err = find_model_file_in(None, &models_dir, None).unwrap_err();
+        assert!(models_dir.is_dir(), "models dir should be created");
+        assert_actionable_no_model_error(err, &models_dir);
+    }
+
+    #[test]
+    fn test_find_model_file_models_dir_must_be_a_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file_path = tmp.path().join("not-a-dir");
+        write_file(&file_path, b"x");
+
+        let err = find_model_file_in(None, &file_path, None).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("exists but is not a directory"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_find_model_file_whisper_model_missing_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("nope.bin");
+
+        let err = find_model_file_in(Some(&missing), &tmp.path().join("models"), None).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("WHISPER_MODEL points to a non-existing path"),
+            "unexpected error: {msg}"
+        );
+        assert!(
+            msg.contains("nope.bin"),
+            "error should name the path: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_find_model_file_whisper_model_must_be_a_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("model-dir");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let err = find_model_file_in(Some(&dir), &tmp.path().join("models"), None).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("WHISPER_MODEL must point to a file"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_find_model_file_whisper_model_override_wins() {
+        let tmp = tempfile::tempdir().unwrap();
+        let model = tmp.path().join("custom.bin");
+        write_file(&model, b"fake model bytes");
+
+        // The explicit override is used even when no models dir exists.
+        let found = find_model_file_in(Some(&model), &tmp.path().join("missing"), None).unwrap();
+        assert_eq!(found, model);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_find_model_file_unreadable_cache_dir_error_is_preserved() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Root bypasses file permission checks, so the assertion is skipped.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("SKIPPED: running as root, permission bits are not enforced");
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let models_dir = tmp.path().join("models");
+        std::fs::create_dir_all(&models_dir).unwrap();
+        let cache_dir = tmp.path().join("cache");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        std::fs::set_permissions(&cache_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = find_model_file_in(None, &models_dir, Some(&cache_dir));
+        // Restore permissions so the tempdir can be cleaned up.
+        std::fs::set_permissions(&cache_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let err = result.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("Failed to read models dir"),
+            "genuine I/O failures must stay visible: {msg}"
+        );
+        assert!(
+            msg.contains(cache_dir.to_str().unwrap()),
+            "error should name the cache dir: {msg}"
+        );
     }
 }

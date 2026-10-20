@@ -27,5 +27,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 ### Fixed
 - `plugins run --json` collided with the global `--json` output flag, making the subcommand unparseable; the payload flag is now `--payload`.
 - `transcribe` previously validated inputs and reported success without transcribing anything.
+- First run (audit F-01): with no model installed and no model cache dir, `transcribe` now shows the actionable "No Whisper model files found ... download a model (polyscribe models add) or set WHISPER_MODEL" message instead of `Failed to read models dir: ...`. A missing cache dir counts as "no cached models"; genuine I/O errors on existing directories still propagate.
+- Tests: model-discovery unit tests (empty/missing dirs, cache-dir fallback, `WHISPER_MODEL` overrides, unreadable cache dir) and CLI first-run integration tests running the binary with an isolated environment.
 
 
