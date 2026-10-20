@@ -1,158 +1,121 @@
-This is a prioritized, actionable backlog to guide short-term improvements. Each item includes a short description,
-priority, estimated effort, suggested owner(s), and acceptance criteria. Use this as a living document — update status
-and estimates as you make progress.
+# PolyScribe backlog
 
-## How to use
+Prioritized, realistic backlog for a small local-first CLI. Priorities:
+P0 = do next, P1 = near-term, P2 = medium-term, P3 = optional / ideas.
+Effort: S = hours, M = days, L = weeks.
 
-- Priority: P0 (highest), P1, P2.
-- Effort: S (small, <1 week), M (medium, 1–2 weeks), L (large, 2+ weeks).
-- Owner: team or role that should pick it up.
-- AC: acceptance criteria — what "done" looks like.
-
----
-
-## 1. Populate this README & quickstart (P0, S)
-
-- Description: Add a short README and a "Getting started" quickstart with environment setup, how to run locally, and how
-  to run tests.
-- Owner: Developer / Docs
-- Effort: S
-- Acceptance criteria:
-    - README contains: purpose, prerequisites, install steps, run steps, test command.
-    - Quickstart reproduces a working dev environment on a fresh machine.
-    - One developer verified it following the instructions.
-
-## 2. First-run onboarding & demo data (P0, M)
-
-- Description: Add an interactive first-run walkthrough and an optional "Try demo" mode that populates safe sample data.
-- Owner: Product / Frontend
-- Effort: M
-- Acceptance criteria:
-    - First-run modal guides through top 3 core actions.
-    - Demo mode populates a non-destructive dataset and can be reset.
-    - Onboarding completion is tracked via an analytics event.
-
-## 3. Instrument basic analytics & events (P0, M)
-
-- Description: Add event instrumentation for key flows to measure adoption and drop-offs (onboarding, critical actions,
-  errors).
-- Owner: Engineering / Product
-- Effort: M
-- Acceptance criteria:
-    - Tracking for: onboarding_start, onboarding_complete, core_action_X, error_high_priority.
-    - Events include a minimal context payload (non-sensitive): user-agnostic session id, event name, timestamp.
-    - Privacy opt-out toggle exists in settings.
-
-## 4. Improve error messages & in-app help (P0, S)
-
-- Description: Replace generic errors with actionable messages and add a Help/FAQ entry and a "Report a bug" flow that
-  optionally attaches logs.
-- Owner: Frontend / QA
-- Effort: S
-- Acceptance criteria:
-    - Top 10 most common errors have specific messages and suggested next steps.
-    - A simple Help view exists with links to docs and a one-click "Report issue" action that collects an anonymized log
-      bundle (with consent).
-
-## 5. Add basic structured logging & correlation IDs (P1, M)
-
-- Description: Implement structured logs and add correlation IDs to sessions/requests to make debugging easier from logs
-  and error reports.
-- Owner: Backend / Infra
-- Effort: M
-- Acceptance criteria:
-    - Logs emitted in JSON or consistent structured format.
-    - Correlation ID generated per session/request and included in error logs and any bug reports.
-    - Document how to search logs by correlation ID.
-
-## 6. CI: run tests, linter, and basic checks on PRs (P1, M)
-
-- Description: Add a CI pipeline that runs unit tests, a formatter/linter, and basic build checks for each PR.
-- Owner: DevOps / Engineering
-- Effort: M
-- Acceptance criteria:
-    - PRs are blocked from merging if tests fail or the linter/format checks fail.
-    - Developers can run the same checks locally via a single script or Makefile.
-
-## 7. Add automated end-to-end tests for critical flow(s) (P1, L)
-
-- Description: Create a small suite of E2E tests that cover onboarding, signing in (if relevant), and the main user
-  flow.
-- Owner: QA / Engineering
-- Effort: L
-- Acceptance criteria:
-    - At least 3 E2E tests added and green in CI.
-    - Tests are stable and do not flake more than a predefined threshold.
-    - Documentation on how to run and update tests exists.
-
-## 8. Performance profiling and one optimization (P2, M)
-
-- Description: Run a lightweight performance profile (CPU/memory) on the key path and implement one low-effort,
-  high-impact optimization (e.g., lazy-load a heavy module or add caching).
-- Owner: Engineering
-- Effort: M
-- Acceptance criteria:
-    - Profile data collected and summarized (top 5 hotspots).
-    - One optimization implemented with measurable improvement (e.g., 20% faster load or 30% memory reduction).
-    - Benchmarks recorded in the repo.
-
-## 9. Output templates: add predefined template flags (P1, M)
-
-- Description: Provide CLI/UI flags to select from a set of predefined output templates (for example: json, csv, pretty,
-  report, compact). Each template controls formatting, default file extension, and optional post-processing steps.
-- Owner: Product / CLI / Frontend
-- Effort: M
-- Acceptance criteria:
-    - Add flag (CLI): `--template <template_name>` and (UI) template selector in export dialog.
-    - Supported predefined templates documented (name, description, default extension).
-    - Template selection influences output format and default file extension automatically.
-    - Invalid template name produces a helpful error with a list of valid templates.
-    - Unit tests cover at least 3 templates and the error path.
-
-## 10. Output templates: add custom template paste & output extension flag (P1, M)
-
-- Description: Allow users to paste/provide a custom template (e.g., Mustache, Go template, or simple placeholder
-  format) and specify output extension via flag or UI input. Support local validation and a preview before writing
-  output.
-- Owner: Product / CLI / Frontend
-- Effort: M
-- Acceptance criteria:
-    - Add flag (CLI): `--custom-template-file <path>` or `--template-paste '<template_string>'`.
-    - Add flag (CLI): `--out-ext <extension>` and (UI) an "Output filename/extension" input.
-    - Validate custom template at input time and show errors if malformed (with line/column hints when possible).
-    - Provide a preview option that renders a sample using demo data before saving.
-    - When `--out-ext` is provided, output file uses that extension; otherwise, use template's default extension or
-      fallback to `.txt`.
-    - Security: sanitize template execution context to avoid code injection; document limitations.
-    - Tests cover custom-template validation, preview rendering, and output extension resolution.
+This file distinguishes four kinds of items: **defects/debt** (things that
+are wrong or fragile today), **missing functionality** (features users ask
+for), **optional improvements** (nice-to-have polish), and **long-term
+ideas** (directional, not scheduled).
 
 ---
 
-## Nice-to-have / Future items (P2)
+## Defects and technical debt
 
-- Accessibility audit and WCAG fixes (keyboard nav, aria labels).
-- Feature flagging support for experimental rollouts.
-- Localization prep (externalize strings).
-- Observability: dashboards for errors, latency, adoption (define SLOs).
+### D1. Global stderr silencing is not thread-safe (P1, S)
+- `with_suppressed_stderr`/`StderrSilencer` (src/lib.rs) redirects the
+  process-global fd 2 with unsafe libc calls around whisper model load and
+  inference. It is correct for the current single-threaded CLI, but any
+  future parallel transcription (see F3) would race on it.
+- AC: either gate transcription to a single thread with a comment, or replace
+  fd redirection with whisper-rs's logging hooks (ggml log callback) so no
+  global state is touched.
 
-## Developer experience & contributor friendliness
+### D2. `.last_model` side-effect file is a workaround (P2, S)
+- Model selection writes `.last_model` into the models dir and a `Drop` guard
+  in main.rs removes it at exit. If the process is killed, the file leaks
+  (harmless, but sloppy).
+- AC: keep last-used model in memory only, or accept the file and document it.
 
-- Improve README and contributing guide
-    - Add quickstart, environment setup, testing and release instructions.
-- Add a clear issue/tracking template
-    - Bug template, feature-request template, and PR template to standardize contributions.
-- Developer tooling
-    - Add static analysis tools, formatters, and pre-commit hooks to keep code consistent.
+### D3. Long-file memory usage is O(duration) (P2, M)
+- ffmpeg output is streamed into a `Vec<f32>` (64 KiB/s of audio), but
+  `whisper_full` still needs the whole sample buffer in memory (~230 MiB per
+  hour of audio). True streaming/chunked transcription would cap memory.
+- AC: prototype chunked transcription with a long fixture; measure peak RSS
+  before/after.
 
-## Quality of life improvements (UX polish)
+### D4. Interrupted downloads can leave `.part` files (P2, S)
+- A killed `--download-models`/`--update-models` run leaves
+  `ggml-*.bin.part` behind. They are ignored on later runs but never cleaned.
+- AC: remove stale `.part` files at the start of a download/update run.
 
-- Dark mode and theme support
-- Keyboard-driven shortcuts and quick actions
-- Contextual undo/redo where destructive actions exist
-- Consistent microcopy and confirmation flows for destructive operations
+### D5. Language table is hand-maintained (P3, S)
+- `normalize_lang_code` (src/lib.rs) maps a fixed list of names/codes.
+- AC: replace with a maintained crate (e.g. `isolang`) or generate the table
+  from whisper.cpp's language list; keep the existing unit tests passing.
 
-## Low-effort, high-value items to implement now
+### D6. No end-to-end transcription test (P1, M)
+- Tests cover the JSON merge path and the ffmpeg failure path, but nothing
+  runs a real transcription (needs a model + ffmpeg + audio fixture).
+- AC: add a CI job that downloads the `tiny` model once (cached), generates a
+  short WAV with ffmpeg, transcribes it, and asserts a non-empty transcript
+  with sane timestamps.
 
-- Add a single “Contact support / report a bug” action that attaches logs and repro steps (with user consent).
-- Add usage telemetry opt-in/opt-out and a privacy policy summary.
-- Implement a lightweight feature-usage dashboard to see which features customers actually use.
+### D7. Non-Unix TTY detection is a heuristic (P2, S)
+- `stdin_is_tty` on non-Unix only checks `CI`/`GITHUB_ACTIONS` env vars.
+- AC: at least verify behavior on Windows; consider the `is-terminal` crate.
+
+## Missing functionality
+
+### F1. Automatic speaker diarization (P2, M)
+- Speaker labels are manual (`--set-speaker-names`). The downloader already
+  lists `tinydiarize` models, but transcription never uses diarization.
+- AC: wire whisper.cpp diarization (`whisper_full` with diarize params) behind
+  a `--diarize` flag; label segments by speaker turn; keep manual labels as
+  the default. Document clearly that diarization is approximate.
+
+### F2. Live microphone / URL ingestion (P3, M)
+- Only local files are supported today.
+- AC (future): mic capture via `cpal`, YouTube/URL ingestion via `yt-dlp` as
+  an external tool. Requires the engine/CLI split to be exercised first.
+
+### F3. Parallel transcription of multiple files (P3, M)
+- Inputs are processed sequentially. A `--jobs N` flag could parallelize
+  across files (bounded by memory; see D1/D3).
+- AC: `--jobs` with deterministic output ordering; unit test for ordering.
+
+### F4. Additional output formats (P3, S)
+- Outputs are JSON, TOML, and SRT. A `--out-format json|srt|toml|all` selector
+  would avoid writing formats the user does not need.
+- AC: flag with validation and per-format tests; stdout stays JSON-only.
+
+## Optional improvements
+
+### O1. CI matrix beyond Linux (P2, S)
+- CI runs on Linux only. Add macOS/Windows jobs (CPU builds) once D7 is
+  verified locally.
+- AC: green CI on three OSes for build + clippy + test.
+
+### O2. Transcription progress indication (P3, S)
+- Today only log lines mark progress. A simple "processed Xs of Ys audio"
+  line (or indicatif progress bar, stderr only) would help on long files.
+- AC: progress line updates at most ~1/s; suppressed by `-q` and when not a TTY.
+
+### O3. Structured logging behind a flag (P3, S)
+- Logs are plain text on stderr. A `--log-format json` option would help
+  machine parsing in CI.
+- AC: JSON lines with level/timestamp/message; default stays plain text.
+
+### O4. Configuration file (P3, M)
+- Options come from flags/env only. A `polyscribe.toml` (XDG config) could
+  hold defaults (language, backend, models dir).
+- AC: flags override config; config overrides defaults; documented schema.
+
+## Long-term ideas (not scheduled)
+
+### L1. Workspace split for additional frontends (L)
+- Today: one crate with `src/lib.rs` (engine) + `src/main.rs` (CLI). When a
+  TUI or GUI frontend appears, split into `polyscribe-core` (engine: backends,
+  models, output) and thin frontend crates. Do not split before there is a
+  second consumer.
+
+### L2. Additional STT engines (L)
+- `TranscribeBackend` (src/backend.rs) is the extension point. Future engines
+  (remote APIs, other local models) implement the trait and register in
+  `select_backend`.
+
+### L3. Integration with ytt / STT-CLI (L)
+- Long-term direction: a reusable speech-processing foundation (file, mic,
+  URL ingestion; multiple engines; CLI/TUI/GUI frontends). See the
+  modernization report for a concrete integration assessment.
