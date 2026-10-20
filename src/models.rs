@@ -88,14 +88,6 @@ fn human_size(bytes: u64) -> String {
     }
 }
 
-fn to_hex_lower(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        s.push_str(&format!("{b:02x}"));
-    }
-    s
-}
-
 fn expected_sha_from_sibling(s: &HFSibling) -> Option<String> {
     if let Some(h) = &s.sha256 {
         return Some(h.to_lowercase());
@@ -104,11 +96,11 @@ fn expected_sha_from_sibling(s: &HFSibling) -> Option<String> {
         if let Some(h) = &lfs.sha256 {
             return Some(h.to_lowercase());
         }
-        if let Some(oid) = &lfs.oid {
-            // e.g. "sha256:abcdef..."
-            if let Some(rest) = oid.strip_prefix("sha256:") {
-                return Some(rest.to_lowercase().to_string());
-            }
+        // e.g. "sha256:abcdef..."
+        if let Some(oid) = &lfs.oid
+            && let Some(rest) = oid.strip_prefix("sha256:")
+        {
+            return Some(rest.to_lowercase().to_string());
         }
     }
     None
@@ -132,10 +124,10 @@ fn expected_sha_from_tree(s: &HFTreeItem) -> Option<String> {
         if let Some(h) = &lfs.sha256 {
             return Some(h.to_lowercase());
         }
-        if let Some(oid) = &lfs.oid {
-            if let Some(rest) = oid.strip_prefix("sha256:") {
-                return Some(rest.to_lowercase().to_string());
-            }
+        if let Some(oid) = &lfs.oid
+            && let Some(rest) = oid.strip_prefix("sha256:")
+        {
+            return Some(rest.to_lowercase().to_string());
         }
     }
     None
@@ -294,10 +286,10 @@ fn hf_fetch_repo_models(client: &Client, repo: &'static str) -> Result<Vec<Model
     for m in out.iter_mut() {
         if m.size == 0 || m.sha256.is_none() {
             let (sz, sha) = fill_meta_via_head(&m.repo, &m.name);
-            if m.size == 0 {
-                if let Some(s) = sz {
-                    m.size = s;
-                }
+            if m.size == 0
+                && let Some(s) = sz
+            {
+                m.size = s;
             }
             if m.sha256.is_none() {
                 m.sha256 = sha;
@@ -366,9 +358,8 @@ fn format_model_list(models: &[ModelEntry]) -> String {
     let idx_width = std::cmp::max(2, models.len().to_string().len());
     let name_width = models.iter().map(|m| m.name.len()).max().unwrap_or(0);
 
-    let mut idx = 1usize;
     let mut current = String::new();
-    for m in models.iter() {
+    for (idx, m) in models.iter().enumerate() {
         if m.base != current {
             current = m.base.clone();
             out.push('\n');
@@ -377,14 +368,13 @@ fn format_model_list(models: &[ModelEntry]) -> String {
         // Format without hash and with aligned columns
         out.push_str(&format!(
             "  {i:>iw$}) {name:<nw$} [{repo} | {size}]\n",
-            i = idx,
+            i = idx + 1,
             iw = idx_width,
             name = m.name,
             nw = name_width,
             repo = m.repo,
             size = human_size(m.size),
         ));
-        idx += 1;
     }
     out.push_str(
         "\nEnter selection by indices (e.g., 1 3 5-7), or 'all', '*' for all, 'q' to cancel.\n",
@@ -457,13 +447,8 @@ fn prompt_select_models_two_stage(models: &[ModelEntry]) -> Result<Vec<ModelEntr
             let listing = format_model_list(&filtered);
             eprint!("{listing}");
 
-            // Build index map for filtered list
-            let mut index_map: Vec<usize> = Vec::with_capacity(filtered.len());
-            let mut idx = 1usize;
-            for (pos, _m) in filtered.iter().enumerate() {
-                index_map.push(pos);
-                idx += 1;
-            }
+            // Selection indices are 1-based into `filtered`.
+            let idx = filtered.len() + 1;
             // Second prompt: sub-type selection
             loop {
                 eprint!("Selection: ");
@@ -486,15 +471,18 @@ fn prompt_select_models_two_stage(models: &[ModelEntry]) -> Result<Vec<ModelEntr
                             continue;
                         }
                         if let Some((a, b)) = part.split_once('-') {
-                            if let (Ok(ia), Ok(ib)) = (a.parse::<usize>(), b.parse::<usize>()) {
-                                if ia >= 1 && ib < idx && ia <= ib {
-                                    selected.extend(ia..=ib);
-                                }
+                            if let (Ok(ia), Ok(ib)) = (a.parse::<usize>(), b.parse::<usize>())
+                                && ia >= 1
+                                && ib < idx
+                                && ia <= ib
+                            {
+                                selected.extend(ia..=ib);
                             }
-                        } else if let Ok(i) = part.parse::<usize>() {
-                            if i >= 1 && i < idx {
-                                selected.push(i);
-                            }
+                        } else if let Ok(i) = part.parse::<usize>()
+                            && i >= 1
+                            && i < idx
+                        {
+                            selected.push(i);
                         }
                     }
                 }
@@ -506,7 +494,7 @@ fn prompt_select_models_two_stage(models: &[ModelEntry]) -> Result<Vec<ModelEntr
                 }
                 let chosen: Vec<ModelEntry> = selected
                     .into_iter()
-                    .map(|i| filtered[index_map[i - 1]].clone())
+                    .map(|i| filtered[i - 1].clone())
                     .collect();
                 return Ok(chosen);
             }
@@ -532,7 +520,7 @@ fn compute_file_sha256_hex(path: &Path) -> Result<String> {
         }
         hasher.update(&buf[..n]);
     }
-    Ok(to_hex_lower(&hasher.finalize()))
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 /// Interactively list and download Whisper models from Hugging Face into the models directory.
@@ -553,12 +541,12 @@ pub fn run_interactive_model_downloader() -> Result<()> {
     );
     let models = fetch_all_models(&client)?;
     if models.is_empty() {
-        qlog!("No models found on Hugging Face listing. Please try again later.");
+        ilog!("No models found on Hugging Face listing. Please try again later.");
         return Ok(());
     }
     let selected = prompt_select_models_two_stage(&models)?;
     if selected.is_empty() {
-        qlog!("No selection. Aborting download.");
+        ilog!("No selection. Aborting download.");
         return Ok(());
     }
     for m in selected {
@@ -579,10 +567,10 @@ fn download_one_model(client: &Client, models_dir: &Path, entry: &ModelEntry) ->
             match compute_file_sha256_hex(&final_path) {
                 Ok(local_hash) => {
                     if local_hash.eq_ignore_ascii_case(expected) {
-                        qlog!("Model {} is up-to-date (hash match).", final_path.display());
+                        ilog!("Model {} is up-to-date (hash match).", final_path.display());
                         return Ok(());
                     } else {
-                        qlog!(
+                        ilog!(
                             "Local model {} hash differs from online (local {}.., online {}..). Updating...",
                             final_path.display(),
                             &local_hash[..std::cmp::min(8, local_hash.len())],
@@ -591,7 +579,7 @@ fn download_one_model(client: &Client, models_dir: &Path, entry: &ModelEntry) ->
                     }
                 }
                 Err(e) => {
-                    qlog!(
+                    ilog!(
                         "Warning: failed to hash existing {}: {}. Will re-download to ensure correctness.",
                         final_path.display(),
                         e
@@ -602,14 +590,14 @@ fn download_one_model(client: &Client, models_dir: &Path, entry: &ModelEntry) ->
             match std::fs::metadata(&final_path) {
                 Ok(md) => {
                     if md.len() == entry.size {
-                        qlog!(
+                        ilog!(
                             "Model {} appears up-to-date by size ({}).",
                             final_path.display(),
                             entry.size
                         );
                         return Ok(());
                     } else {
-                        qlog!(
+                        ilog!(
                             "Local model {} size ({}) differs from online ({}). Updating...",
                             final_path.display(),
                             md.len(),
@@ -618,7 +606,7 @@ fn download_one_model(client: &Client, models_dir: &Path, entry: &ModelEntry) ->
                     }
                 }
                 Err(e) => {
-                    qlog!(
+                    ilog!(
                         "Warning: failed to stat existing {}: {}. Will re-download to ensure correctness.",
                         final_path.display(),
                         e
@@ -626,7 +614,7 @@ fn download_one_model(client: &Client, models_dir: &Path, entry: &ModelEntry) ->
                 }
             }
         } else {
-            qlog!(
+            ilog!(
                 "Model {} exists but remote hash/size not available; will download to verify contents.",
                 final_path.display()
             );
@@ -638,7 +626,7 @@ fn download_one_model(client: &Client, models_dir: &Path, entry: &ModelEntry) ->
     if let Ok(base_dir) = env::var("POLYSCRIBE_MODELS_BASE_COPY_DIR") {
         let src_path = std::path::Path::new(&base_dir).join(format!("ggml-{}.bin", entry.name));
         if src_path.exists() {
-            qlog!("Copying {} from {}...", entry.name, src_path.display());
+            ilog!("Copying {} from {}...", entry.name, src_path.display());
             let tmp_path = models_dir.join(format!("ggml-{}.bin.part", entry.name));
             if tmp_path.exists() {
                 let _ = std::fs::remove_file(&tmp_path);
@@ -669,7 +657,7 @@ fn download_one_model(client: &Client, models_dir: &Path, entry: &ModelEntry) ->
             }
             std::fs::rename(&tmp_path, &final_path)
                 .with_context(|| format!("Failed to move into place: {}", final_path.display()))?;
-            qlog!("Saved: {}", final_path.display());
+            ilog!("Saved: {}", final_path.display());
             return Ok(());
         }
     }
@@ -678,7 +666,7 @@ fn download_one_model(client: &Client, models_dir: &Path, entry: &ModelEntry) ->
         "https://huggingface.co/{}/resolve/main/ggml-{}.bin",
         entry.repo, entry.name
     );
-    qlog!(
+    ilog!(
         "Downloading {} ({} | {})...",
         entry.name,
         human_size(entry.size),
@@ -711,7 +699,7 @@ fn download_one_model(client: &Client, models_dir: &Path, entry: &ModelEntry) ->
     }
     file.flush().ok();
 
-    let got = to_hex_lower(&hasher.finalize());
+    let got = format!("{:x}", hasher.finalize());
     if let Some(expected) = &entry.sha256 {
         if got != expected.to_lowercase() {
             let _ = std::fs::remove_file(&tmp_path);
@@ -723,7 +711,7 @@ fn download_one_model(client: &Client, models_dir: &Path, entry: &ModelEntry) ->
             ));
         }
     } else {
-        qlog!(
+        ilog!(
             "Warning: no SHA-256 available for {}. Skipping verification.",
             entry.name
         );
@@ -734,19 +722,21 @@ fn download_one_model(client: &Client, models_dir: &Path, entry: &ModelEntry) ->
     }
     std::fs::rename(&tmp_path, &final_path)
         .with_context(|| format!("Failed to move into place: {}", final_path.display()))?;
-    qlog!("Saved: {}", final_path.display());
+    ilog!("Saved: {}", final_path.display());
     Ok(())
 }
 
 // Update locally stored models by re-downloading when size or hash does not match online metadata.
 fn qlog_size_comparison(fname: &str, local: u64, remote: u64) -> bool {
     if local == remote {
-        qlog!("{} appears up-to-date by size ({}).", fname, remote);
+        ilog!("{} appears up-to-date by size ({}).", fname, remote);
         true
     } else {
-        qlog!(
+        ilog!(
             "{} size {} differs from remote {}. Updating...",
-            fname, local, remote
+            fname,
+            local,
+            remote
         );
         false
     }
@@ -814,10 +804,10 @@ pub fn update_local_models() -> Result<()> {
                 match compute_file_sha256_hex(&path) {
                     Ok(local_hash) => {
                         if local_hash.eq_ignore_ascii_case(expected) {
-                            qlog!("{} is up-to-date.", fname);
+                            ilog!("{} is up-to-date.", fname);
                             continue;
                         } else {
-                            qlog!(
+                            ilog!(
                                 "{} hash differs (local {}.. != remote {}..). Updating...",
                                 fname,
                                 &local_hash[..std::cmp::min(8, local_hash.len())],
@@ -826,7 +816,7 @@ pub fn update_local_models() -> Result<()> {
                         }
                     }
                     Err(e) => {
-                        qlog!("Warning: failed hashing {}: {}. Re-downloading.", fname, e);
+                        ilog!("Warning: failed hashing {}: {}. Re-downloading.", fname, e);
                     }
                 }
                 download_one_model(&client, models_dir, remote)?;
@@ -839,15 +829,15 @@ pub fn update_local_models() -> Result<()> {
                         download_one_model(&client, models_dir, remote)?;
                     }
                     Err(e) => {
-                        qlog!("Warning: stat failed for {}: {}. Updating...", fname, e);
+                        ilog!("Warning: stat failed for {}: {}. Updating...", fname, e);
                         download_one_model(&client, models_dir, remote)?;
                     }
                 }
             } else {
-                qlog!("No remote hash/size for {}. Skipping.", fname);
+                ilog!("No remote hash/size for {}. Skipping.", fname);
             }
         } else {
-            qlog!("No remote metadata for {}. Skipping.", fname);
+            ilog!("No remote metadata for {}. Skipping.", fname);
         }
     }
 
@@ -870,7 +860,11 @@ pub fn pick_best_local_model(models_dir: &Path) -> Option<std::path::PathBuf> {
         if !fname.starts_with("ggml-") || !fname.ends_with(".bin") {
             continue;
         }
-        let size = std::fs::metadata(&path).ok()?.len();
+        // Skip files whose metadata cannot be read instead of aborting the scan.
+        let Ok(md) = std::fs::metadata(&path) else {
+            continue;
+        };
+        let size = md.len();
         match &mut best {
             None => best = Some((size, fname, path.clone())),
             Some((bsize, bname, bpath)) => {
@@ -921,7 +915,11 @@ pub fn ensure_model_available_noninteractive(model_name: &str) -> Result<std::pa
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::{Mutex, OnceLock};
     use tempfile::tempdir;
+
+    /// Serializes tests that mutate process environment variables.
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     #[test]
     fn test_format_model_list_spacing_and_structure() {
@@ -1027,8 +1025,6 @@ mod tests {
 
     #[test]
     fn test_update_local_models_offline_copy_and_manifest() {
-        use std::sync::{Mutex, OnceLock};
-        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
 
         let tmp_models = tempdir().unwrap();
@@ -1083,6 +1079,7 @@ mod tests {
     #[test]
     #[cfg(debug_assertions)]
     fn test_models_dir_path_default_debug_and_env_override_models_mod() {
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
         // clear override
         unsafe {
             std::env::remove_var("POLYSCRIBE_MODELS_DIR");
@@ -1103,6 +1100,7 @@ mod tests {
     #[test]
     #[cfg(not(debug_assertions))]
     fn test_models_dir_path_default_release_models_mod() {
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
         unsafe {
             std::env::remove_var("POLYSCRIBE_MODELS_DIR");
         }

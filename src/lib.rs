@@ -4,9 +4,6 @@
 #![forbid(elided_lifetimes_in_paths)]
 #![forbid(unused_must_use)]
 #![deny(missing_docs)]
-// Lint policy for incremental refactor toward 2024:
-// - Keep basic clippy warnings enabled; skip pedantic/nursery for now (will revisit in step 7).
-// - cargo lints can be re-enabled later once codebase is tidied.
 #![warn(clippy::all)]
 //! PolyScribe library: business logic and core types.
 //!
@@ -220,78 +217,47 @@ macro_rules! dlog {
     }}
 }
 
-/// Backward-compatibility: map old qlog! to ilog!
-#[macro_export]
-macro_rules! qlog {
-    ($($arg:tt)*) => {{ $crate::ilog!($($arg)*); }}
-}
-
 use anyhow::{Context, Result, anyhow};
-use chrono::Local;
 use std::env;
 use std::fs::create_dir_all;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 #[cfg(unix)]
 use libc::{O_WRONLY, close, dup, dup2, open};
 
-/// Re-export backend module (GPU/CPU selection and transcription).
+/// Transcription backend selection and transcription glue.
 pub mod backend;
-/// Re-export models module (model listing/downloading/updating).
+/// Model discovery, selection, and downloading logic.
 pub mod models;
+/// Transcript data types and output rendering (JSON, TOML, SRT).
+pub mod output;
 
-/// Transcript entry for a single segment.
-#[derive(Debug, serde::Serialize, Clone)]
-pub struct OutputEntry {
-    /// Sequential id in output ordering.
-    pub id: u64,
-    /// Speaker label associated with the segment.
-    pub speaker: String,
-    /// Start time in seconds.
-    pub start: f64,
-    /// End time in seconds.
-    pub end: f64,
-    /// Text content.
-    pub text: String,
+pub use output::{
+    OutputEntry, OutputRoot, date_prefix, format_srt_time, load_json_transcript, render_srt,
+    sort_and_reindex, write_json_stdout, write_output_files,
+};
+
+/// Determine whether a path has a JSON transcript extension (case-insensitive).
+pub fn is_json_file(path: &Path) -> bool {
+    matches!(path.extension().and_then(|s| s.to_str()).map(|s| s.to_lowercase()), Some(ext) if ext == "json")
 }
 
-/// Return a YYYY-MM-DD date prefix string for output file naming.
-pub fn date_prefix() -> String {
-    Local::now().format("%Y-%m-%d").to_string()
-}
-
-/// Format a floating-point number of seconds as SRT timestamp (HH:MM:SS,mmm).
-pub fn format_srt_time(seconds: f64) -> String {
-    let total_ms = (seconds * 1000.0).round() as i64;
-    let ms = total_ms % 1000;
-    let total_secs = total_ms / 1000;
-    let s = total_secs % 60;
-    let m = (total_secs / 60) % 60;
-    let h = total_secs / 3600;
-    format!("{h:02}:{m:02}:{s:02},{ms:03}")
-}
-
-/// Render a list of transcript entries to SRT format.
-pub fn render_srt(items: &[OutputEntry]) -> String {
-    let mut out = String::new();
-    for (i, e) in items.iter().enumerate() {
-        let idx = i + 1;
-        out.push_str(&format!("{idx}\n"));
-        out.push_str(&format!(
-            "{} --> {}\n",
-            format_srt_time(e.start),
-            format_srt_time(e.end)
-        ));
-        if !e.speaker.is_empty() {
-            out.push_str(&format!("{}: {}\n", e.speaker, e.text));
-        } else {
-            out.push_str(&format!("{}\n", e.text));
-        }
-        out.push('\n');
+/// Determine whether a path has a supported audio/video extension (case-insensitive).
+pub fn is_audio_file(path: &Path) -> bool {
+    if let Some(ext) = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_lowercase())
+    {
+        let exts = [
+            "mp3", "wav", "m4a", "mp4", "aac", "flac", "ogg", "wma", "webm", "mkv", "mov", "avi",
+            "m4b", "3gp", "opus", "aiff", "alac",
+        ];
+        return exts.contains(&ext.as_str());
     }
-    out
+    false
 }
 
 /// Determine the default models directory, honoring POLYSCRIBE_MODELS_DIR override.
@@ -305,21 +271,42 @@ pub fn models_dir_path() -> PathBuf {
     if cfg!(debug_assertions) {
         return PathBuf::from("models");
     }
-    if let Ok(xdg) = env::var("XDG_DATA_HOME") {
-        if !xdg.is_empty() {
-            return PathBuf::from(xdg).join("polyscribe").join("models");
-        }
+    if let Ok(xdg) = env::var("XDG_DATA_HOME")
+        && !xdg.is_empty()
+    {
+        return PathBuf::from(xdg).join("polyscribe").join("models");
     }
-    if let Ok(home) = env::var("HOME") {
-        if !home.is_empty() {
-            return PathBuf::from(home)
-                .join(".local")
-                .join("share")
-                .join("polyscribe")
-                .join("models");
-        }
+    if let Ok(home) = env::var("HOME")
+        && !home.is_empty()
+    {
+        return PathBuf::from(home)
+            .join(".local")
+            .join("share")
+            .join("polyscribe")
+            .join("models");
     }
     PathBuf::from("models")
+}
+
+/// List local Whisper model files (`ggml-*.bin` / any `*.bin`) in a directory.
+fn list_model_candidates(models_dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    let rd = std::fs::read_dir(models_dir)
+        .with_context(|| format!("Failed to read models directory: {}", models_dir.display()))?;
+    for entry in rd {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_file()
+            && let Some(ext) = path
+                .extension()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_lowercase())
+            && ext == "bin"
+        {
+            candidates.push(path);
+        }
+    }
+    Ok(candidates)
 }
 
 /// Normalize a language identifier to a short ISO code when possible.
@@ -429,24 +416,7 @@ pub fn find_model_file() -> Result<PathBuf> {
         }
     }
 
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    let rd = std::fs::read_dir(models_dir)
-        .with_context(|| format!("Failed to read models directory: {}", models_dir.display()))?;
-    for entry in rd {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_file() {
-            if let Some(ext) = path
-                .extension()
-                .and_then(|s| s.to_str())
-                .map(|s| s.to_lowercase())
-            {
-                if ext == "bin" {
-                    candidates.push(path);
-                }
-            }
-        }
-    }
+    let mut candidates = list_model_candidates(models_dir)?;
 
     if candidates.is_empty() {
         // No models found: prompt interactively (TTY only)
@@ -471,25 +441,7 @@ pub fn find_model_file() -> Result<PathBuf> {
             if let Err(e) = models::run_interactive_model_downloader() {
                 elog!("Downloader failed: {:#}", e);
             }
-            candidates.clear();
-            let rd2 = std::fs::read_dir(models_dir).with_context(|| {
-                format!("Failed to read models directory: {}", models_dir.display())
-            })?;
-            for entry in rd2 {
-                let entry = entry?;
-                let path = entry.path();
-                if path.is_file() {
-                    if let Some(ext) = path
-                        .extension()
-                        .and_then(|s| s.to_str())
-                        .map(|s| s.to_lowercase())
-                    {
-                        if ext == "bin" {
-                            candidates.push(path);
-                        }
-                    }
-                }
-            }
+            candidates = list_model_candidates(models_dir)?;
         }
     }
 
@@ -542,8 +494,15 @@ pub fn find_model_file() -> Result<PathBuf> {
 }
 
 /// Decode an input media file to 16kHz mono f32 PCM using ffmpeg available on PATH.
+///
+/// Samples are streamed from ffmpeg's stdout as they are produced, so peak
+/// memory stays close to the PCM buffer itself instead of additionally holding
+/// the raw byte stream. A trailing partial sample (if any) is dropped.
 pub fn decode_audio_to_pcm_f32_ffmpeg(audio_path: &Path) -> Result<Vec<f32>> {
-    let output = match Command::new("ffmpeg")
+    let mut child = Command::new("ffmpeg")
+        .arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("error")
         .arg("-i")
         .arg(audio_path)
         .arg("-f")
@@ -553,45 +512,59 @@ pub fn decode_audio_to_pcm_f32_ffmpeg(audio_path: &Path) -> Result<Vec<f32>> {
         .arg("-ar")
         .arg("16000")
         .arg("pipe:1")
-        .output()
-    {
-        Ok(o) => o,
-        Err(e) => {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                return Err(anyhow!(
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            if e.kind() == io::ErrorKind::NotFound {
+                anyhow!(
                     "ffmpeg not found on PATH. Please install ffmpeg and ensure it is available."
-                ));
+                )
             } else {
-                return Err(anyhow!(
+                anyhow!(
                     "Failed to execute ffmpeg for {}: {}",
+                    audio_path.display(),
+                    e
+                )
+            }
+        })?;
+
+    let stdout = child.stdout.take().expect("ffmpeg stdout was piped");
+    let mut stderr = child.stderr.take().expect("ffmpeg stderr was piped");
+    // Drain stderr on a separate thread so ffmpeg can never deadlock on a full pipe.
+    let stderr_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stderr.read_to_end(&mut buf);
+        buf
+    });
+
+    let mut pcm = Vec::new();
+    let mut reader = io::BufReader::new(stdout);
+    let mut sample = [0u8; 4];
+    loop {
+        match reader.read_exact(&mut sample) {
+            Ok(()) => pcm.push(f32::from_le_bytes(sample)),
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(anyhow!(
+                    "Failed to read ffmpeg output for {}: {}",
                     audio_path.display(),
                     e
                 ));
             }
         }
-    };
-    if !output.status.success() {
+    }
+
+    let status = child.wait().context("Failed to wait for ffmpeg")?;
+    let stderr_bytes = stderr_reader.join().unwrap_or_default();
+    if !status.success() {
         return Err(anyhow!(
             "ffmpeg failed for {}: {}",
             audio_path.display(),
-            String::from_utf8_lossy(&output.stderr)
+            String::from_utf8_lossy(&stderr_bytes)
         ));
     }
-    let bytes = output.stdout;
-    if bytes.len() % 4 != 0 {
-        let truncated = bytes.len() - (bytes.len() % 4);
-        let mut v = Vec::with_capacity(truncated / 4);
-        for chunk in bytes[..truncated].chunks_exact(4) {
-            let arr = [chunk[0], chunk[1], chunk[2], chunk[3]];
-            v.push(f32::from_le_bytes(arr));
-        }
-        Ok(v)
-    } else {
-        let mut v = Vec::with_capacity(bytes.len() / 4);
-        for chunk in bytes.chunks_exact(4) {
-            let arr = [chunk[0], chunk[1], chunk[2], chunk[3]];
-            v.push(f32::from_le_bytes(arr));
-        }
-        Ok(v)
-    }
+    Ok(pcm)
 }

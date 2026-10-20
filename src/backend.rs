@@ -236,6 +236,47 @@ pub fn select_backend(requested: BackendKind, verbose: bool) -> Result<Selection
     })
 }
 
+/// Collect transcript entries for a single input file.
+///
+/// Audio/video inputs are transcribed through `backend`; JSON transcripts are
+/// loaded from disk. The `speaker` label is attached to every produced entry.
+/// Progress is logged to stderr (suppressed by quiet mode); a transcription
+/// failure is logged when running interactively and then propagated.
+pub fn collect_entries_for_input(
+    backend: &dyn TranscribeBackend,
+    path: &Path,
+    speaker: &str,
+    lang_opt: Option<&str>,
+    gpu_layers: Option<u32>,
+) -> Result<Vec<OutputEntry>> {
+    if crate::is_audio_file(path) {
+        crate::ilog!("Processing file: {} ...", path.display());
+        match backend.transcribe(path, speaker, lang_opt, gpu_layers) {
+            Ok(items) => {
+                crate::ilog!("done");
+                Ok(items)
+            }
+            Err(e) => {
+                if !crate::is_no_interaction() && crate::stdin_is_tty() {
+                    crate::elog!("{:#}", e);
+                }
+                Err(e)
+            }
+        }
+    } else if crate::is_json_file(path) {
+        let mut entries = crate::output::load_json_transcript(path)?;
+        for e in &mut entries {
+            e.speaker = speaker.to_string();
+        }
+        Ok(entries)
+    } else {
+        Err(anyhow!(
+            "Unsupported input type (expected .json or audio media): {}",
+            path.display()
+        ))
+    }
+}
+
 // Internal helper: transcription using whisper-rs with CPU/GPU (depending on build features)
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn transcribe_with_whisper_rs(
@@ -250,14 +291,15 @@ pub(crate) fn transcribe_with_whisper_rs(
         .and_then(|s| s.to_str())
         .map(|s| s.contains(".en.") || s.ends_with(".en.bin"))
         .unwrap_or(false);
-    if let Some(lang) = lang_opt {
-        if is_en_only && lang != "en" {
-            return Err(anyhow!(
-                "Selected model is English-only ({}), but a non-English language hint '{}' was provided. Please use a multilingual model or set WHISPER_MODEL.",
-                model.display(),
-                lang
-            ));
-        }
+    if let Some(lang) = lang_opt
+        && is_en_only
+        && lang != "en"
+    {
+        return Err(anyhow!(
+            "Selected model is English-only ({}), but a non-English language hint '{}' was provided. Please use a multilingual model or set WHISPER_MODEL.",
+            model.display(),
+            lang
+        ));
     }
     let model_str = model
         .to_str()
