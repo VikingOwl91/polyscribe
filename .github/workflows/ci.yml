@@ -21,15 +21,8 @@ jobs:
       - name: Install components
         run: rustup component add clippy rustfmt
 
-      # ffmpeg is needed by the ffmpeg-dependent tests (first-run model
-      # discovery, ffmpeg failure path, e2e transcription) and is no longer
-      # preinstalled on current ubuntu-latest runners.
-      - name: Ensure ffmpeg
-        run: |
-          if ! command -v ffmpeg >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y ffmpeg
-          fi
+      - name: Install system dependencies
+        run: bash ./scripts/ci/install-system-deps.sh
 
       - name: Format
         run: cargo fmt --all -- --check
@@ -53,6 +46,9 @@ jobs:
       - name: Set up Rust (MSRV)
         uses: dtolnay/rust-toolchain@1.88
 
+      - name: Install system dependencies
+        run: bash ./scripts/ci/install-system-deps.sh
+
       - name: Check
         run: cargo check --workspace --all-targets --locked
 
@@ -69,12 +65,8 @@ jobs:
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@v2
 
-      - name: Ensure ffmpeg
-        run: |
-          if ! command -v ffmpeg >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y ffmpeg
-          fi
+      - name: Install system dependencies
+        run: bash ./scripts/ci/install-system-deps.sh
 
       # ggml-tiny.en.bin, pinned by SHA-256 (upstream whisper.cpp hash).
       - name: Cache Whisper model
