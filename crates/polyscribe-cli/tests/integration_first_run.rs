@@ -41,6 +41,12 @@ fn write_silent_wav(path: &Path, seconds: f32) {
     fs::write(path, bytes).unwrap();
 }
 
+/// True when ffmpeg is available on PATH. The first-run scenario needs the
+/// CLI to get past ffmpeg decoding to reach model discovery.
+fn ffmpeg_available() -> bool {
+    Command::new("ffmpeg").arg("-version").output().is_ok()
+}
+
 /// An isolated first-run environment: empty models dir, missing cache dir,
 /// empty HOME, and a valid (silent) audio input.
 struct FirstRunEnv {
@@ -52,7 +58,16 @@ struct FirstRunEnv {
     audio: PathBuf,
 }
 
-fn setup() -> FirstRunEnv {
+/// Build the isolated environment, or `None` (with a note) when ffmpeg is
+/// not on PATH. This matches the skip convention of the other
+/// ffmpeg-dependent tests; CI installs ffmpeg so the tests run there.
+fn setup() -> Option<FirstRunEnv> {
+    if !ffmpeg_available() {
+        eprintln!(
+            "NOT RUN: ffmpeg is not available on PATH; skipping first-run model discovery test"
+        );
+        return None;
+    }
     let tmp = tempfile::tempdir().unwrap();
     let models_dir = tmp.path().join("models");
     fs::create_dir_all(&models_dir).unwrap();
@@ -63,13 +78,13 @@ fn setup() -> FirstRunEnv {
     fs::create_dir_all(&home).unwrap();
     let audio = tmp.path().join("input.wav");
     write_silent_wav(&audio, 0.25);
-    FirstRunEnv {
+    Some(FirstRunEnv {
         _tmp: tmp,
         models_dir,
         cache_root,
         home,
         audio,
-    }
+    })
 }
 
 impl FirstRunEnv {
@@ -102,7 +117,9 @@ fn stderr_string(output: &Output) -> String {
 
 #[test]
 fn first_run_without_model_shows_actionable_message() {
-    let env = setup();
+    let Some(env) = setup() else {
+        return;
+    };
     let output = env
         .transcribe()
         .output()
@@ -133,7 +150,9 @@ fn first_run_without_model_shows_actionable_message() {
 
 #[test]
 fn first_run_with_missing_whisper_model_path_is_actionable() {
-    let env = setup();
+    let Some(env) = setup() else {
+        return;
+    };
     let output = env
         .transcribe()
         .env("WHISPER_MODEL", env.home.join("missing-model.bin"))
@@ -150,7 +169,9 @@ fn first_run_with_missing_whisper_model_path_is_actionable() {
 
 #[test]
 fn first_run_with_whisper_model_pointing_at_directory_is_actionable() {
-    let env = setup();
+    let Some(env) = setup() else {
+        return;
+    };
     let output = env
         .transcribe()
         .env("WHISPER_MODEL", &env.models_dir)

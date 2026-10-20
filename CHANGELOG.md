@@ -9,6 +9,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 ### Added
 - Tests (audit F-05): end-to-end transcription smoke test (`crates/polyscribe-cli/tests/e2e_transcribe.rs`) that runs the built CLI on the committed `speech.wav` fixture with a real Whisper model on CPU, asserting successful execution, valid JSON/TOML/SRT output, and sane timestamps. It skips itself with a note unless `POLYSCRIBE_E2E_MODEL` points at a model file, so the workspace suite still needs no model.
 - CI: new `e2e-transcribe` job that downloads a SHA-256-pinned `ggml-tiny.en.bin` (cached; the checksum is verified on every run so unverified cache contents are never trusted) and executes the e2e smoke test against the compiled CLI.
+- CI: the `test` and `e2e-transcribe` jobs install ffmpeg when it is missing (current ubuntu-latest runners no longer ship it), so ffmpeg-dependent tests run instead of skipping; the first-run model-discovery tests skip themselves with a note when ffmpeg is absent locally.
 
 ### Changed
 - Docs: Replace `--download-models`/`--update-models` flags with `models download`/`models update` subcommands in `README.md`, `docs/usage.md`, and `docs/development.md`.

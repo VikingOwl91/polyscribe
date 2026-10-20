@@ -29,6 +29,7 @@ Example GitHub Actions job (outline; the actual workflow is `.github/workflows/c
 Notes
 
 - The test suite builds whisper.cpp (cmake + a C/C++ toolchain + libclang, all preinstalled on GitHub runners) and uses the fixtures in `crates/polyscribe-cli/tests/fixtures/`.
+- The `test` and `e2e-transcribe` jobs install ffmpeg when it is missing (current ubuntu-latest runners no longer ship it); ffmpeg-dependent tests skip themselves with a note when it is absent.
 - The e2e transcription test skips itself (with a note) when `POLYSCRIBE_E2E_MODEL` is unset, so `cargo test --workspace` still needs no model; the `e2e-transcribe` job provides one.
 - The reference plugin (`plugins/polyscribe-plugin-tubescribe`) is a workspace member, so it is built and exercised by the test job.
 - For GPU features, set up appropriate runners and add `--features polyscribe-cli/gpu-cuda` or `--features polyscribe-cli/gpu-hip` where applicable.

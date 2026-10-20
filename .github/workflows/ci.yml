@@ -21,6 +21,16 @@ jobs:
       - name: Install components
         run: rustup component add clippy rustfmt
 
+      # ffmpeg is needed by the ffmpeg-dependent tests (first-run model
+      # discovery, ffmpeg failure path, e2e transcription) and is no longer
+      # preinstalled on current ubuntu-latest runners.
+      - name: Ensure ffmpeg
+        run: |
+          if ! command -v ffmpeg >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y ffmpeg
+          fi
+
       - name: Format
         run: cargo fmt --all -- --check
 
