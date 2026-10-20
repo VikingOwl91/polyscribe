@@ -1,6 +1,6 @@
 # PolyScribe
 
-PolyScribe is a fast, local-first CLI for transcribing audio/video and merging existing JSON transcripts, with a plugin system for extensibility. It uses whisper.cpp (via the `whisper-rs` crate) under the hood, can discover and download Whisper models automatically (with caching and integrity verification), and supports CPU and optional GPU builds (CUDA, ROCm/HIP).
+PolyScribe is a fast, local-first CLI for transcribing audio/video and merging existing JSON transcripts, with a plugin system for extensibility. It uses whisper.cpp (via the `whisper-rs` crate) under the hood, can discover and download Whisper models automatically (with caching and integrity verification), and supports CPU and optional, experimental GPU builds (CUDA, ROCm/HIP).
 
 ## Features
 
@@ -9,7 +9,7 @@ PolyScribe is a fast, local-first CLI for transcribing audio/video and merging e
 - **Transcript merging**: merge multiple JSON transcripts, or merge and also keep per-file outputs.
 - **Model management**: `polyscribe models` subcommands to list, add, remove, verify, update, search, and download models, with a manifest cache, concurrent ranged downloads, and SHA-256 verification.
 - **Plugin system**: extensible via JSON-RPC (NDJSON) plugins discovered on `PATH` or in the XDG plugin directory.
-- **GPU backends**: CPU, CUDA, and ROCm/HIP; availability is a build-time property (`--features gpu-cuda` / `--features gpu-hip`).
+- **GPU backends**: CPU, CUDA, and ROCm/HIP; availability is a build-time property (`--features gpu-cuda` / `--features gpu-hip`). GPU support is experimental and not exercised in CI.
 - **Outputs**: JSON, TOML, and SRT; speaker labels via per-file prompts (manual labeling only — there is no automatic speaker diarization).
 - **Machine-readable mode**: global `--json` flag for scripts.
 
@@ -27,6 +27,12 @@ PolyScribe is a fast, local-first CLI for transcribing audio/video and merging e
 - A C/C++ toolchain, `cmake`, and `libclang` (needed to build whisper.cpp and its Rust bindings)
 - `ffmpeg` available on `PATH` at runtime
 - Optional for GPU builds at build and run time: CUDA toolkit/driver (NVIDIA) or ROCm (AMD)
+
+## Supported platforms
+
+- **Linux x86_64**: the tested platform. CI builds the workspace, runs the test suite and transcribes real audio on it, on CPU.
+- **macOS**: expected to work on CPU, but untested in CI.
+- **Windows**: not supported. The workspace does not compile on Windows yet.
 
 ## Installation
 
@@ -85,9 +91,9 @@ Run `polyscribe -h` or `polyscribe <subcommand> -h` for the full reference; `doc
 
 ## Notes and limitations
 
-- **No Vulkan backend**: PolyScribe does not wire up whisper.cpp's Vulkan backend; `--gpu-backend vulkan` is rejected. CUDA and HIP builds are supported.
+- **No Vulkan backend**: PolyScribe does not wire up whisper.cpp's Vulkan backend; `--gpu-backend vulkan` is rejected.
+- **GPU support is experimental**: the CUDA and HIP backends are wired up at build time, but no GPU runtime is exercised in CI. Availability is a build-time property: build with `--features gpu-cuda` / `--features gpu-hip` and install the matching runtime; `--gpu-backend auto` picks CUDA → HIP → CPU among the backends compiled in.
 - **No automatic speaker diarization**: speaker labels are assigned manually per input file (`--set-speaker-names`); the downloader lists `tinydiarize` models but diarization is not wired into transcription.
-- GPU availability is a build-time property: build with `--features gpu-cuda` / `--features gpu-hip` and install the matching runtime; `--gpu-backend auto` picks CUDA → HIP → CPU among the backends compiled in.
 
 ## Development
 

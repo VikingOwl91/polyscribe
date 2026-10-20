@@ -121,6 +121,7 @@ Model files live in `$XDG_CACHE_HOME/polyscribe/models` (override `POLYSCRIBE_CA
 
 ## Notes
 
-- GPU support is a build-time property: build with `--features gpu-cuda` or `--features gpu-hip` (see development.md). A Vulkan backend is not wired up; `--gpu-backend vulkan` is rejected.
+- Supported platforms: Linux x86_64 is the tested platform (CI builds, tests and transcribes on CPU there). macOS is expected to work but untested. Windows is not supported and does not compile.
+- GPU support is a build-time property: build with `--features gpu-cuda` or `--features gpu-hip` (see development.md). A Vulkan backend is not wired up; `--gpu-backend vulkan` is rejected. GPU support is experimental and no GPU runtime is exercised in CI.
 - English-only models cannot be used with non-English language hints.
 - Network access happens only for the `models` subcommands (Hugging Face over HTTPS). `transcribe`, `plugins`, `completions`, and `man` are fully offline.
