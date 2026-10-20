@@ -610,27 +610,29 @@ mod tests {
         assert!(is_audio_file(Path::new("animation.avi")));
     }
 
+    /// Set the test-only backend detection overrides explicitly. Setting a
+    /// variable (even to "0") forces the value, which keeps these tests
+    /// independent of the cargo features the suite is compiled with.
+    fn force_backend_env(cuda: bool, hip: bool) {
+        unsafe {
+            std_env::set_var("POLYSCRIBE_TEST_FORCE_CUDA", if cuda { "1" } else { "0" });
+            std_env::set_var("POLYSCRIBE_TEST_FORCE_HIP", if hip { "1" } else { "0" });
+        }
+    }
+
     #[test]
     fn test_backend_auto_order_prefers_cuda_then_hip_then_cpu() {
         let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
-        // Clear overrides
-        unsafe {
-            std_env::remove_var("POLYSCRIBE_TEST_FORCE_CUDA");
-            std_env::remove_var("POLYSCRIBE_TEST_FORCE_HIP");
-        }
         // No GPU -> CPU
+        force_backend_env(false, false);
         let sel = select_backend(BackendKind::Auto, false).unwrap();
         assert_eq!(sel.chosen, BackendKind::Cpu);
         // HIP only
-        unsafe {
-            std_env::set_var("POLYSCRIBE_TEST_FORCE_HIP", "1");
-        }
+        force_backend_env(false, true);
         let sel = select_backend(BackendKind::Auto, false).unwrap();
         assert_eq!(sel.chosen, BackendKind::Hip);
         // CUDA preferred over HIP
-        unsafe {
-            std_env::set_var("POLYSCRIBE_TEST_FORCE_CUDA", "1");
-        }
+        force_backend_env(true, true);
         let sel = select_backend(BackendKind::Auto, false).unwrap();
         assert_eq!(sel.chosen, BackendKind::Cuda);
         // Cleanup
@@ -644,25 +646,18 @@ mod tests {
     fn test_backend_explicit_missing_errors() {
         let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
         // Ensure all off
-        unsafe {
-            std_env::remove_var("POLYSCRIBE_TEST_FORCE_CUDA");
-            std_env::remove_var("POLYSCRIBE_TEST_FORCE_HIP");
-        }
+        force_backend_env(false, false);
         assert!(select_backend(BackendKind::Cuda, false).is_err());
         assert!(select_backend(BackendKind::Hip, false).is_err());
         // Turn on CUDA only
-        unsafe {
-            std_env::set_var("POLYSCRIBE_TEST_FORCE_CUDA", "1");
-        }
+        force_backend_env(true, false);
         assert!(select_backend(BackendKind::Cuda, false).is_ok());
         // Turn on HIP only
-        unsafe {
-            std_env::remove_var("POLYSCRIBE_TEST_FORCE_CUDA");
-            std_env::set_var("POLYSCRIBE_TEST_FORCE_HIP", "1");
-        }
+        force_backend_env(false, true);
         assert!(select_backend(BackendKind::Hip, false).is_ok());
         // Cleanup
         unsafe {
+            std_env::remove_var("POLYSCRIBE_TEST_FORCE_CUDA");
             std_env::remove_var("POLYSCRIBE_TEST_FORCE_HIP");
         }
     }
