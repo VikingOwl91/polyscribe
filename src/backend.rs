@@ -359,22 +359,13 @@ pub(crate) fn transcribe_with_whisper_rs(
             .map_err(|e| anyhow!("Whisper full() failed: {:?}", e))
     })?;
 
-    let num_segments = state
-        .full_n_segments()
-        .map_err(|e| anyhow!("Failed to get segments: {:?}", e))?;
     let mut items = Vec::new();
-    for i in 0..num_segments {
-        let text = state
-            .full_get_segment_text(i)
+    for seg in state.as_iter() {
+        let text = seg
+            .to_str()
             .map_err(|e| anyhow!("Failed to get segment text: {:?}", e))?;
-        let t0 = state
-            .full_get_segment_t0(i)
-            .map_err(|e| anyhow!("Failed to get segment t0: {:?}", e))?;
-        let t1 = state
-            .full_get_segment_t1(i)
-            .map_err(|e| anyhow!("Failed to get segment t1: {:?}", e))?;
-        let start = (t0 as f64) * 0.01;
-        let end = (t1 as f64) * 0.01;
+        let start = (seg.start_timestamp() as f64) * 0.01;
+        let end = (seg.end_timestamp() as f64) * 0.01;
         items.push(OutputEntry {
             id: 0,
             speaker: speaker.to_string(),

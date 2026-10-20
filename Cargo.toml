@@ -2,6 +2,8 @@
 name = "polyscribe"
 version = "0.1.0"
 edition = "2024"
+# MSRV: matches whisper-rs-sys 0.15 (the newest supported whisper.cpp bindings).
+rust-version = "1.88"
 license = "MIT"
 license-file = "LICENSE"
 
@@ -26,8 +28,10 @@ toml = "0.8"
 chrono = { version = "0.4", features = ["clock"] }
 reqwest = { version = "0.12", features = ["blocking", "json"] }
 sha2 = "0.10"
-# whisper-rs is always used (CPU-only by default); GPU features map onto it
-whisper-rs = { git = "https://github.com/tazz4843/whisper-rs" }
+# whisper-rs is always used (CPU-only by default); GPU features map onto it.
+# Versioned crates.io release (not an unpinned git rev) keeps builds reproducible
+# via Cargo.lock checksums.
+whisper-rs = "0.16"
 libc = "0.2"
 
 [dev-dependencies]
