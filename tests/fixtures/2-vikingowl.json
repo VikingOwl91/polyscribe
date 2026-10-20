@@ -1,0 +1,6 @@
+{
+  "segments": [
+    { "start": 0.0, "end": 1.5, "text": "Viking speaks first" },
+    { "start": 3.0, "end": 4.0, "text": "Viking speaks again" }
+  ]
+}

@@ -73,6 +73,6 @@ fn aux_man_outputs_roff() {
     assert!(
         looks_like_roff,
         "man output does not look like a roff manpage; got: {}",
-        &stdout.lines().take(3).collect::<Vec<_>>().join(" | ")
+        stdout.lines().take(3).collect::<Vec<_>>().join(" | ")
     );
 }

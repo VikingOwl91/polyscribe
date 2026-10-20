@@ -1,12 +1,19 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025 <COPYRIGHT HOLDER>. All rights reserved.
 
-use std::fs;
-use std::io::Read;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+//! CLI integration tests.
+//!
+//! These tests run the built binary end to end against the deterministic
+//! fixtures in `tests/fixtures`. They never download models, need a GPU, or
+//! touch the network. One test exercises the ffmpeg failure path and is
+//! skipped with a note when ffmpeg is not on PATH.
 
-use chrono::Local;
+use std::ffi::OsStr;
+use std::fs;
+use std::io::Read as _;
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -24,75 +31,92 @@ struct OutputRoot {
     items: Vec<OutputEntry>,
 }
 
-struct TestDir(PathBuf);
-impl TestDir {
-    fn new() -> Self {
-        let mut p = std::env::temp_dir();
-        let ts = Local::now().format("%Y%m%d%H%M%S%3f");
-        let pid = std::process::id();
-        p.push(format!("polyscribe_test_{}_{}", pid, ts));
-        fs::create_dir_all(&p).expect("Failed to create temp dir");
-        TestDir(p)
-    }
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-impl Drop for TestDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
+fn bin() -> &'static str {
+    env!("CARGO_BIN_EXE_polyscribe")
 }
 
-fn manifest_path(relative: &str) -> PathBuf {
-    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    p.push(relative);
-    p
+/// Path to a committed test fixture.
+fn fixture(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join(name)
+}
+
+/// Run the binary with arguments and capture output.
+fn run(args: &[&OsStr]) -> std::process::Output {
+    Command::new(bin())
+        .args(args)
+        .output()
+        .expect("failed to spawn polyscribe")
+}
+
+fn stdout_string(output: &std::process::Output) -> String {
+    String::from_utf8(output.stdout.clone()).expect("stdout not UTF-8")
+}
+
+fn stderr_string(output: &std::process::Output) -> String {
+    String::from_utf8(output.stderr.clone()).expect("stderr not UTF-8")
+}
+
+fn parse_stdout_json(output: &std::process::Output) -> OutputRoot {
+    serde_json::from_str(&stdout_string(output)).expect("stdout is not valid transcript JSON")
+}
+
+/// Expected merged transcript of fixtures 1-s0wlz.json + 2-vikingowl.json,
+/// sorted by start time with sequential ids.
+fn assert_merged_1_and_2(root: &OutputRoot) {
+    let texts: Vec<&str> = root.items.iter().map(|e| e.text.as_str()).collect();
+    assert_eq!(
+        texts,
+        [
+            "Viking speaks first",
+            "S0wlz speaks second",
+            "Viking speaks again",
+            "S0wlz speaks last"
+        ]
+    );
+    let ids: Vec<u64> = root.items.iter().map(|e| e.id).collect();
+    assert_eq!(ids, [0, 1, 2, 3], "ids must be reassigned sequentially");
+    let speakers: std::collections::HashSet<&str> =
+        root.items.iter().map(|e| e.speaker.as_str()).collect();
+    assert_eq!(speakers, ["s0wlz", "vikingowl"].into_iter().collect());
+    let starts: Vec<f64> = root.items.iter().map(|e| e.start).collect();
+    assert!(
+        starts.windows(2).all(|w| w[0] <= w[1]),
+        "items must be sorted by start time"
+    );
 }
 
 #[test]
 fn cli_writes_separate_outputs_by_default() {
-    let exe = env!("CARGO_BIN_EXE_polyscribe");
-    // Use a project-local temp dir for stability
-    let out_dir = manifest_path("target/tmp/itest_sep_out");
-    let _ = fs::remove_dir_all(&out_dir);
-    fs::create_dir_all(&out_dir).unwrap();
+    let out_dir = tempfile::tempdir().unwrap();
+    let output = run(&[
+        fixture("1-s0wlz.json").as_os_str(),
+        fixture("2-vikingowl.json").as_os_str(),
+        OsStr::new("-o"),
+        out_dir.path().as_os_str(),
+    ]);
+    assert!(
+        output.status.success(),
+        "CLI did not exit successfully: {}",
+        stderr_string(&output)
+    );
 
-    let input1 = manifest_path("input/1-s0wlz.json");
-    let input2 = manifest_path("input/2-vikingowl.json");
-
-    // Ensure output directory exists (program should create it as well, but we pre-create to avoid platform quirks)
-    let _ = fs::create_dir_all(&out_dir);
-
-    // Default behavior (no -m): separate outputs
-    let status = Command::new(exe)
-        .arg(input1.as_os_str())
-        .arg(input2.as_os_str())
-        .arg("-o")
-        .arg(out_dir.as_os_str())
-        .status()
-        .expect("failed to spawn polyscribe");
-    assert!(status.success(), "CLI did not exit successfully");
-
-    // Find the created files (one set per input) in the output directory
-    let entries = match fs::read_dir(&out_dir) {
-        Ok(e) => e,
-        Err(_) => return, // If directory not found, skip further checks (environment-specific flake)
-    };
-    let mut json_paths: Vec<std::path::PathBuf> = Vec::new();
-    let mut count_toml = 0;
-    let mut count_srt = 0;
-    for e in entries {
-        let p = e.unwrap().path();
+    let mut json_paths: Vec<PathBuf> = Vec::new();
+    let mut toml_count = 0;
+    let mut srt_count = 0;
+    for entry in fs::read_dir(out_dir.path()).unwrap() {
+        let p = entry.unwrap().path();
         if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
             if name.ends_with(".json") {
                 json_paths.push(p.clone());
             }
             if name.ends_with(".toml") {
-                count_toml += 1;
+                toml_count += 1;
             }
             if name.ends_with(".srt") {
-                count_srt += 1;
+                srt_count += 1;
             }
         }
     }
@@ -101,124 +125,161 @@ fn cli_writes_separate_outputs_by_default() {
         "expected at least 2 JSON files, found {}",
         json_paths.len()
     );
-    assert!(
-        count_toml >= 2,
-        "expected at least 2 TOML files, found {}",
-        count_toml
-    );
-    assert!(
-        count_srt >= 2,
-        "expected at least 2 SRT files, found {}",
-        count_srt
+    assert!(toml_count >= 2, "expected at least 2 TOML files");
+    assert!(srt_count >= 2, "expected at least 2 SRT files");
+
+    // The JSON output for fixture 1 parses and carries the default speaker.
+    let json_path = json_paths
+        .iter()
+        .find(|p| {
+            p.file_name()
+                .and_then(|s| s.to_str())
+                .map(|n| n.contains("_1-s0wlz."))
+                .unwrap_or(false)
+        })
+        .expect("missing JSON output for fixture 1");
+    let content = fs::read_to_string(json_path).unwrap();
+    let root: OutputRoot = serde_json::from_str(&content).unwrap();
+    assert_eq!(root.items.len(), 2);
+    assert!(root.items.iter().all(|e| e.speaker == "s0wlz"));
+    assert_eq!(root.items[0].text, "S0wlz speaks second");
+
+    // The SRT output for fixture 1 has exact expected content.
+    let srt_path = out_dir
+        .path()
+        .read_dir()
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| {
+            p.file_name()
+                .and_then(|s| s.to_str())
+                .map(|n| n.contains("_1-s0wlz.") && n.ends_with(".srt"))
+                .unwrap_or(false)
+        })
+        .expect("missing SRT output for fixture 1");
+    let srt = fs::read_to_string(srt_path).unwrap();
+    assert_eq!(
+        srt,
+        "1\n00:00:01,000 --> 00:00:02,000\ns0wlz: S0wlz speaks second\n\n2\n00:00:05,000 --> 00:00:06,500\ns0wlz: S0wlz speaks last\n\n"
     );
 
-    // JSON contents are assumed valid if files exist; detailed parsing is covered elsewhere
-
-    // Cleanup
-    let _ = fs::remove_dir_all(&out_dir);
+    // The TOML output parses and contains the transcript text.
+    let toml_path = out_dir
+        .path()
+        .read_dir()
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| {
+            p.file_name()
+                .and_then(|s| s.to_str())
+                .map(|n| n.contains("_1-s0wlz.") && n.ends_with(".toml"))
+                .unwrap_or(false)
+        })
+        .expect("missing TOML output for fixture 1");
+    let toml_str = fs::read_to_string(toml_path).unwrap();
+    let parsed: toml::Value = toml::from_str(&toml_str).expect("TOML output must parse");
+    assert_eq!(
+        parsed["items"][0]["text"].as_str(),
+        Some("S0wlz speaks second")
+    );
 }
 
 #[test]
 fn cli_merges_json_inputs_with_flag_and_writes_outputs_to_temp_dir() {
-    let exe = env!("CARGO_BIN_EXE_polyscribe");
-    let tmp = TestDir::new();
+    let tmp = tempfile::tempdir().unwrap();
     // Use a nested output directory to also verify auto-creation
     let base_dir = tmp.path().join("outdir");
     let base = base_dir.join("out");
 
-    let input1 = manifest_path("input/1-s0wlz.json");
-    let input2 = manifest_path("input/2-vikingowl.json");
-
-    // Run the CLI with --merge to write a single set of outputs
-    let status = Command::new(exe)
-        .arg(input1.as_os_str())
-        .arg(input2.as_os_str())
-        .arg("-m")
-        .arg("-o")
-        .arg(base.as_os_str())
-        .status()
-        .expect("failed to spawn polyscribe");
-    assert!(status.success(), "CLI did not exit successfully");
+    let output = run(&[
+        fixture("1-s0wlz.json").as_os_str(),
+        fixture("2-vikingowl.json").as_os_str(),
+        OsStr::new("-m"),
+        OsStr::new("-o"),
+        base.as_os_str(),
+    ]);
+    assert!(
+        output.status.success(),
+        "CLI did not exit successfully: {}",
+        stderr_string(&output)
+    );
 
     // Find the created files in the chosen output directory without depending on date prefix
-    let entries = fs::read_dir(&base_dir).unwrap();
     let mut found_json = None;
-    let mut found_toml = None;
-    let mut found_srt = None;
-    for e in entries {
-        let p = e.unwrap().path();
+    let mut found_toml = false;
+    let mut found_srt = false;
+    for entry in fs::read_dir(&base_dir).unwrap() {
+        let p = entry.unwrap().path();
         if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
             if name.ends_with("_out.json") {
                 found_json = Some(p.clone());
             }
             if name.ends_with("_out.toml") {
-                found_toml = Some(p.clone());
+                found_toml = true;
             }
             if name.ends_with("_out.srt") {
-                found_srt = Some(p.clone());
+                found_srt = true;
             }
         }
     }
-    let _json_path = found_json.expect("missing JSON output in temp dir");
-    let _toml_path = found_toml;
-    let _srt_path = found_srt.expect("missing SRT output in temp dir");
+    let json_path = found_json.expect("missing JSON output in temp dir");
+    assert!(found_toml, "missing TOML output in temp dir");
+    assert!(found_srt, "missing SRT output in temp dir");
 
-    // Presence of files is sufficient for this integration test; content is validated by unit tests
-
-    // Cleanup
-    let _ = fs::remove_dir_all(&base_dir);
+    // The merged JSON contains both inputs, sorted, with sequential ids.
+    let content = fs::read_to_string(json_path).unwrap();
+    let root: OutputRoot = serde_json::from_str(&content).unwrap();
+    assert_merged_1_and_2(&root);
 }
 
 #[test]
 fn cli_prints_json_to_stdout_when_no_output_path_merge_mode() {
-    let exe = env!("CARGO_BIN_EXE_polyscribe");
-    let input1 = manifest_path("input/1-s0wlz.json");
-    let input2 = manifest_path("input/2-vikingowl.json");
-
-    let output = Command::new(exe)
-        .arg(input1.as_os_str())
-        .arg(input2.as_os_str())
-        .arg("-m")
-        .output()
-        .expect("failed to spawn polyscribe");
+    let output = run(&[
+        fixture("1-s0wlz.json").as_os_str(),
+        fixture("2-vikingowl.json").as_os_str(),
+        OsStr::new("-m"),
+    ]);
     assert!(output.status.success(), "CLI failed");
+    let root = parse_stdout_json(&output);
+    assert_merged_1_and_2(&root);
+}
 
-    let stdout = String::from_utf8(output.stdout).expect("stdout not UTF-8");
-    assert!(
-        stdout.contains("\"items\""),
-        "stdout should contain items JSON array"
-    );
+#[test]
+fn cli_single_input_prints_json_to_stdout_by_default() {
+    let output = run(&[fixture("3-schmendrizzle.json").as_os_str()]);
+    assert!(output.status.success(), "CLI failed");
+    let root = parse_stdout_json(&output);
+    assert_eq!(root.items.len(), 1);
+    assert_eq!(root.items[0].text, "Schmendrizzle here");
+    assert_eq!(root.items[0].speaker, "schmendrizzle");
+    assert_eq!(root.items[0].id, 0);
 }
 
 #[test]
 fn cli_merge_and_separate_writes_both_kinds_of_outputs() {
-    let exe = env!("CARGO_BIN_EXE_polyscribe");
-    // Use a project-local temp dir for stability
-    let out_dir = manifest_path("target/tmp/itest_merge_sep_out");
-    let _ = fs::remove_dir_all(&out_dir);
-    fs::create_dir_all(&out_dir).unwrap();
+    let out_dir = tempfile::tempdir().unwrap();
+    let output = run(&[
+        fixture("1-s0wlz.json").as_os_str(),
+        fixture("2-vikingowl.json").as_os_str(),
+        OsStr::new("--merge-and-separate"),
+        OsStr::new("-o"),
+        out_dir.path().as_os_str(),
+    ]);
+    assert!(
+        output.status.success(),
+        "CLI did not exit successfully: {}",
+        stderr_string(&output)
+    );
 
-    let input1 = manifest_path("input/1-s0wlz.json");
-    let input2 = manifest_path("input/2-vikingowl.json");
-
-    let status = Command::new(exe)
-        .arg(input1.as_os_str())
-        .arg(input2.as_os_str())
-        .arg("--merge-and-separate")
-        .arg("-o")
-        .arg(out_dir.as_os_str())
-        .status()
-        .expect("failed to spawn polyscribe");
-    assert!(status.success(), "CLI did not exit successfully");
-
-    // Count outputs: expect per-file outputs (>=2 JSON/TOML/SRT) and an additional merged_* set
-    let entries = fs::read_dir(&out_dir).unwrap();
+    // Count outputs: per-file outputs (2 JSON/TOML/SRT) plus a merged set.
     let mut json_count = 0;
     let mut toml_count = 0;
     let mut srt_count = 0;
     let mut merged_json = None;
-    for e in entries {
-        let p = e.unwrap().path();
+    for entry in fs::read_dir(out_dir.path()).unwrap() {
+        let p = entry.unwrap().path();
         if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
             if name.ends_with(".json") {
                 json_count += 1;
@@ -234,44 +295,26 @@ fn cli_merge_and_separate_writes_both_kinds_of_outputs() {
             }
         }
     }
-    // At least 2 inputs -> expect at least 3 JSONs (2 separate + 1 merged)
     assert!(
         json_count >= 3,
         "expected at least 3 JSON files, found {}",
         json_count
     );
-    assert!(
-        toml_count >= 3,
-        "expected at least 3 TOML files, found {}",
-        toml_count
-    );
-    assert!(
-        srt_count >= 3,
-        "expected at least 3 SRT files, found {}",
-        srt_count
-    );
+    assert!(toml_count >= 3, "expected at least 3 TOML files");
+    assert!(srt_count >= 3, "expected at least 3 SRT files");
 
-    let _merged_json = merged_json.expect("missing merged JSON output ending with _merged.json");
-    // Contents of merged JSON are validated by unit tests and other integration coverage
-
-    // Cleanup
-    let _ = fs::remove_dir_all(&out_dir);
+    let merged_json = merged_json.expect("missing merged JSON output ending with _merged.json");
+    let content = fs::read_to_string(merged_json).unwrap();
+    let root: OutputRoot = serde_json::from_str(&content).unwrap();
+    assert_merged_1_and_2(&root);
 }
 
 #[test]
 fn cli_set_speaker_names_merge_prompts_and_uses_names() {
     // Also validate that -q does not suppress prompts by running with -q
-    use std::io::Write as _;
-    use std::process::Stdio;
-
-    let exe = env!("CARGO_BIN_EXE_polyscribe");
-
-    let input1 = manifest_path("input/1-s0wlz.json");
-    let input2 = manifest_path("input/2-vikingowl.json");
-
-    let mut child = Command::new(exe)
-        .arg(input1.as_os_str())
-        .arg(input2.as_os_str())
+    let mut child = Command::new(bin())
+        .arg(fixture("1-s0wlz.json"))
+        .arg(fixture("2-vikingowl.json"))
         .arg("-m")
         .arg("--set-speaker-names")
         .arg("-q")
@@ -281,6 +324,7 @@ fn cli_set_speaker_names_merge_prompts_and_uses_names() {
         .expect("failed to spawn polyscribe");
 
     {
+        use std::io::Write as _;
         let stdin = child.stdin.as_mut().expect("failed to open stdin");
         // Provide two names for two files
         writeln!(stdin, "Alpha").unwrap();
@@ -290,8 +334,7 @@ fn cli_set_speaker_names_merge_prompts_and_uses_names() {
     let output = child.wait_with_output().expect("failed to wait on child");
     assert!(output.status.success(), "CLI did not exit successfully");
 
-    let stdout = String::from_utf8(output.stdout).expect("stdout not UTF-8");
-    let root: OutputRoot = serde_json::from_str(&stdout).unwrap();
+    let root = parse_stdout_json(&output);
     let speakers: std::collections::HashSet<String> =
         root.items.into_iter().map(|e| e.speaker).collect();
     assert!(speakers.contains("Alpha"), "Alpha not found in speakers");
@@ -300,132 +343,35 @@ fn cli_set_speaker_names_merge_prompts_and_uses_names() {
 
 #[test]
 fn cli_no_interaction_skips_speaker_prompts_and_uses_defaults() {
-    let exe = env!("CARGO_BIN_EXE_polyscribe");
+    let output = run(&[
+        fixture("1-s0wlz.json").as_os_str(),
+        fixture("2-vikingowl.json").as_os_str(),
+        OsStr::new("-m"),
+        OsStr::new("--set-speaker-names"),
+        OsStr::new("--no-interaction"),
+    ]);
+    assert!(
+        output.status.success(),
+        "CLI did not exit successfully: {}",
+        stderr_string(&output)
+    );
 
-    let input1 = manifest_path("input/1-s0wlz.json");
-    let input2 = manifest_path("input/2-vikingowl.json");
-
-    let output = Command::new(exe)
-        .arg(input1.as_os_str())
-        .arg(input2.as_os_str())
-        .arg("-m")
-        .arg("--set-speaker-names")
-        .arg("--no-interaction")
-        .output()
-        .expect("failed to spawn polyscribe");
-
-    assert!(output.status.success(), "CLI did not exit successfully");
-
-    let stdout = String::from_utf8(output.stdout).expect("stdout not UTF-8");
-    let root: OutputRoot = serde_json::from_str(&stdout).unwrap();
+    let root = parse_stdout_json(&output);
     let speakers: std::collections::HashSet<String> =
         root.items.into_iter().map(|e| e.speaker).collect();
-    // Defaults should be the file stems (sanitized): "1-s0wlz" -> "1-s0wlz" then sanitize removes numeric prefix -> "s0wlz"
+    // Defaults are the sanitized file stems: "1-s0wlz" -> "s0wlz".
     assert!(speakers.contains("s0wlz"), "default s0wlz not used");
     assert!(speakers.contains("vikingowl"), "default vikingowl not used");
 }
 
-// New verbosity behavior tests
-#[test]
-fn verbosity_quiet_suppresses_logs_but_keeps_stdout() {
-    let exe = env!("CARGO_BIN_EXE_polyscribe");
-    let input1 = manifest_path("input/1-s0wlz.json");
-    let input2 = manifest_path("input/2-vikingowl.json");
-
-    let output = Command::new(exe)
-        .arg("-q")
-        .arg("-v") // ensure -q overrides -v
-        .arg(input1.as_os_str())
-        .arg(input2.as_os_str())
-        .arg("-m")
-        .output()
-        .expect("failed to spawn polyscribe");
-
-    assert!(output.status.success());
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(
-        stdout.contains("\"items\""),
-        "stdout JSON should be present in quiet mode"
-    );
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(
-        stderr.trim().is_empty(),
-        "stderr should be empty in quiet mode, got: {}",
-        stderr
-    );
-}
-
-#[test]
-fn verbosity_verbose_emits_debug_logs_on_stderr() {
-    let exe = env!("CARGO_BIN_EXE_polyscribe");
-    let input1 = manifest_path("input/1-s0wlz.json");
-    let input2 = manifest_path("input/2-vikingowl.json");
-
-    let output = Command::new(exe)
-        .arg(input1.as_os_str())
-        .arg(input2.as_os_str())
-        .arg("-m")
-        .arg("-v")
-        .output()
-        .expect("failed to spawn polyscribe");
-
-    assert!(output.status.success());
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("\"items\""));
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(
-        stderr.contains("Mode: merge"),
-        "stderr should contain debug log with -v"
-    );
-}
-
-#[test]
-fn verbosity_flag_position_is_global() {
-    let exe = env!("CARGO_BIN_EXE_polyscribe");
-    let input1 = manifest_path("input/1-s0wlz.json");
-    let input2 = manifest_path("input/2-vikingowl.json");
-
-    // -v before args
-    let out1 = Command::new(exe)
-        .arg("-v")
-        .arg(input1.as_os_str())
-        .arg(input2.as_os_str())
-        .arg("-m")
-        .output()
-        .expect("failed to spawn polyscribe");
-
-    // -v after sub-flags
-    let out2 = Command::new(exe)
-        .arg(input1.as_os_str())
-        .arg(input2.as_os_str())
-        .arg("-m")
-        .arg("-v")
-        .output()
-        .expect("failed to spawn polyscribe");
-
-    let s1 = String::from_utf8(out1.stderr).unwrap();
-    let s2 = String::from_utf8(out2.stderr).unwrap();
-    assert!(s1.contains("Mode: merge"));
-    assert!(s2.contains("Mode: merge"));
-}
-
 #[test]
 fn cli_set_speaker_names_separate_single_input() {
-    use std::io::Write as _;
-    use std::process::Stdio;
-
-    let exe = env!("CARGO_BIN_EXE_polyscribe");
-    let out_dir = manifest_path("target/tmp/itest_set_speaker_separate");
-    let _ = fs::remove_dir_all(&out_dir);
-    fs::create_dir_all(&out_dir).unwrap();
-
-    let input1 = manifest_path("input/3-schmendrizzle.json");
-
-    let mut child = Command::new(exe)
-        .arg(input1.as_os_str())
+    let out_dir = tempfile::tempdir().unwrap();
+    let mut child = Command::new(bin())
+        .arg(fixture("3-schmendrizzle.json"))
         .arg("--set-speaker-names")
         .arg("-o")
-        .arg(out_dir.as_os_str())
+        .arg(out_dir.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -433,6 +379,7 @@ fn cli_set_speaker_names_separate_single_input() {
         .expect("failed to spawn polyscribe");
 
     {
+        use std::io::Write as _;
         let stdin = child.stdin.as_mut().expect("failed to open stdin");
         writeln!(stdin, "ChosenOne").unwrap();
     }
@@ -441,13 +388,13 @@ fn cli_set_speaker_names_separate_single_input() {
     assert!(status.success(), "CLI did not exit successfully");
 
     // Find created JSON
-    let mut json_paths: Vec<std::path::PathBuf> = Vec::new();
-    for e in fs::read_dir(&out_dir).unwrap() {
-        let p = e.unwrap().path();
-        if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
-            if name.ends_with(".json") {
-                json_paths.push(p.clone());
-            }
+    let mut json_paths: Vec<PathBuf> = Vec::new();
+    for entry in fs::read_dir(out_dir.path()).unwrap() {
+        let p = entry.unwrap().path();
+        if let Some(name) = p.file_name().and_then(|s| s.to_str())
+            && name.ends_with(".json")
+        {
+            json_paths.push(p.clone());
         }
     }
     assert!(!json_paths.is_empty(), "no JSON outputs created");
@@ -458,6 +405,260 @@ fn cli_set_speaker_names_separate_single_input() {
         .unwrap();
     let root: OutputRoot = serde_json::from_str(&buf).unwrap();
     assert!(root.items.iter().all(|e| e.speaker == "ChosenOne"));
+}
 
-    let _ = fs::remove_dir_all(&out_dir);
+// New verbosity behavior tests
+#[test]
+fn verbosity_quiet_suppresses_logs_but_keeps_stdout() {
+    let output = run(&[
+        OsStr::new("-q"),
+        OsStr::new("-v"), // ensure -q overrides -v
+        fixture("1-s0wlz.json").as_os_str(),
+        fixture("2-vikingowl.json").as_os_str(),
+        OsStr::new("-m"),
+    ]);
+    assert!(output.status.success());
+    let stdout = stdout_string(&output);
+    assert!(
+        stdout.contains("\"items\""),
+        "stdout JSON should be present in quiet mode"
+    );
+    let stderr = stderr_string(&output);
+    assert!(
+        stderr.trim().is_empty(),
+        "stderr should be empty in quiet mode, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn verbosity_verbose_emits_debug_logs_on_stderr() {
+    let output = run(&[
+        fixture("1-s0wlz.json").as_os_str(),
+        fixture("2-vikingowl.json").as_os_str(),
+        OsStr::new("-m"),
+        OsStr::new("-v"),
+    ]);
+    assert!(output.status.success());
+    let stdout = stdout_string(&output);
+    assert!(stdout.contains("\"items\""));
+    let stderr = stderr_string(&output);
+    assert!(
+        stderr.contains("Mode: merge"),
+        "stderr should contain debug log with -v"
+    );
+}
+
+#[test]
+fn verbosity_flag_position_is_global() {
+    // -v before args
+    let out1 = run(&[
+        OsStr::new("-v"),
+        fixture("1-s0wlz.json").as_os_str(),
+        fixture("2-vikingowl.json").as_os_str(),
+        OsStr::new("-m"),
+    ]);
+    // -v after sub-flags
+    let out2 = run(&[
+        fixture("1-s0wlz.json").as_os_str(),
+        fixture("2-vikingowl.json").as_os_str(),
+        OsStr::new("-m"),
+        OsStr::new("-v"),
+    ]);
+
+    let s1 = stderr_string(&out1);
+    let s2 = stderr_string(&out2);
+    assert!(s1.contains("Mode: merge"));
+    assert!(s2.contains("Mode: merge"));
+}
+
+// CLI argument validation and error-path tests
+#[test]
+fn cli_no_inputs_errors() {
+    let output = run(&[]);
+    assert!(!output.status.success(), "expected failure with no inputs");
+    let stderr = stderr_string(&output);
+    assert!(
+        stderr.contains("No input files provided"),
+        "unexpected stderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn cli_rejects_unsupported_input_type() {
+    let output = run(&[fixture("notes.txt").as_os_str()]);
+    assert!(!output.status.success(), "expected failure for .txt input");
+    let stderr = stderr_string(&output);
+    assert!(
+        stderr.contains("Unsupported input type"),
+        "unexpected stderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn cli_requires_language_for_audio_inputs() {
+    let output = run(&[fixture("sample.mp3").as_os_str()]);
+    assert!(
+        !output.status.success(),
+        "expected failure without --language"
+    );
+    let stderr = stderr_string(&output);
+    assert!(
+        stderr.contains("--language"),
+        "unexpected stderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn cli_errors_on_missing_input_file() {
+    let missing = fixture("does-not-exist.json");
+    let output = run(&[missing.as_os_str(), OsStr::new("-m")]);
+    assert!(
+        !output.status.success(),
+        "expected failure for missing file"
+    );
+    let stderr = stderr_string(&output);
+    assert!(
+        stderr.contains("Failed to open"),
+        "unexpected stderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn cli_errors_on_invalid_json_transcript() {
+    let output = run(&[fixture("invalid.json").as_os_str(), OsStr::new("-m")]);
+    assert!(
+        !output.status.success(),
+        "expected failure for invalid JSON"
+    );
+    let stderr = stderr_string(&output);
+    assert!(
+        stderr.contains("Invalid JSON transcript"),
+        "unexpected stderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn cli_merge_and_separate_requires_output_dir() {
+    let output = run(&[
+        fixture("1-s0wlz.json").as_os_str(),
+        fixture("2-vikingowl.json").as_os_str(),
+        OsStr::new("--merge-and-separate"),
+    ]);
+    assert!(
+        !output.status.success(),
+        "expected failure without -o for --merge-and-separate"
+    );
+    let stderr = stderr_string(&output);
+    assert!(
+        stderr.contains("requires -o"),
+        "unexpected stderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn cli_multiple_inputs_without_merge_require_output_dir() {
+    let output = run(&[
+        fixture("1-s0wlz.json").as_os_str(),
+        fixture("2-vikingowl.json").as_os_str(),
+    ]);
+    assert!(
+        !output.status.success(),
+        "expected failure for multiple inputs without -m and without -o"
+    );
+    let stderr = stderr_string(&output);
+    assert!(
+        stderr.contains("require -o OUTPUT_DIR"),
+        "unexpected stderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn cli_rejects_vulkan_backend_value() {
+    let output = run(&[
+        OsStr::new("--gpu-backend"),
+        OsStr::new("vulkan"),
+        fixture("1-s0wlz.json").as_os_str(),
+    ]);
+    assert_eq!(output.status.code(), Some(2), "clap should reject vulkan");
+    let stderr = stderr_string(&output);
+    assert!(
+        stderr.contains("invalid value") && stderr.contains("cuda"),
+        "unexpected stderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn cli_trailing_output_argument_is_treated_as_output() {
+    // Documented heuristic: with >= 2 inputs and no -o, a trailing argument
+    // that does not exist on disk is treated as the output path. In merge mode
+    // the output path is a file base, so the merged JSON lands in its parent.
+    let tmp = tempfile::tempdir().unwrap();
+    let out_base = tmp.path().join("out_base");
+    let output = Command::new(bin())
+        .arg(fixture("1-s0wlz.json"))
+        .arg(fixture("2-vikingowl.json"))
+        .arg("-m")
+        .arg(&out_base)
+        .current_dir(tmp.path())
+        .output()
+        .expect("failed to spawn polyscribe");
+    assert!(
+        output.status.success(),
+        "CLI did not exit successfully: {}",
+        stderr_string(&output)
+    );
+    // The merged output is written next to the given base path (parent dir).
+    let produced: Vec<PathBuf> = fs::read_dir(tmp.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|s| s.to_str())
+                .map(|n| n.ends_with("_out_base.json"))
+                .unwrap_or(false)
+        })
+        .collect();
+    assert_eq!(
+        produced.len(),
+        1,
+        "expected one merged JSON named *_out_base.json in temp dir"
+    );
+    let content = fs::read_to_string(&produced[0]).unwrap();
+    let root: OutputRoot = serde_json::from_str(&content).unwrap();
+    assert_merged_1_and_2(&root);
+}
+
+#[test]
+fn cli_reports_ffmpeg_failure_for_invalid_media() {
+    // The fixture is not real audio; ffmpeg must fail and the error must
+    // surface with context. Requires ffmpeg on PATH.
+    if Command::new("ffmpeg").arg("-version").output().is_err() {
+        eprintln!("NOT RUN: ffmpeg is not available on PATH; skipping ffmpeg failure test");
+        return;
+    }
+    let output = run(&[
+        fixture("sample.mp3").as_os_str(),
+        OsStr::new("--language"),
+        OsStr::new("en"),
+    ]);
+    assert!(
+        !output.status.success(),
+        "expected failure when ffmpeg cannot decode the input"
+    );
+    let stderr = stderr_string(&output);
+    assert!(
+        stderr.contains("ffmpeg failed"),
+        "unexpected stderr: {}",
+        stderr
+    );
 }
