@@ -70,20 +70,6 @@ pub struct StderrSilencer {
 }
 
 impl StderrSilencer {
-    /// Activate stderr silencing if quiet is set and on Unix; otherwise returns a no-op guard.
-    pub fn activate_if_quiet() -> Self {
-        if !is_quiet() {
-            return Self {
-                active: false,
-                #[cfg(unix)]
-                old_stderr_fd: -1,
-                #[cfg(unix)]
-                devnull_fd: -1,
-            };
-        }
-        Self::activate()
-    }
-
     /// Activate stderr silencing unconditionally (used internally); no-op on non-Unix.
     pub fn activate() -> Self {
         #[cfg(unix)]
