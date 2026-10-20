@@ -26,10 +26,6 @@ impl ConfigService {
         directories::ProjectDirs::from("dev", "polyscribe", "polyscribe")
     }
 
-    pub fn default_models_dir() -> Option<PathBuf> {
-        Self::project_dirs().map(|d| d.data_dir().join("models"))
-    }
-
     pub fn default_plugins_dir() -> Option<PathBuf> {
         Self::project_dirs().map(|d| d.data_dir().join("plugins"))
     }
@@ -54,6 +50,11 @@ impl ConfigService {
             .unwrap_or_else(|_| Self::DEFAULT_CACHE_FILENAME.to_string())
     }
 
+    /// Resolve the models directory: `POLYSCRIBE_MODELS_DIR` override, then
+    /// the `Config` override, then the canonical default shared with model
+    /// discovery (`crate::models_dir_path`). Keeping one default here is what
+    /// makes the downloader and `transcribe` agree on the directory in every
+    /// build mode (audit F-02).
     pub fn models_dir(cfg: Option<&Config>) -> Option<PathBuf> {
         if let Ok(env_dir) = env::var(Self::ENV_MODELS_DIR)
             && !env_dir.is_empty()
@@ -65,7 +66,7 @@ impl ConfigService {
         {
             return Some(dir);
         }
-        Self::default_models_dir()
+        Some(crate::models_dir_path())
     }
 
     pub fn user_agent() -> String {
@@ -101,4 +102,59 @@ impl ConfigService {
 pub struct Config {
     pub models_dir: Option<PathBuf>,
     pub plugins_dir: Option<PathBuf>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    /// Serializes tests that mutate process environment variables.
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    #[test]
+    fn test_models_dir_agrees_with_canonical_resolver() {
+        // F-02 regression guard: the downloader's directory
+        // (ConfigService::models_dir) and model discovery
+        // (models_dir_path) must resolve the same path in every build mode.
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        assert_eq!(
+            ConfigService::models_dir(None),
+            Some(crate::models_dir_path())
+        );
+    }
+
+    #[test]
+    fn test_models_dir_env_and_cfg_overrides() {
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let key = ConfigService::ENV_MODELS_DIR;
+        let saved = env::var(key).ok();
+        let cfg = Config {
+            models_dir: Some(PathBuf::from("/cfg/models")),
+            plugins_dir: None,
+        };
+
+        // The Config override applies when the env var is unset.
+        unsafe { env::remove_var(key) };
+        assert_eq!(
+            ConfigService::models_dir(Some(&cfg)),
+            Some(PathBuf::from("/cfg/models"))
+        );
+
+        // The env var wins over the Config override, for both entry points.
+        unsafe { env::set_var(key, "/env/models") };
+        assert_eq!(
+            ConfigService::models_dir(Some(&cfg)),
+            Some(PathBuf::from("/env/models"))
+        );
+        assert_eq!(
+            ConfigService::models_dir(None),
+            Some(PathBuf::from("/env/models"))
+        );
+
+        match saved {
+            Some(v) => unsafe { env::set_var(key, v) },
+            None => unsafe { env::remove_var(key) },
+        }
+    }
 }

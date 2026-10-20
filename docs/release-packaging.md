@@ -18,7 +18,7 @@ The repository is a Cargo workspace. Package the CLI crate; the engine and plugi
 - Transcription models (used by `transcribe`):
   - `$XDG_DATA_HOME/polyscribe/models`
   - Fallback: `~/.local/share/polyscribe/models`
-  - Debug builds: `./models` next to the project.
+  - Same paths in debug and release builds; models installed with `models add` in the cache dir (`$XDG_CACHE_HOME/polyscribe/models`) are found automatically.
 - Override with `POLYSCRIBE_MODELS_DIR`; force a file with `WHISPER_MODEL`.
 - `models` subcommands: files in `$XDG_CACHE_HOME/polyscribe/models`, manifest at `$XDG_CONFIG_HOME/polyscribe/models.json`.
 - Keep models outside of `/usr` so users can update without root.

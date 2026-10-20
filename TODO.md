@@ -21,28 +21,12 @@ ideas** (directional, not scheduled).
 - AC: replace fd redirection with whisper-rs/ggml log callbacks so no global
   state is touched, then enable parallel file processing (F3).
 
-### D2. Two models-dir resolution paths (P2, S)
-- Core has both `models_dir_path()` (used by `find_model_file`/`update_local_models`)
-  and `ConfigService::models_dir()` (used by `ensure_model_available_noninteractive`).
-  They agree on `POLYSCRIBE_MODELS_DIR` but differ in the default for debug
-  builds (`./models` vs the XDG data dir).
-- AC: unify on one resolution function (keep the debug `./models` default and
-  the XDG release default), with tests for both.
-
 ### D3. Long-file memory usage is O(duration) (P2, M)
 - ffmpeg output is streamed into a `Vec<f32>` (64 KiB/s of audio), but
   `whisper_full` still needs the whole sample buffer in memory (~230 MiB per
   hour of audio). True streaming/chunked transcription would cap memory.
 - AC: prototype chunked transcription with a long fixture; measure peak RSS
   before/after.
-
-### D4. No end-to-end transcription test (P1, M)
-- Tests cover the JSON merge path, the ffmpeg failure path, models, and
-  plugins, but nothing runs a real whisper inference (needs a model +
-  ffmpeg + audio fixture).
-- AC: add a CI job that downloads the `tiny` model once (cached), generates a
-  short WAV with ffmpeg, transcribes it, and asserts a valid transcript with
-  sane timestamps.
 
 ### D5. Non-Unix TTY detection (P3, S)
 - `stdin_is_tty` uses `std::io::IsTerminal` (correct); the remaining gap is

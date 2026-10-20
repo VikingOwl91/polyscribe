@@ -6,10 +6,16 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## Unreleased
 
+### Added
+- Tests (audit F-05): end-to-end transcription smoke test (`crates/polyscribe-cli/tests/e2e_transcribe.rs`) that runs the built CLI on the committed `speech.wav` fixture with a real Whisper model on CPU, asserting successful execution, valid JSON/TOML/SRT output, and sane timestamps. It skips itself with a note unless `POLYSCRIBE_E2E_MODEL` points at a model file, so the workspace suite still needs no model.
+- CI: new `e2e-transcribe` job that downloads a SHA-256-pinned `ggml-tiny.en.bin` (cached; the checksum is verified on every run so unverified cache contents are never trusted) and executes the e2e smoke test against the compiled CLI.
+- CI: the `test` and `e2e-transcribe` jobs install ffmpeg when it is missing (current ubuntu-latest runners no longer ship it), so ffmpeg-dependent tests run instead of skipping; the first-run model-discovery tests skip themselves with a note when ffmpeg is absent locally.
+
 ### Changed
 - Docs: Replace `--download-models`/`--update-models` flags with `models download`/`models update` subcommands in `README.md`, `docs/usage.md`, and `docs/development.md`.
 - Host: Plugin discovery now scans `$XDG_DATA_HOME/polyscribe/plugins` (platform equivalent via `directories`) in addition to `PATH`.
 - CI: Add GitHub Actions workflow to run fmt, clippy (warnings as errors), and tests for pushes and PRs.
+- Models (audit F-02): the transcription models directory is resolved by one canonical policy in every build mode: `POLYSCRIBE_MODELS_DIR`, then `$XDG_DATA_HOME/polyscribe/models`, then `~/.local/share/polyscribe/models`. The debug-only `./models` default is gone, so `cargo run -- models download` and `cargo run -- transcribe` agree on the directory. `ConfigService::models_dir` delegates to the shared resolver; the divergent `directories`-crate-based `default_models_dir` was removed. Docs (README, usage, development, release-packaging, faq) updated to match.
 
 ### Integrated (merge of the modernization line into the workspace)
 - Dependency: `whisper-rs` upgraded from 0.14.3 (git) to the versioned crates.io release 0.16; segment access migrated to the 0.16 API. MSRV declared as 1.88 (`rust-version`), verified with `cargo +1.88 check --workspace`.
@@ -27,5 +33,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 ### Fixed
 - `plugins run --json` collided with the global `--json` output flag, making the subcommand unparseable; the payload flag is now `--payload`.
 - `transcribe` previously validated inputs and reported success without transcribing anything.
+- First run (audit F-01): with no model installed and no model cache dir, `transcribe` now shows the actionable "No Whisper model files found ... download a model (polyscribe models add) or set WHISPER_MODEL" message instead of `Failed to read models dir: ...`. A missing cache dir counts as "no cached models"; genuine I/O errors on existing directories still propagate.
+- Tests: model-discovery unit tests (empty/missing dirs, cache-dir fallback, `WHISPER_MODEL` overrides, unreadable cache dir) and CLI first-run integration tests running the binary with an isolated environment.
 
 

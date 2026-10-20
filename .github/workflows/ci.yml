@@ -21,6 +21,16 @@ jobs:
       - name: Install components
         run: rustup component add clippy rustfmt
 
+      # ffmpeg is needed by the ffmpeg-dependent tests (first-run model
+      # discovery, ffmpeg failure path, e2e transcription) and is no longer
+      # preinstalled on current ubuntu-latest runners.
+      - name: Ensure ffmpeg
+        run: |
+          if ! command -v ffmpeg >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y ffmpeg
+          fi
+
       - name: Format
         run: cargo fmt --all -- --check
 
@@ -45,3 +55,57 @@ jobs:
 
       - name: Check
         run: cargo check --workspace --all-targets --locked
+
+  e2e-transcribe:
+    name: e2e transcription smoke (CPU, tiny.en)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Ensure ffmpeg
+        run: |
+          if ! command -v ffmpeg >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y ffmpeg
+          fi
+
+      # ggml-tiny.en.bin, pinned by SHA-256 (upstream whisper.cpp hash).
+      - name: Cache Whisper model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/polyscribe-e2e
+          key: polyscribe-e2e-model-v1-921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f
+          restore-keys: polyscribe-e2e-model-v1-
+
+      - name: Download and verify ggml-tiny.en.bin
+        env:
+          MODEL_SHA256: 921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f
+          MODEL_URL: https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin
+        run: |
+          set -euo pipefail
+          model_dir="$HOME/.cache/polyscribe-e2e"
+          model_path="$model_dir/ggml-tiny.en.bin"
+          mkdir -p "$model_dir"
+          # The cache is never trusted: verify the checksum and re-download
+          # on any mismatch (corrupt or stale cache entries included).
+          if [ -f "$model_path" ] && echo "$MODEL_SHA256  $model_path" | sha256sum -c - >/dev/null 2>&1; then
+            echo "Cached model verified (sha256 ok)."
+          else
+            echo "Downloading ggml-tiny.en.bin (expected sha256 $MODEL_SHA256)."
+            rm -f "$model_path"
+            curl -fL --retry 3 --connect-timeout 30 -o "$model_path.part" "$MODEL_URL"
+            mv "$model_path.part" "$model_path"
+            echo "$MODEL_SHA256  $model_path" | sha256sum -c -
+          fi
+
+      - name: Run transcription e2e test
+        run: |
+          export POLYSCRIBE_E2E_MODEL="$HOME/.cache/polyscribe-e2e/ggml-tiny.en.bin"
+          cargo test --locked -p polyscribe-cli --test e2e_transcribe -- --nocapture

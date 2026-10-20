@@ -32,7 +32,7 @@ This document describes how to build, test, and run PolyScribe locally, and how 
 
 ## Run locally
 
-- Development model directory defaults to `./models` when built in debug mode.
+- The model directory is the same in debug and release builds: `$XDG_DATA_HOME/polyscribe/models` or `~/.local/share/polyscribe/models` (models installed with `models add` in the cache dir are found automatically).
 - You can override:
   - `POLYSCRIBE_MODELS_DIR=/path/to/models`
   - `WHISPER_MODEL=/path/to/model.bin` (forces a specific file)
