@@ -10,6 +10,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Docs: Replace `--download-models`/`--update-models` flags with `models download`/`models update` subcommands in `README.md`, `docs/usage.md`, and `docs/development.md`.
 - Host: Plugin discovery now scans `$XDG_DATA_HOME/polyscribe/plugins` (platform equivalent via `directories`) in addition to `PATH`.
 - CI: Add GitHub Actions workflow to run fmt, clippy (warnings as errors), and tests for pushes and PRs.
+- Models (audit F-02): the transcription models directory is resolved by one canonical policy in every build mode: `POLYSCRIBE_MODELS_DIR`, then `$XDG_DATA_HOME/polyscribe/models`, then `~/.local/share/polyscribe/models`. The debug-only `./models` default is gone, so `cargo run -- models download` and `cargo run -- transcribe` agree on the directory. `ConfigService::models_dir` delegates to the shared resolver; the divergent `directories`-crate-based `default_models_dir` was removed. Docs (README, usage, development, release-packaging, faq) updated to match.
 
 ### Integrated (merge of the modernization line into the workspace)
 - Dependency: `whisper-rs` upgraded from 0.14.3 (git) to the versioned crates.io release 0.16; segment access migrated to the 0.16 API. MSRV declared as 1.88 (`rust-version`), verified with `cargo +1.88 check --workspace`.

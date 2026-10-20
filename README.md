@@ -78,7 +78,7 @@ Run `polyscribe -h` or `polyscribe <subcommand> -h` for the full reference; `doc
 
 ## Model locations and caching
 
-- Transcription models: `./models` in debug builds, `$XDG_DATA_HOME/polyscribe/models` (or `~/.local/share/polyscribe/models`) in release builds. Override with `POLYSCRIBE_MODELS_DIR`; force a specific file with `WHISPER_MODEL`.
+- Transcription models: `$XDG_DATA_HOME/polyscribe/models` (or `~/.local/share/polyscribe/models`), the same in debug and release builds; models installed with `models add` in the cache dir are found automatically. Override with `POLYSCRIBE_MODELS_DIR`; force a specific file with `WHISPER_MODEL`.
 - `models` subcommands use a separate cache: `$XDG_CACHE_HOME/polyscribe/models` for model files and `$XDG_CONFIG_HOME/polyscribe/models.json` for the manifest. Override with `POLYSCRIBE_CACHE_DIR` / `POLYSCRIBE_CONFIG_DIR`.
 - The Hugging Face manifest is cached (`$XDG_CACHE_HOME/polyscribe/manifest/`, 24 h TTL); `POLYSCRIBE_NO_CACHE_MANIFEST=1` disables it, `POLYSCRIBE_MANIFEST_TTL_SECONDS` changes the TTL.
 - `HF_TOKEN` is used for authenticated Hugging Face API/download requests when set.

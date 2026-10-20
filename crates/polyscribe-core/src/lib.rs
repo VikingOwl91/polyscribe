@@ -219,22 +219,39 @@ pub fn render_srt(entries: &[OutputEntry]) -> String {
 
 pub mod model_manager;
 
+/// Canonical resolution of the transcription models directory.
+///
+/// Policy (identical in debug and release builds):
+/// 1. `POLYSCRIBE_MODELS_DIR` when set to a non-empty value.
+/// 2. `$XDG_DATA_HOME/polyscribe/models` when `XDG_DATA_HOME` is set.
+/// 3. `~/.local/share/polyscribe/models` when `HOME` is set.
+/// 4. `models` (relative to the working directory) as a last resort.
+///
+/// This is the single resolver behind model discovery (`find_model_file`)
+/// and the interactive downloader (`ConfigService::models_dir`), so model
+/// installation and transcription always agree on the directory. Models
+/// installed by `models add` live in the ModelManager cache dir
+/// (`$XDG_CACHE_HOME/polyscribe/models`) and are picked up by
+/// `find_model_file` as a fallback.
 pub fn models_dir_path() -> PathBuf {
-    if let Ok(env_val) = env::var("POLYSCRIBE_MODELS_DIR") {
-        let env_path = PathBuf::from(env_val);
-        if !env_path.as_os_str().is_empty() {
-            return env_path;
-        }
+    resolve_models_dir_with(|name| env::var(name).ok())
+}
+
+/// Pure core of [`models_dir_path`]: resolves the models directory from
+/// environment lookups without touching the process environment, so tests
+/// can drive it with a fixed variable map.
+fn resolve_models_dir_with(get: impl Fn(&str) -> Option<String>) -> PathBuf {
+    if let Some(env_val) = get("POLYSCRIBE_MODELS_DIR")
+        && !env_val.is_empty()
+    {
+        return PathBuf::from(env_val);
     }
-    if cfg!(debug_assertions) {
-        return PathBuf::from("models");
-    }
-    if let Ok(xdg) = env::var("XDG_DATA_HOME")
+    if let Some(xdg) = get("XDG_DATA_HOME")
         && !xdg.is_empty()
     {
         return PathBuf::from(xdg).join("polyscribe").join("models");
     }
-    if let Ok(home) = env::var("HOME")
+    if let Some(home) = get("HOME")
         && !home.is_empty()
     {
         return PathBuf::from(home)
@@ -740,6 +757,79 @@ mod tests {
         // The explicit override is used even when no models dir exists.
         let found = find_model_file_in(Some(&model), &tmp.path().join("missing"), None).unwrap();
         assert_eq!(found, model);
+    }
+
+    // --- models dir resolution (models_dir_path / resolve_models_dir_with) ---
+
+    /// Build an environment lookup over a fixed variable map.
+    fn lookup<'a>(vars: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |name: &str| {
+            vars.iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| (*v).to_string())
+        }
+    }
+
+    #[test]
+    fn test_models_dir_resolution_policy() {
+        // An explicit override wins over everything.
+        assert_eq!(
+            resolve_models_dir_with(lookup(&[
+                ("POLYSCRIBE_MODELS_DIR", "/opt/models"),
+                ("XDG_DATA_HOME", "/xdg"),
+                ("HOME", "/home/u"),
+            ])),
+            PathBuf::from("/opt/models")
+        );
+        // An empty override is ignored.
+        assert_eq!(
+            resolve_models_dir_with(lookup(&[
+                ("POLYSCRIBE_MODELS_DIR", ""),
+                ("XDG_DATA_HOME", "/xdg"),
+            ])),
+            PathBuf::from("/xdg/polyscribe/models")
+        );
+        // XDG_DATA_HOME follows the XDG convention.
+        assert_eq!(
+            resolve_models_dir_with(lookup(&[("XDG_DATA_HOME", "/xdg")])),
+            PathBuf::from("/xdg/polyscribe/models")
+        );
+        // HOME falls back to the XDG default location.
+        assert_eq!(
+            resolve_models_dir_with(lookup(&[("HOME", "/home/u")])),
+            PathBuf::from("/home/u/.local/share/polyscribe/models")
+        );
+        // Last resort: a relative dir when no HOME is available.
+        assert_eq!(
+            resolve_models_dir_with(lookup(&[])),
+            PathBuf::from("models")
+        );
+    }
+
+    #[test]
+    fn test_models_dir_resolution_has_no_debug_special_case() {
+        // F-02 regression guard: cargo test runs with debug assertions
+        // enabled, so if the resolver ever special-cases debug builds (the
+        // old "./models" default), these assertions fail.
+        assert_eq!(
+            resolve_models_dir_with(lookup(&[("HOME", "/home/u")])),
+            PathBuf::from("/home/u/.local/share/polyscribe/models"),
+            "default must be the XDG data dir, not a debug-only relative dir"
+        );
+        assert_eq!(
+            resolve_models_dir_with(lookup(&[("XDG_DATA_HOME", "/xdg"), ("HOME", "/home/u")])),
+            PathBuf::from("/xdg/polyscribe/models")
+        );
+    }
+
+    #[test]
+    fn test_models_dir_path_matches_resolver_policy() {
+        // The live env-driven entry point must agree with the pure resolver
+        // (and therefore with ConfigService::models_dir).
+        assert_eq!(
+            models_dir_path(),
+            resolve_models_dir_with(|name| env::var(name).ok())
+        );
     }
 
     #[cfg(unix)]

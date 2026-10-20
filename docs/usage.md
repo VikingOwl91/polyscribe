@@ -100,7 +100,7 @@ Model files live in `$XDG_CACHE_HOME/polyscribe/models` (override `POLYSCRIBE_CA
 
 ## Model locations
 
-- Transcription models (used by `transcribe`): `./models` in debug builds, `$XDG_DATA_HOME/polyscribe/models` or `~/.local/share/polyscribe/models` in release builds.
+- Transcription models (used by `transcribe`): `$XDG_DATA_HOME/polyscribe/models` or `~/.local/share/polyscribe/models`, the same in debug and release builds. Models installed with `models add` live in the cache dir (`$XDG_CACHE_HOME/polyscribe/models`) and are found automatically as a fallback.
 - Override:
   - `POLYSCRIBE_MODELS_DIR=/path/to/models`
   - `WHISPER_MODEL=/path/to/specific_model.bin` (forces exact model file).
