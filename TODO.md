@@ -28,14 +28,6 @@ ideas** (directional, not scheduled).
 - AC: prototype chunked transcription with a long fixture; measure peak RSS
   before/after.
 
-### D4. No end-to-end transcription test (P1, M)
-- Tests cover the JSON merge path, the ffmpeg failure path, models, and
-  plugins, but nothing runs a real whisper inference (needs a model +
-  ffmpeg + audio fixture).
-- AC: add a CI job that downloads the `tiny` model once (cached), generates a
-  short WAV with ffmpeg, transcribes it, and asserts a valid transcript with
-  sane timestamps.
-
 ### D5. Non-Unix TTY detection (P3, S)
 - `stdin_is_tty` uses `std::io::IsTerminal` (correct); the remaining gap is
   that Windows/macOS are not CI-tested.
