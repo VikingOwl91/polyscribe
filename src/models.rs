@@ -1123,7 +1123,7 @@ mod tests {
             std::env::set_var("HOME", tmp_home.path());
         }
         assert_eq!(
-            super::models_dir_path(),
+            crate::models_dir_path(),
             std::path::PathBuf::from(tmp_home.path())
                 .join(".local")
                 .join("share")
