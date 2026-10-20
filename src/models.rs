@@ -559,6 +559,13 @@ pub fn run_interactive_model_downloader() -> Result<()> {
 
 /// Download a single model entry into the given models directory, verifying SHA-256 when available.
 fn download_one_model(client: &Client, models_dir: &Path, entry: &ModelEntry) -> Result<()> {
+    // Defense in depth: model names come from remote listings (or a local
+    // manifest) and are embedded in "ggml-<name>.bin"; a name with a path
+    // separator could write outside the intended file. Valid names never
+    // contain separators.
+    if entry.name.contains(['/', '\\']) {
+        return Err(anyhow!("Invalid model name: {}", entry.name));
+    }
     let final_path = models_dir.join(format!("ggml-{}.bin", entry.name));
 
     // If the model already exists, verify against online metadata
@@ -1021,6 +1028,29 @@ mod tests {
             s.push_str(&format!("{:02x}", b));
         }
         s
+    }
+
+    #[test]
+    fn test_download_one_model_rejects_path_traversal_names() {
+        // No network is touched: invalid names are rejected before any request.
+        let client = Client::builder().build().unwrap();
+        let tmp = tempdir().unwrap();
+        for bad in ["../evil", "a/b", "a\\b", "a/../b", "x/", "/abs", "a//b"] {
+            let entry = ModelEntry {
+                name: bad.to_string(),
+                base: "tiny".to_string(),
+                subtype: "q5_1".to_string(),
+                size: 1,
+                sha256: None,
+                repo: "ggerganov/whisper.cpp".to_string(),
+            };
+            let err = download_one_model(&client, tmp.path(), &entry)
+                .expect_err("path-traversal model name must be rejected");
+            assert!(
+                format!("{err:#}").contains("Invalid model name"),
+                "name {bad:?} should be rejected, got: {err:#}"
+            );
+        }
     }
 
     #[test]
