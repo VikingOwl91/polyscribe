@@ -5,17 +5,15 @@ edition = "2024"
 # MSRV: matches whisper-rs-sys 0.15 (the newest supported whisper.cpp bindings).
 rust-version = "1.88"
 license = "MIT"
-license-file = "LICENSE"
 
 [features]
-# Default: CPU only; no GPU features enabled
+# Default: CPU only; no GPU features enabled.
 default = []
-# GPU backends map to whisper-rs features or FFI stub for Vulkan
+# GPU backends map to whisper-rs features. Availability is a build-time
+# property: a binary built with a GPU feature links the corresponding
+# runtime and can use it; without the feature the backend is unavailable.
 gpu-cuda = ["whisper-rs/cuda"]
 gpu-hip = ["whisper-rs/hipblas"]
-gpu-vulkan = []
-# explicit CPU fallback feature (no effect at build time, used for clarity)
-cpu-fallback = []
 
 [dependencies]
 anyhow = "1.0.98"

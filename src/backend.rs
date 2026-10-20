@@ -12,16 +12,14 @@ use std::path::Path;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Kind of transcription backend to use.
 pub enum BackendKind {
-    /// Automatically detect the best available backend (CUDA > HIP > Vulkan > CPU).
+    /// Automatically select the best backend compiled into this binary (CUDA > HIP > CPU).
     Auto,
     /// Pure CPU backend using whisper-rs.
     Cpu,
-    /// NVIDIA CUDA backend (requires CUDA runtime available at load time and proper feature build).
+    /// NVIDIA CUDA backend (requires a build with the `gpu-cuda` feature and the CUDA runtime).
     Cuda,
-    /// AMD ROCm/HIP backend (requires hip/rocBLAS libraries available and proper feature build).
+    /// AMD ROCm/HIP backend (requires a build with the `gpu-hip` feature and the ROCm runtime).
     Hip,
-    /// Vulkan backend (experimental; requires Vulkan loader/SDK and feature build).
-    Vulkan,
 }
 
 /// Abstraction for a transcription backend implementation.
@@ -44,44 +42,32 @@ pub trait TranscribeBackend {
     ) -> Result<Vec<OutputEntry>>;
 }
 
-fn check_lib(_names: &[&str]) -> bool {
-    #[cfg(test)]
-    {
-        // During unit tests, avoid touching system libs to prevent loader crashes in CI.
-        false
-    }
-    #[cfg(not(test))]
-    {
-        // Disabled runtime dlopen probing to avoid loader instability; rely on environment overrides.
-        false
-    }
-}
-
+/// Whether the CUDA backend is usable in this build.
+///
+/// GPU support is a build-time property: a binary built with the `gpu-cuda`
+/// feature links the CUDA runtime, so the backend is available. Runtime
+/// library probing was removed on purpose (dlopen probing proved unstable);
+/// availability therefore follows the compiled-in features. The
+/// `POLYSCRIBE_TEST_FORCE_CUDA` override exists for tests only.
 fn cuda_available() -> bool {
     if let Ok(x) = env::var("POLYSCRIBE_TEST_FORCE_CUDA") {
         return x == "1";
     }
-    check_lib(&[
-        "libcudart.so",
-        "libcudart.so.12",
-        "libcudart.so.11",
-        "libcublas.so",
-        "libcublas.so.12",
-    ])
+    #[cfg(not(test))]
+    return cfg!(feature = "gpu-cuda");
+    #[cfg(test)]
+    return false;
 }
 
+/// Whether the ROCm/HIP backend is usable in this build (see [`cuda_available`]).
 fn hip_available() -> bool {
     if let Ok(x) = env::var("POLYSCRIBE_TEST_FORCE_HIP") {
         return x == "1";
     }
-    check_lib(&["libhipblas.so", "librocblas.so"])
-}
-
-fn vulkan_available() -> bool {
-    if let Ok(x) = env::var("POLYSCRIBE_TEST_FORCE_VULKAN") {
-        return x == "1";
-    }
-    check_lib(&["libvulkan.so.1", "libvulkan.so"])
+    #[cfg(not(test))]
+    return cfg!(feature = "gpu-hip");
+    #[cfg(test)]
+    return false;
 }
 
 /// CPU-based transcription backend using whisper-rs.
@@ -90,8 +76,6 @@ pub struct CpuBackend;
 pub struct CudaBackend;
 /// ROCm/HIP-accelerated transcription backend for AMD GPUs.
 pub struct HipBackend;
-/// Vulkan-based transcription backend (experimental/incomplete).
-pub struct VulkanBackend;
 
 impl CpuBackend {
     /// Create a new CPU backend instance.
@@ -126,18 +110,6 @@ impl Default for HipBackend {
         Self::new()
     }
 }
-impl VulkanBackend {
-    /// Create a new Vulkan backend instance.
-    pub fn new() -> Self {
-        VulkanBackend
-    }
-}
-impl Default for VulkanBackend {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl TranscribeBackend for CpuBackend {
     fn kind(&self) -> BackendKind {
         BackendKind::Cpu
@@ -184,23 +156,6 @@ impl TranscribeBackend for HipBackend {
     }
 }
 
-impl TranscribeBackend for VulkanBackend {
-    fn kind(&self) -> BackendKind {
-        BackendKind::Vulkan
-    }
-    fn transcribe(
-        &self,
-        _audio_path: &Path,
-        _speaker: &str,
-        _lang_opt: Option<&str>,
-        _gpu_layers: Option<u32>,
-    ) -> Result<Vec<OutputEntry>> {
-        Err(anyhow!(
-            "Vulkan backend not yet wired to whisper.cpp FFI. Build with --features gpu-vulkan and ensure Vulkan SDK is installed. How to fix: install Vulkan loader (libvulkan), set VULKAN_SDK, and run cargo build --features gpu-vulkan."
-        ))
-    }
-}
-
 /// Result of choosing a transcription backend.
 pub struct SelectionResult {
     /// The constructed backend instance to perform transcription with.
@@ -211,12 +166,13 @@ pub struct SelectionResult {
     pub detected: Vec<BackendKind>,
 }
 
-/// Select an appropriate backend based on user request and system detection.
+/// Select an appropriate backend based on the user request and the backends
+/// compiled into this binary.
 ///
 /// If `requested` is `BackendKind::Auto`, the function prefers CUDA, then HIP,
-/// then Vulkan, falling back to CPU when no GPU backend is detected. When a
-/// specific GPU backend is requested but unavailable, an error is returned with
-/// guidance on how to enable it.
+/// falling back to CPU when no GPU backend was compiled in. When a specific
+/// GPU backend is requested but this binary was built without the matching
+/// feature, an error is returned with guidance on how to enable it.
 ///
 /// Set `verbose` to true to print detection/selection info to stderr.
 pub fn select_backend(requested: BackendKind, verbose: bool) -> Result<SelectionResult> {
@@ -227,17 +183,13 @@ pub fn select_backend(requested: BackendKind, verbose: bool) -> Result<Selection
     if hip_available() {
         detected.push(BackendKind::Hip);
     }
-    if vulkan_available() {
-        detected.push(BackendKind::Vulkan);
-    }
 
     let mk = |k: BackendKind| -> Box<dyn TranscribeBackend + Send + Sync> {
         match k {
             BackendKind::Cpu => Box::new(CpuBackend::new()),
             BackendKind::Cuda => Box::new(CudaBackend::new()),
             BackendKind::Hip => Box::new(HipBackend::new()),
-            BackendKind::Vulkan => Box::new(VulkanBackend::new()),
-            BackendKind::Auto => Box::new(CpuBackend::new()), // will be replaced
+            BackendKind::Auto => Box::new(CpuBackend::new()), // resolved before construction
         }
     };
 
@@ -247,8 +199,6 @@ pub fn select_backend(requested: BackendKind, verbose: bool) -> Result<Selection
                 BackendKind::Cuda
             } else if detected.contains(&BackendKind::Hip) {
                 BackendKind::Hip
-            } else if detected.contains(&BackendKind::Vulkan) {
-                BackendKind::Vulkan
             } else {
                 BackendKind::Cpu
             }
@@ -258,7 +208,7 @@ pub fn select_backend(requested: BackendKind, verbose: bool) -> Result<Selection
                 BackendKind::Cuda
             } else {
                 return Err(anyhow!(
-                    "Requested CUDA backend but CUDA libraries/devices not detected. How to fix: install NVIDIA driver + CUDA toolkit, ensure libcudart/libcublas are in loader path, and build with --features gpu-cuda."
+                    "Requested CUDA backend but this binary was built without CUDA support. How to fix: install the NVIDIA driver + CUDA runtime and rebuild with --features gpu-cuda."
                 ));
             }
         }
@@ -267,16 +217,7 @@ pub fn select_backend(requested: BackendKind, verbose: bool) -> Result<Selection
                 BackendKind::Hip
             } else {
                 return Err(anyhow!(
-                    "Requested ROCm/HIP backend but libraries/devices not detected. How to fix: install ROCm hipBLAS/rocBLAS, ensure libs are in loader path, and build with --features gpu-hip."
-                ));
-            }
-        }
-        BackendKind::Vulkan => {
-            if detected.contains(&BackendKind::Vulkan) {
-                BackendKind::Vulkan
-            } else {
-                return Err(anyhow!(
-                    "Requested Vulkan backend but libvulkan not detected. How to fix: install Vulkan loader/SDK and build with --features gpu-vulkan."
+                    "Requested ROCm/HIP backend but this binary was built without HIP support. How to fix: install the ROCm runtime and rebuild with --features gpu-hip."
                 ));
             }
         }

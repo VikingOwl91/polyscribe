@@ -32,7 +32,6 @@ enum GpuBackendCli {
     Cpu,
     Cuda,
     Hip,
-    Vulkan,
 }
 
 #[derive(Parser, Debug)]
@@ -78,12 +77,13 @@ struct Args {
     #[arg(short, long, value_name = "LANG")]
     language: Option<String>,
 
-    /// Choose GPU backend at runtime (auto|cpu|cuda|hip|vulkan). Default: auto.
+    /// Choose transcription backend (auto|cpu|cuda|hip). GPU backends require a
+    /// build with the matching cargo feature (gpu-cuda, gpu-hip). Default: auto.
     #[arg(long = "gpu-backend", value_enum, default_value_t = GpuBackendCli::Auto)]
     gpu_backend: GpuBackendCli,
 
-    /// Number of layers to offload to GPU (if supported by backend)
-    #[arg(long = "gpu-layers", value_name = "N")]
+    /// Reserved for future GPU layer offload control; currently unused.
+    #[arg(long = "gpu-layers", value_name = "N", hide = true)]
     gpu_layers: Option<u32>,
 
     /// Launch interactive model downloader (list HF models, multi-select and download)
@@ -260,7 +260,6 @@ fn run() -> Result<()> {
         GpuBackendCli::Cpu => BackendKind::Cpu,
         GpuBackendCli::Cuda => BackendKind::Cuda,
         GpuBackendCli::Hip => BackendKind::Hip,
-        GpuBackendCli::Vulkan => BackendKind::Vulkan,
     };
     let sel = select_backend(requested, args.verbose > 0)?;
     polyscribe::dlog!(1, "Using backend: {:?}", sel.chosen);
@@ -940,27 +939,19 @@ mod tests {
     }
 
     #[test]
-    fn test_backend_auto_order_prefers_cuda_then_hip_then_vulkan_then_cpu() {
+    fn test_backend_auto_order_prefers_cuda_then_hip_then_cpu() {
         let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
         // Clear overrides
         unsafe {
             std_env::remove_var("POLYSCRIBE_TEST_FORCE_CUDA");
             std_env::remove_var("POLYSCRIBE_TEST_FORCE_HIP");
-            std_env::remove_var("POLYSCRIBE_TEST_FORCE_VULKAN");
         }
         // No GPU -> CPU
         let sel = select_backend(BackendKind::Auto, false).unwrap();
         assert_eq!(sel.chosen, BackendKind::Cpu);
-        // Vulkan only
-        unsafe {
-            std_env::set_var("POLYSCRIBE_TEST_FORCE_VULKAN", "1");
-        }
-        let sel = select_backend(BackendKind::Auto, false).unwrap();
-        assert_eq!(sel.chosen, BackendKind::Vulkan);
-        // HIP preferred over Vulkan
+        // HIP only
         unsafe {
             std_env::set_var("POLYSCRIBE_TEST_FORCE_HIP", "1");
-            std_env::remove_var("POLYSCRIBE_TEST_FORCE_VULKAN");
         }
         let sel = select_backend(BackendKind::Auto, false).unwrap();
         assert_eq!(sel.chosen, BackendKind::Hip);
@@ -974,7 +965,6 @@ mod tests {
         unsafe {
             std_env::remove_var("POLYSCRIBE_TEST_FORCE_CUDA");
             std_env::remove_var("POLYSCRIBE_TEST_FORCE_HIP");
-            std_env::remove_var("POLYSCRIBE_TEST_FORCE_VULKAN");
         }
     }
 
@@ -985,11 +975,9 @@ mod tests {
         unsafe {
             std_env::remove_var("POLYSCRIBE_TEST_FORCE_CUDA");
             std_env::remove_var("POLYSCRIBE_TEST_FORCE_HIP");
-            std_env::remove_var("POLYSCRIBE_TEST_FORCE_VULKAN");
         }
         assert!(select_backend(BackendKind::Cuda, false).is_err());
         assert!(select_backend(BackendKind::Hip, false).is_err());
-        assert!(select_backend(BackendKind::Vulkan, false).is_err());
         // Turn on CUDA only
         unsafe {
             std_env::set_var("POLYSCRIBE_TEST_FORCE_CUDA", "1");
@@ -1001,15 +989,34 @@ mod tests {
             std_env::set_var("POLYSCRIBE_TEST_FORCE_HIP", "1");
         }
         assert!(select_backend(BackendKind::Hip, false).is_ok());
-        // Turn on Vulkan only
-        unsafe {
-            std_env::remove_var("POLYSCRIBE_TEST_FORCE_HIP");
-            std_env::set_var("POLYSCRIBE_TEST_FORCE_VULKAN", "1");
-        }
-        assert!(select_backend(BackendKind::Vulkan, false).is_ok());
         // Cleanup
         unsafe {
-            std_env::remove_var("POLYSCRIBE_TEST_FORCE_VULKAN");
+            std_env::remove_var("POLYSCRIBE_TEST_FORCE_HIP");
         }
+    }
+
+    #[test]
+    fn test_cli_gpu_backend_values() {
+        use clap::Parser;
+        // Default is auto
+        let args = Args::try_parse_from(["polyscribe", "a.json"]).unwrap();
+        assert!(matches!(args.gpu_backend, GpuBackendCli::Auto));
+        // Supported values parse
+        for value in ["cpu", "cuda", "hip", "auto"] {
+            let args =
+                Args::try_parse_from(["polyscribe", "--gpu-backend", value, "a.json"]).unwrap();
+            assert!(matches!(
+                args.gpu_backend,
+                GpuBackendCli::Cpu | GpuBackendCli::Cuda | GpuBackendCli::Hip | GpuBackendCli::Auto
+            ));
+        }
+        // Vulkan is not a supported backend and must be rejected by the CLI
+        let err = Args::try_parse_from(["polyscribe", "--gpu-backend", "vulkan", "a.json"])
+            .expect_err("vulkan must not be an accepted backend value");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invalid value") && msg.contains("cuda"),
+            "error should explain valid values, got: {msg}"
+        );
     }
 }
