@@ -11,6 +11,7 @@ PolyScribe is a fast, local-first CLI for transcribing audio/video and merging e
 - **Plugin system**: extensible via JSON-RPC (NDJSON) plugins discovered on `PATH` or in the XDG plugin directory.
 - **GPU backends**: CPU, CUDA, and ROCm/HIP; availability is a build-time property (`--features gpu-cuda` / `--features gpu-hip`). GPU support is experimental: no GPU runtime is exercised in CI. The HIP backend is validated manually on an AMD Radeon RX 9070 XT with ROCm 7.2.
 - **Bounded memory for long recordings**: the audio is decoded and transcribed in windows of 30 seconds, so the peak memory of a transcription does not grow with the length of the recording.
+- **Missing-speech recovery**: whisper does not always report a segment for the beginning of the audio it is given. PolyScribe decodes such a region again from a slightly different position, and warns on stderr when the region still holds no text.
 - **Outputs**: JSON, TOML, and SRT; speaker labels via per-file prompts (manual labeling only — there is no automatic speaker diarization).
 - **Machine-readable mode**: global `--json` flag for scripts.
 
@@ -112,6 +113,7 @@ See `CONTRIBUTING.md` for the full checklist and `docs/development.md` for detai
 ## Troubleshooting & docs
 
 - `docs/faq.md` — common issues and solutions
+- `docs/releases.md` — branch model and release procedure
 - `docs/usage.md` — complete CLI reference and workflows
 - `docs/development.md` — build, test, and contribute locally
 - `docs/design.md` — architecture overview and decisions
@@ -119,6 +121,7 @@ See `CONTRIBUTING.md` for the full checklist and `docs/development.md` for detai
 - `docs/ci.md` — CI checklist and job outline
 - `CONTRIBUTING.md` — PR checklist and workflow
 - `CHANGELOG.md` — notable changes
+- `docs/benchmarks/` — the chunked pipeline, its measurements and the boundary quality
 
 ## License
 

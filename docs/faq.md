@@ -28,6 +28,17 @@ Which directories are used?
 - `models` subcommands: files in `$XDG_CACHE_HOME/polyscribe/models`, manifest at `$XDG_CONFIG_HOME/polyscribe/models.json`; override `POLYSCRIBE_CACHE_DIR` / `POLYSCRIBE_CONFIG_DIR`.
 - Manifest cache: `$XDG_CACHE_HOME/polyscribe/manifest/` (24 h TTL).
 
+The transcription warns that it may be incomplete
+- The warning names the file and a time range: whisper did not report the audio
+  there, and PolyScribe could not decode it again from another position.
+- The check that decides whether such a region holds speech is a level and a
+  share of frames, not a voice activity detector. The warning says that speech
+  *may* be missing; it does not claim that speech was there.
+- The exit status is unchanged, so a script that only looks at the exit status
+  is not affected. The warning goes to stderr.
+- `POLYSCRIBE_WINDOW_TRACE=1` shows the sample range of every window and
+  every region that was not reported.
+
 SRT timestamps look wrong
 - SRT times are derived from model timestamps. If your input has variable sample rate or corrupted timestamps, ensure ffmpeg can decode it; consider re-encoding the audio.
 
