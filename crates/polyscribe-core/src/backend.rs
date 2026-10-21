@@ -888,6 +888,7 @@ fn transcribe_windows(
     }
 
     let outcome = if cancelled {
+        observer(crate::stream::StreamEvent::Cancelled);
         crate::stream::StreamOutcome::Cancelled { segments: reported }
     } else {
         observer(crate::stream::StreamEvent::Completed {

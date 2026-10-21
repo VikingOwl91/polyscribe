@@ -389,7 +389,7 @@ fn a_cancelled_stream_stops_and_reports_nothing_provisional() {
         let mut session = ModelSession::new();
         transcribe_stream(
             &mut session,
-            polyscribe_core::backend::BackendKind::Cpu,
+            test_backend(),
             Box::new(source),
             "test",
             Language::Explicit("en".to_string()),
@@ -427,6 +427,17 @@ fn a_cancelled_stream_stops_and_reports_nothing_provisional() {
         result.windows < 3,
         "the run transcribed every window of the recording: {}",
         result.windows
+    );
+    // The run says that it was cancelled.
+    let mut cancelled = false;
+    while let Ok(event) = events.try_recv() {
+        if matches!(event, StreamEvent::Cancelled) {
+            cancelled = true;
+        }
+    }
+    assert!(
+        cancelled,
+        "the run did not report the cancellation as an event"
     );
 }
 
