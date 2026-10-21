@@ -1,0 +1,65 @@
+=== ggml-tiny.en.bin ===
+  ggml-tiny.en.bin       cpu run1: wall=   4283.2ms init=45.3ms infer=4177.4ms rss=304MB vram=0MiB gfx=0% load=5.4 rocm=False
+  ggml-tiny.en.bin       hip run1: wall=    842.3ms init=134.8ms infer=587.2ms rss=302MB vram=0MiB gfx=0% load=5.4 rocm=True
+  ggml-tiny.en.bin       cpu run2: wall=   3502.0ms init=45.1ms infer=3396.8ms rss=305MB vram=0MiB gfx=0% load=6.4 rocm=False
+  ggml-tiny.en.bin       hip run2: wall=    819.7ms init=113.2ms infer=588.5ms rss=302MB vram=0MiB gfx=0% load=6.4 rocm=True
+  ggml-tiny.en.bin       cpu run3: wall=   3032.8ms init=44.6ms infer=2928.3ms rss=303MB vram=0MiB gfx=0% load=6.4 rocm=False
+  ggml-tiny.en.bin       hip run3: wall=    818.8ms init=111.6ms infer=588.5ms rss=302MB vram=0MiB gfx=0% load=6.0 rocm=True
+  ggml-tiny.en.bin       cpu run4: wall=   9702.1ms init=45.5ms infer=9596.9ms rss=305MB vram=0MiB gfx=0% load=8.1 rocm=False
+  ggml-tiny.en.bin       hip run4: wall=    822.4ms init=109.2ms infer=589.4ms rss=302MB vram=0MiB gfx=0% load=8.1 rocm=True
+  ggml-tiny.en.bin       cpu run5: wall=   3884.0ms init=45.5ms infer=3778.2ms rss=304MB vram=0MiB gfx=0% load=8.1 rocm=False
+  ggml-tiny.en.bin       hip run5: wall=    837.9ms init=120.8ms infer=596.1ms rss=302MB vram=0MiB gfx=0% load=7.8 rocm=True
+  ggml-tiny.en.bin       cpu run1: wall=  22442.4ms init=47.4ms infer=22328.9ms rss=303MB vram=1950MiB gfx=8% load=13.8 rocm=False
+  ggml-tiny.en.bin       hip run1: wall=    905.8ms init=118.1ms infer=594.1ms rss=302MB vram=1981MiB gfx=14% load=13.8 rocm=True
+  ggml-tiny.en.bin       cpu run2: wall=   4208.7ms init=48.6ms infer=4098.3ms rss=304MB vram=1950MiB gfx=8% load=14.3 rocm=False
+  ggml-tiny.en.bin       hip run2: wall=    835.6ms init=119.4ms infer=593.6ms rss=302MB vram=2223MiB gfx=36% load=14.3 rocm=True
+  -> wall cpu 3884.0ms / hip 822.4ms, speedup 4.72x, identical transcripts: True
+=== ggml-base.en.bin ===
+  ggml-base.en.bin       cpu run1: wall=   5449.1ms init=58.4ms infer=5323.0ms rss=411MB vram=0MiB gfx=0% load=14.1 rocm=False
+  ggml-base.en.bin       hip run1: wall=   1196.7ms init=123.2ms infer=953.0ms rss=301MB vram=0MiB gfx=0% load=14.1 rocm=True
+  ggml-base.en.bin       cpu run2: wall=   5939.0ms init=51.2ms infer=5827.0ms rss=412MB vram=0MiB gfx=0% load=14.5 rocm=False
+  ggml-base.en.bin       hip run2: wall=   1208.0ms init=124.4ms infer=949.2ms rss=301MB vram=0MiB gfx=0% load=14.5 rocm=True
+  ggml-base.en.bin       cpu run3: wall=   4989.9ms init=53.8ms infer=4867.5ms rss=411MB vram=0MiB gfx=0% load=14.9 rocm=False
+  ggml-base.en.bin       hip run3: wall=   1195.3ms init=130.2ms infer=947.1ms rss=301MB vram=0MiB gfx=0% load=14.9 rocm=True
+  ggml-base.en.bin       cpu run4: wall=   5296.1ms init=53.2ms infer=5181.2ms rss=411MB vram=0MiB gfx=0% load=14.4 rocm=False
+  ggml-base.en.bin       hip run4: wall=   1182.6ms init=120.9ms infer=939.3ms rss=300MB vram=0MiB gfx=0% load=14.4 rocm=True
+  ggml-base.en.bin       cpu run5: wall=   6035.3ms init=53.5ms infer=5918.2ms rss=412MB vram=0MiB gfx=0% load=15.2 rocm=False
+  ggml-base.en.bin       hip run5: wall=   1174.0ms init=119.2ms infer=938.5ms rss=301MB vram=0MiB gfx=0% load=15.2 rocm=True
+  ggml-base.en.bin       cpu run1: wall=   7860.9ms init=58.6ms infer=7740.0ms rss=412MB vram=1981MiB gfx=8% load=15.6 rocm=False
+  ggml-base.en.bin       hip run1: wall=   1198.2ms init=129.3ms infer=947.2ms rss=301MB vram=2649MiB gfx=86% load=14.5 rocm=True
+  ggml-base.en.bin       cpu run2: wall=   8196.2ms init=57.4ms infer=8074.6ms rss=412MB vram=1981MiB gfx=8% load=14.8 rocm=False
+  ggml-base.en.bin       hip run2: wall=   1225.2ms init=130.6ms infer=976.9ms rss=301MB vram=2649MiB gfx=84% load=14.0 rocm=True
+  -> wall cpu 5449.1ms / hip 1195.3ms, speedup 4.56x, identical transcripts: True
+=== ggml-small.en.bin ===
+  ggml-small.en.bin      cpu run1: wall=  46794.9ms init=111.7ms infer=46617.5ms rss=855MB vram=0MiB gfx=0% load=21.1 rocm=False
+  ggml-small.en.bin      hip run1: wall=   1758.4ms init=188.9ms infer=1444.7ms rss=303MB vram=0MiB gfx=0% load=21.1 rocm=True
+  ggml-small.en.bin      cpu run2: wall= 107389.5ms init=106.1ms infer=107217.4ms rss=856MB vram=0MiB gfx=0% load=21.9 rocm=False
+  ggml-small.en.bin      hip run2: wall=   1947.4ms init=224.5ms infer=1588.1ms rss=303MB vram=0MiB gfx=0% load=21.9 rocm=True
+  ggml-small.en.bin      cpu run3: wall=  66251.2ms init=171.5ms infer=66005.5ms rss=855MB vram=0MiB gfx=0% load=22.2 rocm=False
+  ggml-small.en.bin      hip run3: wall=   1805.9ms init=211.8ms infer=1462.0ms rss=303MB vram=0MiB gfx=0% load=22.2 rocm=True
+  ggml-small.en.bin      cpu run4: wall=  21911.6ms init=125.7ms infer=21719.5ms rss=854MB vram=0MiB gfx=0% load=22.7 rocm=False
+  ggml-small.en.bin      hip run4: wall=   1863.4ms init=217.7ms infer=1518.1ms rss=303MB vram=0MiB gfx=0% load=21.4 rocm=True
+  ggml-small.en.bin      cpu run5: wall=  39915.7ms init=120.4ms infer=39731.9ms rss=857MB vram=0MiB gfx=0% load=21.6 rocm=False
+  ggml-small.en.bin      hip run5: wall=   1767.6ms init=188.9ms infer=1456.5ms rss=303MB vram=0MiB gfx=0% load=21.6 rocm=True
+  ggml-small.en.bin      cpu run1: wall= 201737.2ms init=234.8ms infer=201358.3ms rss=854MB vram=2131MiB gfx=19% load=26.2 rocm=False
+  ggml-small.en.bin      hip run1: wall=   1870.9ms init=221.9ms infer=1517.0ms rss=303MB vram=3119MiB gfx=92% load=24.8 rocm=True
+  ggml-small.en.bin      cpu run2: wall= 106232.0ms init=136.0ms infer=106022.5ms rss=855MB vram=2043MiB gfx=15% load=24.7 rocm=False
+  ggml-small.en.bin      hip run2: wall=   2233.3ms init=338.8ms infer=1580.0ms rss=303MB vram=3106MiB gfx=90% load=24.7 rocm=True
+  -> wall cpu 46794.9ms / hip 1805.9ms, speedup 25.91x, identical transcripts: True
+=== ggml-medium.en.bin ===
+  ggml-medium.en.bin     cpu run1: wall= 115466.1ms init=440.1ms infer=114874.2ms rss=2045MB vram=0MiB gfx=0% load=25.1 rocm=False
+  ggml-medium.en.bin     hip run1: wall=   3787.9ms init=674.0ms infer=2862.0ms rss=306MB vram=0MiB gfx=0% load=23.4 rocm=True
+  ggml-medium.en.bin     cpu run2: wall=  98086.3ms init=280.0ms infer=97722.4ms rss=2044MB vram=0MiB gfx=0% load=22.9 rocm=False
+  ggml-medium.en.bin     hip run2: wall=   3330.4ms init=391.1ms infer=2810.1ms rss=306MB vram=0MiB gfx=0% load=22.9 rocm=True
+  ggml-medium.en.bin     cpu run3: wall=  42326.6ms init=319.0ms infer=41926.9ms rss=2044MB vram=0MiB gfx=0% load=21.0 rocm=False
+  ggml-medium.en.bin     hip run3: wall=   3267.7ms init=370.4ms infer=2777.0ms rss=307MB vram=0MiB gfx=0% load=19.7 rocm=True
+  ggml-medium.en.bin     cpu run4: wall=  45320.4ms init=293.9ms infer=44953.0ms rss=2045MB vram=0MiB gfx=0% load=19.3 rocm=False
+  ggml-medium.en.bin     hip run4: wall=   3373.5ms init=377.2ms infer=2799.7ms rss=307MB vram=0MiB gfx=0% load=19.3 rocm=True
+  ggml-medium.en.bin     cpu run5: wall=  40060.5ms init=290.1ms infer=39704.3ms rss=2045MB vram=0MiB gfx=0% load=20.0 rocm=False
+  ggml-medium.en.bin     hip run5: wall=   3248.4ms init=364.5ms infer=2766.3ms rss=307MB vram=0MiB gfx=0% load=18.7 rocm=True
+  ggml-medium.en.bin     cpu run1: wall=  54224.3ms init=306.8ms infer=53847.3ms rss=2045MB vram=2008MiB gfx=9% load=19.2 rocm=False
+  ggml-medium.en.bin     hip run1: wall=   3276.9ms init=376.4ms infer=2784.0ms rss=306MB vram=4300MiB gfx=97% load=18.0 rocm=True
+  ggml-medium.en.bin     cpu run2: wall=  54525.7ms init=302.0ms infer=54157.5ms rss=2044MB vram=2008MiB gfx=9% load=19.1 rocm=False
+  ggml-medium.en.bin     hip run2: wall=   3308.2ms init=383.7ms infer=2804.5ms rss=307MB vram=4300MiB gfx=96% load=17.8 rocm=True
+  -> wall cpu 45320.4ms / hip 3330.4ms, speedup 13.61x, identical transcripts: True
+wrote /var/tmp/bench-raw/multi-summary.json
