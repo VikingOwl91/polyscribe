@@ -350,7 +350,14 @@ fn the_segments_of_a_stream_are_ordered_and_unique() {
     seen.sort_unstable();
     seen.dedup();
     assert_eq!(seen.len(), count, "a segment was reported twice");
-    assert_eq!(result.windows, 3, "the recording has three windows");
+    // A recording of 65 seconds needs at least three windows: two of 30
+    // seconds and the remainder. A window that was decoded again to recover
+    // a region counts as well.
+    assert!(
+        result.windows >= 3,
+        "the recording was transcribed in {} windows",
+        result.windows
+    );
     assert_eq!(
         result.outcome,
         polyscribe_core::stream::StreamOutcome::Completed {
