@@ -1,0 +1,21 @@
+{
+  "label": "medium-before-hip",
+  "binary": "/var/tmp/polyscribe-hip-final",
+  "backend": "hip",
+  "audio": "/var/tmp/opencode/bench/medium-10min.wav",
+  "runs": 2,
+  "wall_median_ms": 5484.8,
+  "wall_min_ms": 5355.0,
+  "wall_max_ms": 5484.8,
+  "peak_rss_mib": 362.5,
+  "vram_peak_mib": 2816,
+  "windows": null,
+  "model_loads": 1,
+  "segments": 111,
+  "timestamps_monotonic": true,
+  "max_segment_overlap_s": 0.0,
+  "transcript_sha": [
+    "8849e5911da2baaa"
+  ],
+  "loadavg_median": 21.3
+}

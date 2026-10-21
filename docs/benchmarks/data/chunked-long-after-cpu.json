@@ -1,0 +1,21 @@
+{
+  "label": "long-after-cpu",
+  "binary": "/var/tmp/polyscribe-s6-notail",
+  "backend": "cpu",
+  "audio": "/var/tmp/opencode/bench/long-60min.wav",
+  "runs": 1,
+  "wall_median_ms": 2826780.7,
+  "wall_min_ms": 2826780.7,
+  "wall_max_ms": 2826780.7,
+  "peak_rss_mib": 231.3,
+  "vram_peak_mib": 2852,
+  "windows": 131,
+  "model_loads": 1,
+  "segments": 669,
+  "timestamps_monotonic": true,
+  "max_segment_overlap_s": 0.0,
+  "transcript_sha": [
+    "240f9c183ae0db70"
+  ],
+  "loadavg_median": 33.5
+}

@@ -11,7 +11,6 @@ use anyhow::{Context, anyhow};
 use chrono::Local;
 use std::env;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 #[cfg(unix)]
 use libc::{O_WRONLY, close, dup, dup2, open};
@@ -161,6 +160,7 @@ macro_rules! dlog {
 }
 
 pub mod backend;
+pub mod chunked;
 pub mod config;
 pub mod error;
 pub mod gpu;
@@ -456,39 +456,15 @@ fn scan_model_dir(dir: &Path) -> std::io::Result<Vec<(u64, PathBuf)>> {
 /// memory stays close to the PCM buffer itself instead of additionally holding
 /// the raw byte stream, and no temp file is used (a fixed temp file name would
 /// collide between concurrent runs). A trailing partial sample (if any) is dropped.
+///
+/// This holds the whole recording in memory, so it scales with the duration
+/// of the input. The transcriber does not use it: it decodes the audio in
+/// windows with [`chunked::ChunkedAudio`], which keeps the memory of a
+/// transcription independent of the length of the recording.
 pub fn decode_audio_to_pcm_f32_ffmpeg(audio_path: &Path) -> Result<Vec<f32>> {
     use std::io::Read as _;
-    use std::process::Stdio;
 
-    let mut child = Command::new("ffmpeg")
-        .arg("-hide_banner")
-        .arg("-loglevel")
-        .arg("error")
-        .arg("-i")
-        .arg(audio_path)
-        .arg("-f")
-        .arg("f32le")
-        .arg("-ac")
-        .arg("1")
-        .arg("-ar")
-        .arg("16000")
-        .arg("pipe:1")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                anyhow!(
-                    "ffmpeg not found on PATH. Please install ffmpeg and ensure it is available."
-                )
-            } else {
-                anyhow!(
-                    "Failed to execute ffmpeg for {}: {}",
-                    audio_path.display(),
-                    e
-                )
-            }
-        })?;
+    let mut child = crate::chunked::spawn_ffmpeg_decoder(audio_path)?;
 
     let stdout = child.stdout.take().expect("ffmpeg stdout was piped");
     let mut stderr = child.stderr.take().expect("ffmpeg stderr was piped");

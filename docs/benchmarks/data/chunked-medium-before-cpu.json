@@ -1,0 +1,21 @@
+{
+  "label": "medium-before-cpu",
+  "binary": "/var/tmp/opencode/bench/polyscribe-cpu-s4",
+  "backend": "cpu",
+  "audio": "/var/tmp/opencode/bench/medium-10min.wav",
+  "runs": 2,
+  "wall_median_ms": 45827.6,
+  "wall_min_ms": 43392.1,
+  "wall_max_ms": 45827.6,
+  "peak_rss_mib": 362.4,
+  "vram_peak_mib": 2331,
+  "windows": null,
+  "model_loads": 1,
+  "segments": 111,
+  "timestamps_monotonic": true,
+  "max_segment_overlap_s": 0.0,
+  "transcript_sha": [
+    "8849e5911da2baaa"
+  ],
+  "loadavg_median": 16.4
+}

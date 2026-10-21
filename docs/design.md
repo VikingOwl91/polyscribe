@@ -24,6 +24,15 @@ PolyScribe is a Cargo workspace CLI that orchestrates:
 4) The selected backend transcribes via whisper-rs, producing segments.
 5) Segments are sorted, reindexed, and written to JSON + TOML + SRT (or JSON to stdout).
 
+### Long recordings
+
+The audio of a media file is decoded incrementally by ffmpeg and handed to
+the transcriber in windows of 30 seconds, the amount of audio whisper's
+encoder takes at once. Only the window is in memory, so the memory a
+transcription needs does not grow with the length of the recording. The
+window boundaries, the reconciliation of the segments and the measurements
+are described in `docs/benchmarks/chunked-transcription.md`.
+
 ### Model context lifecycle
 
 The backend owns a session that holds the loaded Whisper model. The model is

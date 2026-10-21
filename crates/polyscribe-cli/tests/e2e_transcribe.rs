@@ -242,3 +242,201 @@ fn e2e_transcribe_speech_fixture_with_real_model() {
         "TOML item count must match JSON"
     );
 }
+
+/// Write the committed fixture repeated `times` times, so the recording is
+/// long enough to cross a transcription window. The samples are repeated, not
+/// the whole file, so the result stays a valid WAV file.
+fn write_repeated_fixture(path: &Path, times: usize) {
+    let bytes = fs::read(fixture("speech.wav")).unwrap();
+
+    // Locate the data chunk of the WAV file.
+    let mut pos = 12;
+    let (data_start, data_len) = loop {
+        let id = &bytes[pos..pos + 4];
+        let size = u32::from_le_bytes(bytes[pos + 4..pos + 8].try_into().unwrap()) as usize;
+        if id == b"data" {
+            break (pos + 8, size);
+        }
+        pos += 8 + size + (size % 2);
+    };
+
+    let samples = &bytes[data_start..data_start + data_len];
+    let total = data_len * times;
+
+    // The header is everything before the data chunk, with the sizes fixed
+    // up for the repeated samples.
+    let mut out = bytes[..data_start - 8].to_vec();
+    let riff_size = (out.len() + 8 + total) as u32;
+    out[4..8].copy_from_slice(&riff_size.to_le_bytes());
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&(total as u32).to_le_bytes());
+    for _ in 0..times {
+        out.extend_from_slice(samples);
+    }
+    fs::write(path, out).unwrap();
+}
+
+#[test]
+fn e2e_multiple_files_load_the_model_once() {
+    let Some(model) = e2e_model() else {
+        eprintln!("SKIPPED: POLYSCRIBE_E2E_MODEL is not set; skipping model reuse test");
+        return;
+    };
+    if !ffmpeg_available() {
+        eprintln!("SKIPPED: ffmpeg is not available on PATH; skipping model reuse test");
+        return;
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let first = tmp.path().join("first.wav");
+    let second = tmp.path().join("second.wav");
+    fs::copy(fixture("speech.wav"), &first).unwrap();
+    fs::copy(fixture("speech.wav"), &second).unwrap();
+    let out_dir = tmp.path().join("out");
+
+    // The verbose output reports the model load, so the number of loads can
+    // be counted.
+    let output = Command::new(bin())
+        .args(["-vv", "--no-interaction", "--no-progress"])
+        .arg("transcribe")
+        .arg(&first)
+        .arg(&second)
+        .args(["--language", "en", "-o"])
+        .arg(&out_dir)
+        .env("WHISPER_MODEL", &model)
+        .output()
+        .expect("failed to spawn polyscribe");
+    assert!(
+        output.status.success(),
+        "transcribe failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let loads = stderr.matches("loading model from").count();
+    assert_eq!(loads, 1, "the model must be loaded once for two files");
+
+    // Both files produced their own output.
+    let mut outputs = 0;
+    for entry in fs::read_dir(&out_dir).unwrap() {
+        let name = entry.unwrap().file_name();
+        let name = name.to_string_lossy();
+        if name.ends_with(".json") {
+            outputs += 1;
+        }
+    }
+    assert_eq!(outputs, 2, "every input file keeps its own output");
+}
+
+#[test]
+fn e2e_long_recording_keeps_the_timeline_contiguous() {
+    let Some(model) = e2e_model() else {
+        eprintln!("SKIPPED: POLYSCRIBE_E2E_MODEL is not set; skipping long recording test");
+        return;
+    };
+    if !ffmpeg_available() {
+        eprintln!("SKIPPED: ffmpeg is not available on PATH; skipping long recording test");
+        return;
+    }
+
+    // Twelve copies of the fixture: long enough to cross a window
+    // boundary, short enough for a test.
+    let tmp = tempfile::tempdir().unwrap();
+    let audio = tmp.path().join("long.wav");
+    write_repeated_fixture(&audio, 12);
+    let out_dir = tmp.path().join("out");
+
+    let output = Command::new(bin())
+        .args(["--no-interaction", "--no-progress"])
+        .arg("transcribe")
+        .arg(&audio)
+        .args(["--language", "en"])
+        .arg("-o")
+        .arg(&out_dir)
+        .env("WHISPER_MODEL", &model)
+        .output()
+        .expect("failed to spawn polyscribe");
+    assert!(
+        output.status.success(),
+        "transcribe failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json_path = fs::read_dir(&out_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|e| e == "json"))
+        .expect("missing JSON output");
+    let root: OutputRoot =
+        serde_json::from_str(&fs::read_to_string(&json_path).unwrap()).expect("JSON must parse");
+
+    assert!(
+        root.items.len() >= 12,
+        "every repetition of the fixture must be transcribed, got {} segments",
+        root.items.len()
+    );
+    // The timeline is contiguous: no gap and no overlap between the
+    // segments, and the timestamps only grow.
+    for pair in root.items.windows(2) {
+        assert!(
+            pair[0].start <= pair[1].start,
+            "the timestamps must not go backwards"
+        );
+        assert!(
+            pair[0].end <= pair[1].start + 0.2,
+            "the segments must not overlap: {} then {}",
+            pair[0].start,
+            pair[1].start
+        );
+    }
+    assert!(
+        root.items[0].start < 0.5,
+        "the first segment starts at the beginning"
+    );
+}
+
+#[test]
+fn e2e_transcription_on_the_gpu() {
+    let Some(model) = e2e_model() else {
+        eprintln!("SKIPPED: POLYSCRIBE_E2E_MODEL is not set; skipping GPU e2e test");
+        return;
+    };
+    if !ffmpeg_available() {
+        eprintln!("SKIPPED: ffmpeg is not available on PATH; skipping GPU e2e test");
+        return;
+    }
+    // The GPU backend needs a device that ggml reports.
+    let devices = polyscribe_core::gpu::gpu_devices(polyscribe_core::gpu::GpuBackend::Hip);
+    if devices.is_empty() {
+        eprintln!("SKIPPED: no ROCm device is available; skipping GPU e2e test");
+        return;
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let audio = tmp.path().join("speech.wav");
+    fs::copy(fixture("speech.wav"), &audio).unwrap();
+    let out_dir = tmp.path().join("out");
+
+    let output = Command::new(bin())
+        .args(["-vv", "--no-interaction", "--no-progress"])
+        .arg("transcribe")
+        .arg(&audio)
+        .args(["--language", "en", "--gpu-backend", "hip"])
+        .arg("-o")
+        .arg(&out_dir)
+        .env("WHISPER_MODEL", &model)
+        .output()
+        .expect("failed to spawn polyscribe");
+    assert!(
+        output.status.success(),
+        "transcribe failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("using ROCm0 backend"),
+        "the GPU backend must be used, log was: {stderr}"
+    );
+}
