@@ -816,21 +816,26 @@ fn trace_hole(window: &AudioWindow, hole: &Hole, attempt: Option<u64>) {
         let end = (hole.end.saturating_sub(window.start_sample) as usize).min(window.samples.len());
         rms_dbfs(&window.samples[start.min(end)..end])
     };
+    let start = hole.start.saturating_sub(window.start_sample) as usize;
+    let end = (hole.end.saturating_sub(window.start_sample) as usize).min(window.samples.len());
+    let speech = speech_frame_ratio(&window.samples[start.min(end)..end]);
     match attempt {
         Some(rewind) => eprintln!(
-            "TRACE   hole start_sample={} end_sample={} len={:.3}s level={:.1}dBFS action=recover rewind_sample={}",
+            "TRACE   hole start_sample={} end_sample={} len={:.3}s level={:.1}dBFS speech={:.3} action=recover rewind_sample={}",
             hole.start,
             hole.end,
             hole.len() as f64 / rate,
             level,
+            speech,
             rewind
         ),
         None => eprintln!(
-            "TRACE   hole start_sample={} end_sample={} len={:.3}s level={:.1}dBFS action=accept",
+            "TRACE   hole start_sample={} end_sample={} len={:.3}s level={:.1}dBFS speech={:.3} action=accept",
             hole.start,
             hole.end,
             hole.len() as f64 / rate,
-            level
+            level,
+            speech
         ),
     }
 }

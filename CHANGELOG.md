@@ -13,18 +13,21 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Transcribe: the Whisper model is loaded once per invocation and reused for every input file, instead of being loaded again for each file. Every file still gets its own inference state, so outputs, timestamps and error handling stay independent.
 
 ### Fixed
+- Transcribe: a region that whisper did not transcribe is no longer lost. whisper does not always report a segment for the beginning of the audio it is given: for some positions it reports its first segment many seconds into the window, and for others it reports nothing at all. The pipeline advanced to the last segment of the window, so the speech in front of it was never transcribed and never offered again. Such a region is decoded again from a slightly different position, which gives the speech back: on the recording that reproduces it, the word error rate goes from 0.679 to 0.277, and the transcript is better than the one of the implementation that hands the whole recording to whisper. A region of silence is not decoded again, and the attempts are bounded.
 - Transcribe: a GPU-enabled build ran every transcription on the GPU, also the ones that asked for the CPU, while the log still reported the selected backend. The selected backend now reaches the model parameters, so a CPU request keeps the model in RAM and a GPU request offloads it.
 - Transcribe: a segment that was cut short by the end of a window is no longer dropped before it is decoded again. The re-decode can start a little before the dropped segment and was then mistaken for a duplicate, so a whole sentence could be missing from the transcript. The cut segment is kept until the re-decode replaces it.
 - Transcribe: segments without a duration are no longer written to the transcript. whisper reports such a segment at the end of a window, with the text of the speech around it; it showed up as a subtitle without a duration, on top of the segment next to it.
 
 ### Added
 - Core: `chunked` module that decodes a media file incrementally and hands it to the transcriber in windows, so the memory of a transcription is independent of the length of the recording
-- Docs: `docs/benchmarks/chunked-transcription.md` describes the pipeline, the memory bounds, the window and reconciliation strategy, the boundary quality measurement and the measured before/after results
+- Docs: `docs/benchmarks/chunked-transcription.md` describes the pipeline, the memory bounds, the window and reconciliation strategy, the boundary quality measurement, the recovery of a region that whisper did not transcribe and the measured before/after results
 - Core: `gpu` module with a device probe for the GPU backends, and unit tests for the backend selection contract (explicit CPU, explicit GPU with and without a device, and the automatic fallback).
 - Tests: CLI integration tests for the backend selection contract.
 - Tests: CLI integration tests for the window boundaries, with speech fixtures that cross a boundary. They check that every stretch of speech is covered by a segment, that the timestamps are ordered and do not overlap, and that a minute of silence does not need more than four windows.
-- Tests: speech fixtures for the boundary tests, generated with espeak-ng and resampled to 16 kHz mono, with the reference transcript of every clip.
+- Tests: CLI integration tests for the recovery of a region that whisper did not transcribe, with the recording that reproduces it and a recording with varied speech.
+- Tests: speech fixtures for the boundary and the recovery tests, generated with espeak-ng and resampled to 16 kHz mono, with the reference transcript of every clip.
 - Scripts: `scripts/benchmarks/boundary_quality.py` composes the boundary fixtures, transcribes them with two binaries and reports the word error rate, the missing and the duplicated words against the reference transcript.
+- Scripts: `scripts/benchmarks/recovery_quality.py` does the same for the boundary and the recovery fixtures and reports the number of windows, the recovery attempts and the regions with speech that were not recovered.
 - Docs: the backend selection contract and the model context lifecycle in `docs/usage.md` and `docs/design.md`, plus the before/after measurements of the model context reuse in `docs/benchmarks/amd-rx-9070-xt.md`.
 
 ## v0.1.0-alpha.1 - 2026-10-21

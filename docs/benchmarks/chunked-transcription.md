@@ -276,7 +276,104 @@ silence does not need more than four windows.
 The tests need a Whisper model and skip themselves without one, like the other
 end-to-end tests.
 
-## 7. Quality trade-offs
+## 7. The recovery of a region that whisper did not transcribe
+
+whisper does not always report a segment for the beginning of the audio it
+is given. For some positions it reports its first segment many seconds into
+the window, and for others it reports nothing at all. The pipeline advanced to
+the last segment of the window, so the audio in front of it was never
+transcribed and never offered again.
+
+### How it happens
+
+The behavior depends on the position of the window and on nothing else. The
+same window, decoded again and again, gives the same result, with any number
+of threads and with or without the context of the previous window. A window
+that starts a fraction of a second earlier reports the speech that the first
+one did not. The test
+`crates/polyscribe-core/tests/whisper_decode_alignment.rs` measures it:
+
+```
+the window at 0 s: (22.08, 1), a quarter of a second later: (0.0, 5)
+```
+
+The first number is the position of the first segment and the second the
+number of segments: the window at 0 s reports one segment, 22.08 s into it,
+and the window a quarter of a second later reports five segments, the first
+one at its beginning.
+
+On the long recording of the benchmark, the window that started at 77.80 s
+left 22.08 s untranscribed, and the whole-file transcription did not: its mel
+is continuous over the whole recording, so the decoder always has the text it
+has produced as its context.
+
+### What the pipeline does
+
+1. **The region is noticed.** A window whose first segment starts more than a
+   second after the window begins has a region that whisper did not report.
+   The region starts at the end of the transcribed timeline and ends where the
+   first segment begins.
+2. **Silence is not retried.** The share of the frames of the region that
+   carry speech level energy decides: a region of silence that ends in the
+   first words of a segment is silence, not speech that was missed. The level
+   of the whole region is not enough for that, because the region of a window
+   that starts with silence holds the words of the segment that whisper
+   reported.
+3. **The region is decoded again.** The window is decoded again from a
+   slightly different position, because the position decides whether whisper
+   reports the speech. The offsets are a quarter of a second in both
+   directions, then half a second, then a second. The attempt that looks back
+   comes first, so that the segment that is decoded again covers the region.
+   The attempts are bounded: six of them, and a region that none of them
+   recovers is left as it is.
+4. **The text of the region is kept.** A segment of the recovery window that
+   reaches beyond the transcribed timeline is the only text for the region, so
+   it is kept. Its start is moved to the end of the transcribed timeline, so
+   that the segments stay ordered and do not overlap.
+
+The samples in front of a window are kept for two seconds, so that a window
+can start before the region that was not transcribed. That is 320 kB of audio
+and does not depend on the length of the recording.
+
+### What it does
+
+The reproducer is the long recording of the benchmark, cut at 77.80 s. The
+model is `ggml-tiny.en.bin`, the model of the CI, because the position that
+whisper skips depends on the model.
+
+| Implementation | WER | Missing words | Duplicated words | Windows | Recovery attempts |
+|---|---|---|---|---|---|
+| Whole file | 0.679 | 79 | 4 | 1 | 0 |
+| Chunked, without the recovery | 0.679 | 79 | 4 | 2 | 0 |
+| Chunked, with the recovery | **0.277** | **34** | 4 | 2 | 1 |
+
+The recovery gives back the 22 seconds of speech and the transcript of the
+reproducer is better than the one of the whole-file implementation. On the
+nine boundary fixtures and on the recording with varied speech the recovery
+does not change the result: the word error rate is the same as without it,
+because no region of those recordings is skipped.
+
+The CPU and the HIP backend give the same result: the same word error rate,
+the same recovery attempt, the same text.
+
+### What it cannot do
+
+The recovery cannot prove that whisper recognized every word of a recording.
+It can prove that a region that whisper did not report was offered to
+whisper again, from a position where whisper does report speech, and that
+the text of that region is in the transcript. A region that no attempt
+recovers keeps its hole, and the trace reports it:
+
+```
+TRACE   hole start_sample=0 end_sample=353280 len=22.080s level=-20.5dBFS speech=1.000 action=accept
+```
+
+The trace is written to stderr when `POLYSCRIBE_WINDOW_TRACE` is set, and it
+reports the sample range of every window, the segments of the window with
+their window relative and global timestamps, the region that was not
+transcribed and what was done about it.
+
+## 8. Quality trade-offs
 
 The transcript of a recording is not bit for bit the same as before. What
 changes:
@@ -296,7 +393,7 @@ changes:
 A recording that is shorter than one window (30 s) is transcribed exactly as
 before: the output is byte for byte identical.
 
-## 8. Measurements
+## 9. Measurements
 
 ### Method
 
@@ -388,14 +485,14 @@ path instead of holding the decoded audio in RAM. The wall clock does not
 regress on the GPU path, and the transcription of a short recording is
 unchanged.
 
-## 9. Backend behaviour
+## 10. Backend behaviour
 
 The chunked path is backend independent: the same windows, the same
 reconciliation and the same output for the CPU and the HIP backend. The
 backend selection rules of sprint 4 are unchanged, including the requirement
 that an explicit GPU request needs a device that ggml reports.
 
-## 10. Known limitations
+## 11. Known limitations
 
 * The CPU wall clock of a long recording is dominated by the whisper
   inference, and the measurement is noisy on a shared host. The comparison
@@ -412,11 +509,12 @@ that an explicit GPU request needs a device that ggml reports.
   word in one of nine cases.
 * whisper can skip the beginning of a window: on the hour long recording,
   which repeats the same sentence, it skips 22 seconds when the window starts
-  at exactly 77.8 s. The chunked pipeline leaves a hole in the transcript
-  then, because it advances to the last segment it has. The whole-file
-  implementation does not show it, because the decoder there keeps the text it
-  has already produced. Detecting the hole and offering the audio again is not
-  implemented.
+  at exactly 77.8 s. The pipeline decodes such a region again from a
+  slightly different position, which gives the speech back (section 7). A
+  region that none of the attempts recovers keeps its hole, and the trace
+  reports it. The pipeline cannot prove that whisper recognized every word of
+  a recording: it can prove that a region that whisper did not report was
+  offered to whisper again.
 * The boundary fixtures are synthetic speech. They cover the positions of the
   window boundaries, but they cannot cover the variety of a real recording.
   The reference transcript is the text of the synthesizer, so the word error
@@ -428,7 +526,7 @@ that an explicit GPU request needs a device that ggml reports.
   the whole-file implementation, but the window boundaries decide how often it
   happens, so a recording with many repetitions can lose a repetition.
 
-## 11. Reproduction commands
+## 12. Reproduction commands
 
 ```bash
 # Build
@@ -455,6 +553,21 @@ python3 scripts/benchmarks/boundary_quality.py \
 # The boundary regression tests
 POLYSCRIBE_E2E_MODEL=/path/to/ggml-base.en.bin \
   cargo test -p polyscribe-cli --test integration_boundary
+
+# The recovery of a region that whisper did not transcribe, against the
+# implementation without the recovery and the whole-file implementation
+python3 scripts/benchmarks/recovery_quality.py \
+  --chunked target/release/polyscribe \
+  --previous /path/to/the/previous/binary \
+  --whole-file /path/to/the/whole-file/binary \
+  --model /path/to/ggml-tiny.en.bin \
+  --backend cpu \
+  --out docs/benchmarks/data/recovery-quality-tiny-cpu.json
+
+# The window handling of a transcription, with the sample range of every
+# window, the segments and the regions that whisper did not transcribe
+POLYSCRIBE_WINDOW_TRACE=1 ./target/release/polyscribe transcribe recording.wav \
+  --language en -o out/ 2> window-trace.log
 
 # The recordings used in section 7
 python3 - << 'EOF'

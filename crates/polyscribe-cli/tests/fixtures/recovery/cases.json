@@ -9,17 +9,50 @@
       "name": "varied-speech",
       "description": "Four windows of speech with different sentences, different gaps and one repetition.",
       "clips": [
-        { "file": "clip1.wav", "offset": 1.5 },
-        { "file": "clip4.wav", "offset": 9.0 },
-        { "file": "clip2.wav", "offset": 22.0 },
-        { "file": "clip3.wav", "offset": 28.5 },
-        { "file": "clip6.wav", "offset": 40.0 },
-        { "file": "clip1.wav", "offset": 58.0 },
-        { "file": "clip1.wav", "offset": 61.0 },
-        { "file": "clip4.wav", "offset": 75.0 },
-        { "file": "clip2.wav", "offset": 95.0 },
-        { "file": "clip6.wav", "offset": 100.0 },
-        { "file": "clip3.wav", "offset": 110.0 }
+        {
+          "file": "clip1.wav",
+          "offset": 1.5
+        },
+        {
+          "file": "clip4.wav",
+          "offset": 9.0
+        },
+        {
+          "file": "clip2.wav",
+          "offset": 22.0
+        },
+        {
+          "file": "clip3.wav",
+          "offset": 28.5
+        },
+        {
+          "file": "clip6.wav",
+          "offset": 40.0
+        },
+        {
+          "file": "clip1.wav",
+          "offset": 58.0
+        },
+        {
+          "file": "clip1.wav",
+          "offset": 62.0
+        },
+        {
+          "file": "clip4.wav",
+          "offset": 75.0
+        },
+        {
+          "file": "clip2.wav",
+          "offset": 95.0
+        },
+        {
+          "file": "clip6.wav",
+          "offset": 100.0
+        },
+        {
+          "file": "clip3.wav",
+          "offset": 110.0
+        }
       ]
     }
   ]
