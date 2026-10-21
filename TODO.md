@@ -124,14 +124,26 @@ ideas** (directional, not scheduled).
 - The STT and YTT projects are separate today. Consolidating them into this
   repository would give one codebase, one release train and one plugin
   protocol, instead of three.
-- The shape of the consolidation is not decided yet, and nothing about it is
-  implemented. The steps that come first are the ones this repository can do
-  on its own: the branch and release policy (`docs/releases.md`), the
-  `TranscribeBackend` extension point, and the plugin protocol as the
-  integration surface for the parts that stay separate.
-- Decisions that belong to the consolidation planning, not to a feature
-  sprint: the license and the versioning of the combined project, the name of
-  the binaries, and whether the YTT parts become a plugin or a subcommand.
+- The decisions are taken (2026-10-21):
+  - **License**: MIT for PolyScribe, STT and YTT. Both Python repositories are
+    the work of one author and hold no third-party code, so the license can be
+    set on them; their code may then be used as the specification of a port.
+  - **Local inference**: whisper.cpp is the only supported local engine. The
+    openai-whisper CLI path of the Python tools is retired, not ported.
+  - **Microphone**: genuine live audio streaming, not
+    record-to-WAV-then-transcribe. The streaming foundation is in place
+    (`polyscribe-core::stream`); a capture source is what is missing.
+  - **Language**: automatic detection is the default, with an explicit
+    override. The core detects the language once and pins it; the command
+    line still requires `--language` and changes with the workflow that
+    brings the automatic default to the user.
+  - **Command line**: the workflows become `polyscribe` subcommands. No
+    compatibility wrappers for `stt` and `ytt` are kept.
+  - **Home Assistant**: the YTT bridge is not migrated.
+- Nothing about the migration is implemented yet, apart from the streaming
+  foundation it needs. The decisions that remain: the shape of the source
+  adapters, whether the remote engine (Voxtral) is a first-class engine, and
+  the versioning of the combined project.
 
 ### L4. ytt / STT-CLI integration (L)
 - Long-term direction: a reusable speech-processing foundation (file, mic,

@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## Unreleased
+
+### Added
+- Core: a streaming input for the transcription pipeline. A source delivers decoded 16 kHz mono samples in blocks while the transcription runs; the pipeline turns them into the same 30 second windows the file path produces, so the window handling, the reconciliation of the segments and the recovery of a region that whisper did not report are shared. A source error ends the run with that error, and a cancellation token stops the run before the next window is submitted. Only the finalized segments are reported, so a provisional segment is never presented as final. The command line is unchanged.
+
 ## v0.1.0-alpha.2 - 2026-10-21
 
 ### Changed
