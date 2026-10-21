@@ -19,6 +19,18 @@ use polyscribe_core::stream::{CancellationToken, ScriptedAudioSource, StreamEven
 
 const SAMPLE_RATE: u32 = 16_000;
 
+/// The backend the tests run on.
+///
+/// The CI has no GPU, so the tests run on the CPU. A machine with a GPU can
+/// run them on it with `POLYSCRIBE_TEST_BACKEND=hip`.
+fn test_backend() -> polyscribe_core::backend::BackendKind {
+    match std::env::var("POLYSCRIBE_TEST_BACKEND").as_deref() {
+        Ok("hip") => polyscribe_core::backend::BackendKind::Hip,
+        Ok("cuda") => polyscribe_core::backend::BackendKind::Cuda,
+        _ => polyscribe_core::backend::BackendKind::Cpu,
+    }
+}
+
 fn e2e_model() -> Option<PathBuf> {
     let path = PathBuf::from(std::env::var("POLYSCRIBE_E2E_MODEL").ok()?);
     path.is_file().then_some(path)
@@ -43,13 +55,20 @@ fn wav_samples(path: &Path) -> Vec<f32> {
 }
 
 /// A recording of about 65 seconds, built from the committed fixture.
+///
+/// The length can be changed with `POLYSCRIBE_TEST_AUDIO_SECONDS` for the
+/// measurements.
 fn long_recording() -> Vec<f32> {
+    let seconds: usize = std::env::var("POLYSCRIBE_TEST_AUDIO_SECONDS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(65);
     let samples = wav_samples(&fixture("speech.wav"));
     let mut out = Vec::new();
-    while out.len() < 65 * SAMPLE_RATE as usize {
+    while out.len() < seconds * SAMPLE_RATE as usize {
         out.extend_from_slice(&samples);
     }
-    out.truncate(65 * SAMPLE_RATE as usize);
+    out.truncate(seconds * SAMPLE_RATE as usize);
     out
 }
 
@@ -111,7 +130,7 @@ impl Run {
             let mut session = ModelSession::new();
             transcribe_stream(
                 &mut session,
-                polyscribe_core::backend::BackendKind::Cpu,
+                test_backend(),
                 Box::new(source),
                 "test",
                 Language::Explicit("en".to_string()),
@@ -240,7 +259,7 @@ fn a_stream_and_the_same_file_produce_the_same_transcript() {
     let mut events = Vec::new();
     let result = transcribe_stream(
         &mut session,
-        polyscribe_core::backend::BackendKind::Cpu,
+        test_backend(),
         Box::new(ScriptedAudioSource::new(samples.clone(), 4096)),
         "test",
         Language::Explicit("en".to_string()),
@@ -290,7 +309,7 @@ fn the_segments_of_a_stream_are_ordered_and_unique() {
     let mut events = Vec::new();
     let result = transcribe_stream(
         &mut session,
-        polyscribe_core::backend::BackendKind::Cpu,
+        test_backend(),
         Box::new(ScriptedAudioSource::new(long_recording(), 8192)),
         "test",
         Language::Explicit("en".to_string()),
@@ -418,7 +437,7 @@ fn a_failing_source_ends_the_run() {
     let mut session = ModelSession::new();
     let error = match transcribe_stream(
         &mut session,
-        polyscribe_core::backend::BackendKind::Cpu,
+        test_backend(),
         Box::new(source),
         "test",
         Language::Explicit("en".to_string()),
@@ -459,7 +478,7 @@ fn measure_the_streaming_transcription() {
     let mut windows = 0u64;
     let result = transcribe_stream(
         &mut session,
-        polyscribe_core::backend::BackendKind::Cpu,
+        test_backend(),
         Box::new(source),
         "test",
         Language::Explicit("en".to_string()),
