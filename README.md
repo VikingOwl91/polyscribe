@@ -9,7 +9,8 @@ PolyScribe is a fast, local-first CLI for transcribing audio/video and merging e
 - **Transcript merging**: merge multiple JSON transcripts, or merge and also keep per-file outputs.
 - **Model management**: `polyscribe models` subcommands to list, add, remove, verify, update, search, and download models, with a manifest cache, concurrent ranged downloads, and SHA-256 verification.
 - **Plugin system**: extensible via JSON-RPC (NDJSON) plugins discovered on `PATH` or in the XDG plugin directory.
-- **GPU backends**: CPU, CUDA, and ROCm/HIP; availability is a build-time property (`--features gpu-cuda` / `--features gpu-hip`). GPU support is experimental and not exercised in CI.
+- **GPU backends**: CPU, CUDA, and ROCm/HIP; availability is a build-time property (`--features gpu-cuda` / `--features gpu-hip`). GPU support is experimental: no GPU runtime is exercised in CI. The HIP backend is validated manually on an AMD Radeon RX 9070 XT with ROCm 7.2.
+- **Bounded memory for long recordings**: the audio is decoded and transcribed in windows of 30 seconds, so the peak memory of a transcription does not grow with the length of the recording.
 - **Outputs**: JSON, TOML, and SRT; speaker labels via per-file prompts (manual labeling only — there is no automatic speaker diarization).
 - **Machine-readable mode**: global `--json` flag for scripts.
 
@@ -95,6 +96,7 @@ Run `polyscribe -h` or `polyscribe <subcommand> -h` for the full reference; `doc
 - **No Vulkan backend**: PolyScribe does not wire up whisper.cpp's Vulkan backend; `--gpu-backend vulkan` is rejected.
 - **GPU support is experimental**: the CUDA and HIP backends are wired up at build time, but no GPU runtime is exercised in CI. Availability is a build-time property: build with `--features gpu-cuda` / `--features gpu-hip` and install the matching runtime; `--gpu-backend auto` picks CUDA → HIP → CPU among the backends compiled in.
 - **No automatic speaker diarization**: speaker labels are assigned manually per input file (`--set-speaker-names`); the downloader lists `tinydiarize` models but diarization is not wired into transcription.
+- **A transcript can be incomplete at a window boundary**: whisper does not always report a segment for the beginning of the audio it is given. PolyScribe decodes such a region again from a slightly different position, and warns on stderr when the region still holds no text. The check that decides whether a region carries speech is a level and a share of frames, not a voice activity detector, so the pipeline cannot promise that every word of a recording is in the transcript.
 
 ## Development
 

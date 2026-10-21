@@ -1230,7 +1230,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "polyscribe-cli"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -1253,7 +1253,7 @@ dependencies = [
 
 [[package]]
 name = "polyscribe-core"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1273,7 +1273,7 @@ dependencies = [
 
 [[package]]
 name = "polyscribe-host"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "anyhow",
  "directories",
@@ -1285,7 +1285,7 @@ dependencies = [
 
 [[package]]
 name = "polyscribe-plugin-tubescribe"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -1296,7 +1296,7 @@ dependencies = [
 
 [[package]]
 name = "polyscribe-protocol"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "serde",
  "serde_json",

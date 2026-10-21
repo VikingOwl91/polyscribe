@@ -10,7 +10,7 @@ resolver = "3"
 
 [workspace.package]
 edition = "2024"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 license = "MIT"
 # MSRV: matches whisper-rs-sys 0.15 (the whisper.cpp bindings crate).
 rust-version = "1.88"

@@ -1,8 +1,9 @@
 # Chunked transcription: bounded memory for long recordings
 
-Status: implemented on branch `feature/chunked-transcription` (based on `dev` at
-`694c957`), measured on 2026-10-21 with whisper.cpp 1.8.3 on an AMD Ryzen 7
-3700X and an AMD Radeon RX 9070 XT (ROCm 7.2).
+Status: shipped in `v0.1.0-alpha.2` (branch `feature/chunked-transcription`,
+merged into `dev` in `5eb22cb` and `25385be`), measured on 2026-10-21 with
+whisper.cpp 1.8.3 on an AMD Ryzen 7 3700X and an AMD Radeon RX 9070 XT
+(ROCm 7.2).
 
 ## 1. What changed and why
 
