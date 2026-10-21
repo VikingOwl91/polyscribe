@@ -6,7 +6,8 @@ PolyScribe is a Cargo workspace CLI that orchestrates:
 
 - `polyscribe-cli` (`crates/polyscribe-cli`): CLI parsing (`cli.rs`), command orchestration (`main.rs`), the `transcribe` pipeline (`transcribe.rs`), and stdout modes (`output.rs`).
 - `polyscribe-core` (`crates/polyscribe-core`): the engine —
-  - `backend.rs`: backend selection and the `TranscribeBackend` implementations (CPU/CUDA/HIP via whisper-rs),
+  - `backend.rs`: backend selection, the `TranscribeBackend` implementations (CPU/CUDA/HIP via whisper-rs) and the reconciliation of the windows,
+  - `chunked.rs`: the incremental decoding of a media file into windows of audio,
   - `models.rs`: model discovery, manifest caching, downloads, and the interactive downloader,
   - `model_manager.rs`: `ModelManager` (manifest, cache, ranged concurrent downloads, SHA-256 verification, gc/rm/verify),
   - `output.rs`: transcript types helpers, sorting/id reassignment, and JSON/TOML/SRT serialization,
@@ -32,6 +33,27 @@ encoder takes at once. Only the window is in memory, so the memory a
 transcription needs does not grow with the length of the recording. The
 window boundaries, the reconciliation of the segments and the measurements
 are described in `docs/benchmarks/chunked-transcription.md`.
+
+### Missing speech at a window boundary
+
+whisper does not always report a segment for the beginning of the audio it is
+given: for some positions it reports its first segment many seconds into the
+window, and for others it reports nothing at all. The behaviour depends on
+where the window starts, not on the model, the threads or the context of the
+previous window.
+
+The pipeline notices such a region and decodes it again from a slightly
+different position, because a window that starts a fraction of a second
+earlier reports the speech that the first one did not. The attempts are
+bounded, and the audio in front of the window is kept for two seconds so that
+a window can start before the region. A region that carries speech and that
+none of the attempts recovers is reported in a warning on stderr, with the
+file and the time range.
+
+The check that decides whether a region carries speech is a level and a share
+of frames, not a voice activity detector, so the pipeline cannot prove that
+every word of a recording is in the transcript. `docs/benchmarks/chunked-transcription.md`
+has the measurements and the limits.
 
 ### Model context lifecycle
 

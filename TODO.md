@@ -120,7 +120,20 @@ ideas** (directional, not scheduled).
   engines (remote APIs, other local models) implement the trait and register
   in `select_backend`.
 
-### L3. ytt / STT-CLI integration (L)
+### L3. Consolidation with the separate STT and YTT projects (L)
+- The STT and YTT projects are separate today. Consolidating them into this
+  repository would give one codebase, one release train and one plugin
+  protocol, instead of three.
+- The shape of the consolidation is not decided yet, and nothing about it is
+  implemented. The steps that come first are the ones this repository can do
+  on its own: the branch and release policy (`docs/releases.md`), the
+  `TranscribeBackend` extension point, and the plugin protocol as the
+  integration surface for the parts that stay separate.
+- Decisions that belong to the consolidation planning, not to a feature
+  sprint: the license and the versioning of the combined project, the name of
+  the binaries, and whether the YTT parts become a plugin or a subcommand.
+
+### L4. ytt / STT-CLI integration (L)
 - Long-term direction: a reusable speech-processing foundation (file, mic,
   URL ingestion; multiple engines; CLI/TUI/GUI frontends). The current
   workspace (core/cli/host/protocol) is the foundation for that.

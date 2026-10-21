@@ -6,11 +6,16 @@ The repository is a Cargo workspace: `polyscribe-core` (engine), `polyscribe-cli
 
 Workflow (fork → branch → PR)
 1) Fork the repository to your account.
-2) Create a feature branch off the integration branch (`dev`); `main` is protected:
-   - `git checkout -b feat/short-description`
+2) Create a branch off the integration branch (`dev`); `main` only carries published releases:
+   - `git checkout -b feature/short-description` (or `fix/…`, `chore/…`)
 3) Make changes with focused commits and good messages (conventional-commit style, e.g. `[feat] …`, `[fix] …`, `[refactor] …`, `[docs] …`, `[test] …`, `[build] …`).
 4) Run the checklist below.
-5) Push and open a Pull Request against `dev`.
+5) Push and open a Pull request against `dev` on Gitea, the source of truth.
+
+The branch model, the release procedure and the platform roles are described
+in `docs/releases.md`. In short: `dev` is the integration branch, `main`
+carries the latest published release, feature branches are short-lived, pull
+requests need a review and green CI, and `main` is never force-pushed.
 
 Developer checklist (before opening a PR)
 - Format:

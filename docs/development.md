@@ -11,7 +11,7 @@ This document describes how to build, test, and run PolyScribe locally, and how 
 
 ## Workspace layout
 
-- `crates/polyscribe-core`: engine — backends (`backend.rs`), transcription glue, model discovery (`models.rs`), `ModelManager` (`model_manager.rs`), config (`config.rs`), error type (`error.rs`), output rendering (`output.rs`), and the cliclack UI helpers (`ui.rs`, `ui/progress.rs`).
+- `crates/polyscribe-core`: engine — backends and the transcription of a recording in windows (`backend.rs`), the incremental audio decoding (`chunked.rs`), transcription glue, model discovery (`models.rs`), `ModelManager` (`model_manager.rs`), config (`config.rs`), error type (`error.rs`), output rendering (`output.rs`), and the cliclack UI helpers (`ui.rs`, `ui/progress.rs`).
 - `crates/polyscribe-cli`: the `polyscribe` binary — CLI parsing (`cli.rs`), command orchestration (`main.rs`), the `transcribe` pipeline (`transcribe.rs`), and stdout modes (`output.rs`).
 - `crates/polyscribe-host`: plugin discovery and process management.
 - `crates/polyscribe-protocol`: PSP/1 plugin protocol types.
@@ -59,6 +59,13 @@ This document describes how to build, test, and run PolyScribe locally, and how 
 - Tests that mutate environment variables take a shared lock (`ENV_LOCK`) so they can run in parallel safely.
 - The suite is feature-independent: run it with default features and, on hosts with ROCm, also with `cargo test --workspace --features polyscribe-cli/gpu-hip`.
 - `cargo test --workspace --release` additionally compiles and runs the release-only tests.
+- The boundary and recovery suites need a model and skip themselves without one:
+  `POLYSCRIBE_E2E_MODEL=/path/to/ggml-tiny.en.bin cargo test -p polyscribe-cli --test integration_boundary --test integration_recovery`.
+  The fixtures are in `crates/polyscribe-cli/tests/fixtures/boundary/` and
+  `crates/polyscribe-cli/tests/fixtures/recovery/`.
+- `POLYSCRIBE_WINDOW_TRACE=1` makes a transcription write the sample range of
+  every window, its segments and every region that whisper did not report to
+  stderr. It is a diagnostic, not part of the normal output.
 
 ## Clippy and formatting
 
