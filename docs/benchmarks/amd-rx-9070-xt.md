@@ -56,23 +56,28 @@ No extra CMake flags are needed. `hipcc` detects the installed GPU and compiles 
    16 GB tmpfs that was full, and the build failed with
    `error: unable to open output file '/tmp/mmid-3c79f0.hipi': 'No space left on device'`.
    With `TMPDIR=/var/tmp` the build succeeds.
-3. **A HIP build hard-depends on the ROCm runtime.** `libhipblas`, `libamdhip64`,
+3. **The GPU runtime needs a writable TMPDIR as well.** The HIP runtime compiles
+   device code at runtime, so a full `/tmp` makes a transcription fail with
+   `LLVM ERROR: IO failure on output stream: No space left on device` after the
+   model has been loaded. The same TMPDIR that makes the build work therefore has
+   to be set for the run, or `/tmp` needs free space.
+4. **A HIP build hard-depends on the ROCm runtime.** `libhipblas`, `libamdhip64`,
    `libhsa-runtime64`, `librocblas` and `librocsolver` are linked dynamically. Without
    them the binary does not start at all:
    `./polyscribe: error while loading shared libraries: libhipblas.so.3: cannot open shared object file` (exit 127).
    There is no graceful fallback to CPU, so a HIP-enabled binary is not portable to a
    machine without ROCm.
-4. **Backend selection was wrong in a GPU build, and is fixed on this branch.**
+5. **Backend selection was wrong in a GPU build, and is fixed in sprint 4.**
    `whisper-rs` defaults `WhisperContextParameters::use_gpu` to the compiled-in GPU
    feature, so a HIP build ran every transcription on the GPU, including
    `--gpu-backend cpu`, while logging "Selected backend: Cpu". The fix passes the
    selected backend into the context parameters, so a CPU request sets `use gpu = 0`
    and the model stays in RAM.
-5. **The GPU is enumerated even for CPU requests** in a HIP build
+6. **The GPU is enumerated even for CPU requests** in a HIP build
    (`ggml_cuda_init: found 1 ROCm devices` appears with `use gpu = 0`). Harmless, but it
    makes `-vv` logs look as if the GPU was used. The authoritative signal is
    `use gpu = 0/1` plus `whisper_model_load: ROCm0 total size = 77.11 MB`.
-6. **`rocprof` v1 does not support gfx1201** and aborts the profiled process. Use
+7. **`rocprof` v1 does not support gfx1201** and aborts the profiled process. Use
    `rocprofv3 --kernel-trace true` for kernel-level evidence.
 
 ## 4. Benchmark methodology
@@ -417,7 +422,8 @@ before/during/after VRAM samples) and `bench.log` (the run log).
    the CPU. The contract and the model loading behaviour are documented in
    `docs/usage.md` and `docs/design.md`.
 2. **Add a `TMPDIR` note** to `docs/development.md` and the CI script, because the HIP
-   build needs several GB of temporary space.
+   build needs several GB of temporary space and the GPU runtime needs a writable
+   one as well. The README prerequisites now mention it.
 3. **Measure `large.en` on the GPU only.** The CPU path for a large model is not
    practical on this host, but the VRAM budget (2.3 GB for medium.en on a 16 GB card)
    suggests it would fit and run at a few times real time.
