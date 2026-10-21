@@ -36,14 +36,25 @@ pub const WHISPER_SAMPLE_RATE: u32 = 16_000;
 pub struct ChunkConfig {
     /// The number of samples a window holds.
     pub window_samples: usize,
+    /// The number of samples that are kept in front of a window.
+    ///
+    /// whisper does not always report a segment for the beginning of the
+    /// audio it is given. When it does not, the region has to be decoded
+    /// again, and a window that starts a little earlier gives whisper a
+    /// different view of the same audio. The samples in front of the window
+    /// are kept for that, and they are bounded.
+    pub lookback_samples: usize,
 }
 
 impl Default for ChunkConfig {
     fn default() -> Self {
         // whisper's encoder works on 30 second windows, so a window of
-        // 30 seconds is transcribed in a single pass.
+        // 30 seconds is transcribed in a single pass. Two seconds of
+        // lookback are kept in front of it, which is enough to decode a
+        // region that whisper skipped again from a different position.
         Self {
             window_samples: 30 * WHISPER_SAMPLE_RATE as usize,
+            lookback_samples: 2 * WHISPER_SAMPLE_RATE as usize,
         }
     }
 }
@@ -52,6 +63,11 @@ impl ChunkConfig {
     /// The number of samples a window holds.
     pub fn window_samples(&self) -> usize {
         self.window_samples
+    }
+
+    /// The number of samples that are kept in front of a window.
+    pub fn lookback_samples(&self) -> usize {
+        self.lookback_samples
     }
 }
 
@@ -81,11 +97,15 @@ impl AudioWindow {
 /// The assembler is independent of the input, so the windowing can be
 /// tested without decoding anything. The samples of the last window are
 /// kept, because the next window can start inside it: whisper slides its
-/// window back to the end of the last segment it decoded. The retained
-/// samples are therefore bounded by two windows.
+/// window back to the end of the last segment it decoded. A short lookback
+/// in front of the window is kept as well, so that a region that whisper
+/// did not transcribe can be decoded again from a slightly earlier
+/// position. The retained samples are therefore bounded by one window plus
+/// the lookback.
 #[derive(Debug)]
 pub struct WindowAssembler {
     window_samples: usize,
+    lookback_samples: usize,
     /// The samples that were decoded and are not dropped yet.
     buffer: VecDeque<f32>,
     /// Index of the first sample in `buffer`.
@@ -98,6 +118,7 @@ impl WindowAssembler {
     pub fn new(config: ChunkConfig) -> Self {
         Self {
             window_samples: config.window_samples,
+            lookback_samples: config.lookback_samples,
             buffer: VecDeque::new(),
             buffer_start: 0,
             decoded: 0,
@@ -126,6 +147,14 @@ impl WindowAssembler {
         self.decoded
     }
 
+    /// The index of the first sample that is still available.
+    ///
+    /// A window cannot start before it: the samples in front of it are
+    /// gone.
+    pub fn retained_from(&self) -> u64 {
+        self.buffer_start
+    }
+
     /// Take a window that starts at `start_sample`.
     ///
     /// Returns `None` when the recording ends before the window is full. The
@@ -137,19 +166,31 @@ impl WindowAssembler {
             // happen for a window that follows another one.
             return None;
         }
-        let skip = (start_sample - self.buffer_start) as usize;
+        // The samples in front of the window are only needed for the
+        // lookback, so they are dropped up to that point.
+        let drop_before = start_sample.saturating_sub(self.lookback_samples as u64);
+        let skip = (drop_before - self.buffer_start) as usize;
         if skip >= self.buffer.len() {
             return None;
         }
         // Samples before the window are not needed any more.
         self.buffer.drain(..skip);
-        self.buffer_start = start_sample;
+        self.buffer_start = drop_before;
 
-        let count = self.window_samples.min(self.buffer.len());
+        // The window starts at start_sample, so the lookback in front of it
+        // is skipped.
+        let offset = (start_sample - self.buffer_start) as usize;
+        let count = self.window_samples.min(self.buffer.len() - offset);
         if count == 0 {
             return None;
         }
-        let samples: Vec<f32> = self.buffer.iter().take(count).copied().collect();
+        let samples: Vec<f32> = self
+            .buffer
+            .iter()
+            .skip(offset)
+            .take(count)
+            .copied()
+            .collect();
         Some(AudioWindow {
             start_sample,
             samples,
@@ -254,6 +295,16 @@ impl ChunkedAudio {
     /// The index where the next window starts.
     pub fn next_start(&self) -> u64 {
         self.next_start
+    }
+
+    /// The index of the first sample that is still available for a window.
+    ///
+    /// A window cannot start before it: the samples in front of it are
+    /// gone. The lookback in front of the current window is kept, so that a
+    /// region that whisper did not transcribe can be decoded again from a
+    /// slightly earlier position.
+    pub fn retained_from(&self) -> u64 {
+        self.assembler.retained_from()
     }
 
     /// Read whatever ffmpeg has produced so far. Returns false at the end
@@ -366,6 +417,7 @@ mod tests {
     fn config(window: usize) -> ChunkConfig {
         ChunkConfig {
             window_samples: window,
+            lookback_samples: 0,
         }
     }
 
@@ -415,6 +467,29 @@ mod tests {
         let last = a.take_window(4).expect("the remainder is the last window");
         assert_eq!(last.samples, vec![5.0, 6.0]);
         assert_eq!(last.start_sample, 4);
+    }
+
+    #[test]
+    fn test_window_starts_at_its_own_position_with_a_lookback() {
+        // The lookback keeps the samples in front of a window, so that a
+        // region that whisper did not transcribe can be decoded again from
+        // a slightly earlier position. The window itself still starts at
+        // the position it was asked for.
+        let mut a = WindowAssembler::new(ChunkConfig {
+            window_samples: 4,
+            lookback_samples: 2,
+        });
+        a.push(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let w = a.take_window(2).expect("the window is complete");
+        assert_eq!(w.start_sample, 2);
+        assert_eq!(w.samples, vec![3.0, 4.0, 5.0, 6.0]);
+        // The samples in front of the window are still available.
+        assert_eq!(a.retained_from(), 0);
+        // A window that starts inside the lookback of the previous one
+        // gets the audio of its own position.
+        let w = a.take_window(1).expect("the window is complete");
+        assert_eq!(w.start_sample, 1);
+        assert_eq!(w.samples, vec![2.0, 3.0, 4.0, 5.0]);
     }
 
     #[test]
