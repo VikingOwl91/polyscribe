@@ -75,21 +75,42 @@ fn hip_available() -> bool {
 /// Loading the model is the expensive part of a transcription run. On the GPU
 /// path the weights are uploaded into VRAM, so loading them again for every
 /// input file multiplied that cost by the number of files.
+#[derive(Default)]
 struct ModelSession {
-    model_path: PathBuf,
+    model_path: Option<PathBuf>,
     english_only: bool,
-    context: whisper_rs::WhisperContext,
+    context: Option<whisper_rs::WhisperContext>,
 }
 
 impl ModelSession {
-    /// Load the model for the given backend.
-    fn load(backend: BackendKind) -> Result<Self> {
+    /// Locate the model, without loading it yet.
+    ///
+    /// This keeps the order of the original implementation: the input is
+    /// decoded first, then the model is located, then the language hint is
+    /// checked, and only then the model is loaded.
+    fn resolve_model_path(&mut self) -> Result<()> {
+        if self.model_path.is_some() {
+            return Ok(());
+        }
         let model_path = find_model_file()?;
-        let english_only = model_path
+        self.english_only = model_path
             .file_name()
             .and_then(|s| s.to_str())
             .map(|s| s.contains(".en.") || s.ends_with(".en.bin"))
             .unwrap_or(false);
+        self.model_path = Some(model_path);
+        Ok(())
+    }
+
+    /// Load the model, unless it is loaded already.
+    fn ensure_context(&mut self, backend: BackendKind) -> Result<()> {
+        if self.context.is_some() {
+            return Ok(());
+        }
+        let model_path = self
+            .model_path
+            .clone()
+            .expect("the model path was resolved before the context is loaded");
         let context = crate::with_suppressed_stderr(|| {
             let mut params = whisper_rs::WhisperContextParameters::default();
             // Only a GPU backend may use the GPU. whisper-rs defaults
@@ -100,30 +121,27 @@ impl ModelSession {
                 format!("Failed to load Whisper model at {}", model_path.display())
             })
         })?;
-        Ok(Self {
-            model_path,
-            english_only,
-            context,
-        })
+        self.context = Some(context);
+        Ok(())
     }
 }
 
 /// A backend that keeps the loaded model for the whole invocation.
 #[derive(Default)]
 pub struct CpuBackend {
-    session: Option<ModelSession>,
+    session: ModelSession,
 }
 
 /// A backend that keeps the loaded model for the whole invocation.
 #[derive(Default)]
 pub struct CudaBackend {
-    session: Option<ModelSession>,
+    session: ModelSession,
 }
 
 /// A backend that keeps the loaded model for the whole invocation.
 #[derive(Default)]
 pub struct HipBackend {
-    session: Option<ModelSession>,
+    session: ModelSession,
 }
 
 macro_rules! impl_whisper_backend {
@@ -140,11 +158,14 @@ macro_rules! impl_whisper_backend {
                 _gpu_layers: Option<u32>,
                 progress: Option<&(dyn Fn(i32) + Send + Sync)>,
             ) -> Result<Vec<OutputEntry>> {
-                if self.session.is_none() {
-                    self.session = Some(ModelSession::load($kind)?);
-                }
-                let session = self.session.as_mut().expect("the session was just created");
-                transcribe_with_whisper_rs(session, audio_path, speaker, language, progress)
+                transcribe_with_whisper_rs(
+                    &mut self.session,
+                    $kind,
+                    audio_path,
+                    speaker,
+                    language,
+                    progress,
+                )
             }
         }
     };
@@ -336,6 +357,7 @@ pub fn collect_entries_for_input(
 #[allow(clippy::too_many_arguments)]
 fn transcribe_with_whisper_rs(
     session: &mut ModelSession,
+    backend: BackendKind,
     audio_path: &Path,
     speaker: &str,
     language: Option<&str>,
@@ -351,13 +373,20 @@ fn transcribe_with_whisper_rs(
     let pcm_samples = decode_audio_to_pcm_f32_ffmpeg(audio_path)?;
     report(5);
 
+    // The model is located and loaded once per invocation; every input file
+    // gets its own inference state.
+    session.resolve_model_path()?;
+    let model_path = session
+        .model_path
+        .clone()
+        .expect("the model path was just resolved");
     if let Some(lang) = language
         && session.english_only
         && lang != "en"
     {
         return Err(anyhow!(
             "Selected model is English-only ({}), but a non-English language hint '{}' was provided. Please use a multilingual model or set WHISPER_MODEL.",
-            session.model_path.display(),
+            model_path.display(),
             lang
         ).into());
     }
@@ -374,9 +403,12 @@ fn transcribe_with_whisper_rs(
     // The model is loaded once per invocation; every input file gets its own
     // inference state. The state is created with the native libraries quiet,
     // the same way the model load is.
+    session.ensure_context(backend)?;
     let mut state = crate::with_suppressed_stderr(|| {
         session
             .context
+            .as_ref()
+            .expect("the context was just loaded")
             .create_state()
             .map_err(|e| anyhow!("Failed to create Whisper state: {:?}", e))
     })?;
