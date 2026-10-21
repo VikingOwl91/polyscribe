@@ -77,13 +77,26 @@ fn hip_available() -> bool {
 /// path the weights are uploaded into VRAM, so loading them again for every
 /// input file multiplied that cost by the number of files.
 #[derive(Default)]
-struct ModelSession {
+pub struct ModelSession {
     model_path: Option<PathBuf>,
     english_only: bool,
     context: Option<whisper_rs::WhisperContext>,
 }
 
 impl ModelSession {
+    /// A session that finds the model the way the command line does.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A session for one model file.
+    pub fn with_model(model_path: PathBuf) -> Self {
+        Self {
+            model_path: Some(model_path),
+            ..Self::default()
+        }
+    }
+
     /// Locate the model, without loading it yet.
     ///
     /// This keeps the order of the original implementation: the input is
@@ -355,6 +368,38 @@ pub fn collect_entries_for_input(
     }
 }
 
+/// How the language of a transcription is chosen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Language {
+    /// Detect the language from the audio.
+    Auto,
+    /// Transcribe with this language.
+    Explicit(String),
+}
+
+impl Language {
+    /// The language as an explicit hint, if there is one.
+    pub fn explicit(&self) -> Option<&str> {
+        match self {
+            Language::Auto => None,
+            Language::Explicit(language) => Some(language.as_str()),
+        }
+    }
+}
+
+/// The result of a transcription.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TranscriptionResult {
+    /// The segments of the transcript, in order.
+    pub entries: Vec<OutputEntry>,
+    /// How the transcription ended.
+    pub outcome: crate::stream::StreamOutcome,
+    /// The number of windows that were submitted for inference.
+    pub windows: u64,
+    /// The language whisper detected, when the language was detected.
+    pub detected_language: Option<String>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn transcribe_with_whisper_rs(
     session: &mut ModelSession,
@@ -445,8 +490,157 @@ fn transcribe_with_whisper_rs(
     // Every window is transcribed on its own. whisper reports the
     // timestamps of a window relative to the start of that window, so the
     // window's position in the recording is added to them.
+    let language = match language {
+        Some(language) => Language::Explicit(language.to_string()),
+        None => Language::Auto,
+    };
+    let mut observer = |_event: crate::stream::StreamEvent| {};
+    let cancel = crate::stream::CancellationToken::new();
+    let result = transcribe_windows(
+        &mut state,
+        &full_params,
+        Some(first_window),
+        &mut windows,
+        speaker,
+        language,
+        &audio_path.display().to_string(),
+        progress,
+        &mut observer,
+        &cancel,
+    )?;
+    let entries = result.entries;
+
+    crate::dlog!(1, "Transcribed {} window(s) of audio", result.windows);
+    report(90);
+    report(100);
+    Ok(entries)
+}
+
+/// Transcribe a stream of audio with the local whisper.cpp engine.
+///
+/// The source delivers the audio while the transcription runs. The windows
+/// are the same 30 second windows the file path produces, and the segments
+/// are reconciled the same way, so a stream and the same audio in a file give
+/// the same transcript.
+///
+/// The observer receives the events of the run: the samples that arrived, the
+/// windows that were submitted, the segments that became final and the end
+/// of the stream. A segment that is still provisional is not reported: only
+/// finalized segments are.
+///
+/// Cancelling the token stops the run at the next safe boundary, which is
+/// before the next window is submitted. A whisper call that is already
+/// running is not interrupted.
+#[allow(clippy::too_many_arguments)]
+pub fn transcribe_stream(
+    session: &mut ModelSession,
+    backend: BackendKind,
+    source: Box<dyn crate::stream::AudioSource>,
+    speaker: &str,
+    language: Language,
+    observer: &mut dyn FnMut(crate::stream::StreamEvent),
+    cancel: &crate::stream::CancellationToken,
+) -> Result<TranscriptionResult> {
+    let mut windows = crate::stream::StreamedAudio::new(source)?;
+
+    session.resolve_model_path()?;
+    let model_path = session
+        .model_path
+        .clone()
+        .expect("the model path was just resolved");
+    if let Some(lang) = language.explicit()
+        && session.english_only
+        && lang != "en"
+    {
+        return Err(anyhow!(
+            "Selected model is English-only ({}), but a non-English language hint '{}' was provided. Please use a multilingual model or set WHISPER_MODEL.",
+            model_path.display(),
+            lang
+        )
+        .into());
+    }
+
+    // Try to reduce native library logging via environment variables when not super-verbose.
+    if crate::verbose_level() < 2 {
+        // These env vars are recognized by ggml/whisper in many builds; harmless if unknown.
+        unsafe {
+            std::env::set_var("GGML_LOG_LEVEL", "0");
+            std::env::set_var("WHISPER_PRINT_PROGRESS", "0");
+        }
+    }
+
+    session.ensure_context(backend)?;
+    let mut state = crate::with_suppressed_stderr(|| {
+        session
+            .context
+            .as_ref()
+            .expect("the context was just loaded")
+            .create_state()
+            .map_err(|e| anyhow!("Failed to create Whisper state: {:?}", e))
+    })?;
+
+    let mut full_params =
+        whisper_rs::FullParams::new(whisper_rs::SamplingStrategy::Greedy { best_of: 1 });
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get() as i32)
+        .unwrap_or(1);
+    full_params.set_n_threads(threads);
+    full_params.set_translate(false);
+
+    transcribe_windows(
+        &mut state,
+        &full_params,
+        None,
+        &mut windows,
+        speaker,
+        language,
+        "the audio stream",
+        None,
+        observer,
+        cancel,
+    )
+}
+
+/// The window loop, shared by the file path and the streaming path.
+///
+/// `first_window` is the window that was decoded before the model was
+/// loaded, so that a broken input file is reported before a missing model.
+/// The streaming path passes `None` and gets its first window here, after
+/// the model is loaded.
+#[allow(clippy::too_many_arguments)]
+fn transcribe_windows(
+    state: &mut whisper_rs::WhisperState,
+    base_params: &whisper_rs::FullParams<'_, '_>,
+    first_window: Option<AudioWindow>,
+    windows: &mut dyn crate::stream::WindowSource,
+    speaker: &str,
+    language: Language,
+    input_name: &str,
+    progress: Option<&(dyn Fn(i32) + Send + Sync)>,
+    observer: &mut dyn FnMut(crate::stream::StreamEvent),
+    cancel: &crate::stream::CancellationToken,
+) -> Result<TranscriptionResult> {
+    let report = |p: i32| {
+        if let Some(cb) = progress {
+            cb(p);
+        }
+    };
+    // The language that whisper detected is pinned after the first window, so
+    // that the windows of one recording do not switch the language back and
+    // forth. The string is declared before the parameters, because the
+    // parameters borrow it and the borrow has to outlive them.
+    let mut detected: Option<String> = None;
+    let mut full_params = base_params.clone();
+    match &language {
+        Language::Auto => full_params.set_language(None),
+        Language::Explicit(lang) => full_params.set_language(Some(lang.as_str())),
+    }
+
+    // Every window is transcribed on its own. whisper reports the
+    // timestamps of a window relative to the start of that window, so the
+    // window's position in the recording is added to them.
     let mut entries: Vec<OutputEntry> = Vec::new();
-    let mut window = Some(first_window);
+    let mut window = first_window;
     let mut emitted_end = 0.0f64;
     // The end of the transcribed timeline, in samples.
     let mut frontier = 0u64;
@@ -454,16 +648,52 @@ fn transcribe_with_whisper_rs(
     // The index of a segment that may have been cut short by the end of the
     // window. The next window decodes it again and replaces it.
     let mut provisional: Option<usize> = None;
+    // The number of entries whose finalization was already reported.
+    let mut reported = 0usize;
     // The recovery of a region that whisper did not transcribe.
     let mut recovery = Recovery::default();
     // The regions that whisper did not transcribe and that the recovery
     // could not fix. The transcript may be missing them, so they are
     // reported to the user.
     let mut unresolved = UnresolvedRegions::default();
+    let mut cancelled = false;
     report(40);
-    while let Some(mut current) = window.take() {
+    loop {
+        if cancel.is_cancelled() {
+            cancelled = true;
+            break;
+        }
+        let mut current = match window.take() {
+            Some(current) => current,
+            None => match windows.next_window(cancel)? {
+                Some(current) => current,
+                None => break,
+            },
+        };
         window_count += 1;
-        let mut segments = decode_window(&mut state, &full_params, &current)?;
+        observer(crate::stream::StreamEvent::SamplesReceived {
+            total: windows.received_samples(),
+        });
+        observer(crate::stream::StreamEvent::WindowSubmitted {
+            index: window_count - 1,
+            start_sample: current.start_sample,
+            end_sample: current.start_sample + current.samples.len() as u64,
+        });
+        let mut segments = decode_window(state, &full_params, &current)?;
+        if window_count == 1 && matches!(language, Language::Auto) {
+            // The language is detected once, on the first window, and
+            // pinned for the windows that follow: the detector is not
+            // stable enough to be run on every window, and a language that
+            // changes from window to window is worse than one that is
+            // slightly wrong.
+            let id = state.full_lang_id_from_state();
+            if let Some(name) = whisper_rs::get_lang_str(id) {
+                // The name of the language is a static string, so the
+                // parameters can hold it for the rest of the run.
+                detected = Some(name.to_string());
+                full_params.set_language(Some(name));
+            }
+        }
         // Whether the window was decoded again to recover a region that
         // whisper did not transcribe.
         let mut recovered = false;
@@ -506,12 +736,12 @@ fn transcribe_with_whisper_rs(
                 }
             };
             windows.seek_to(rewind);
-            let Some(next) = windows.next_window()? else {
+            let Some(next) = windows.next_window(cancel)? else {
                 break;
             };
             window_count += 1;
             current = next;
-            segments = decode_window(&mut state, &full_params, &current)?;
+            segments = decode_window(state, &full_params, &current)?;
             recovered = true;
             trace_window(&current, &segments);
         }
@@ -579,6 +809,23 @@ fn transcribe_with_whisper_rs(
             }
         }
 
+        // The last segment of the window may have been cut short by the end
+        // of the window. It is kept, and the next window replaces it.
+        provisional = match last_index {
+            Some(i) if segment_is_cut(entries[i].end, window_end) => Some(i),
+            _ => None,
+        };
+
+        // Every segment that is not provisional is final: no later window
+        // can replace it.
+        let final_count = entries.len() - usize::from(provisional.is_some());
+        while reported < final_count {
+            observer(crate::stream::StreamEvent::SegmentFinalized {
+                entry: entries[reported].clone(),
+            });
+            reported += 1;
+        }
+
         // Where the next window starts:
         //
         // * A segment that was cut short by the end of the window is
@@ -595,13 +842,6 @@ fn transcribe_with_whisper_rs(
         let min_advance = (MIN_WINDOW_ADVANCE_SECONDS * rate) as u64;
         let window_start_sample = current.start_sample;
 
-        // The last segment of the window may have been cut short by the end
-        // of the window. It is kept, and the next window replaces it.
-        provisional = match last_index {
-            Some(i) if segment_is_cut(entries[i].end, window_end) => Some(i),
-            _ => None,
-        };
-
         let next_start = match provisional {
             // Decode the cut segment again, with the context it needs.
             Some(i) => (entries[i].start * rate).round() as u64,
@@ -617,21 +857,52 @@ fn transcribe_with_whisper_rs(
         let next_start = next_start.max(window_start_sample + 1);
 
         windows.seek_to(next_start);
-        window = windows.next_window()?;
+        window = windows.next_window(cancel)?;
+    }
+
+    // The last segment is final: the stream ended, so no window can replace
+    // it. When the run was cancelled it stays provisional, because a later
+    // window could still have replaced it.
+    if !cancelled {
+        while reported < entries.len() {
+            observer(crate::stream::StreamEvent::SegmentFinalized {
+                entry: entries[reported].clone(),
+            });
+            reported += 1;
+        }
     }
 
     // A region that whisper did not transcribe and that the recovery could
     // not fix means that the transcript may be missing speech. The warning
     // goes to stderr and does not change the exit status: the transcription
     // itself succeeded.
-    if let Some(warning) = unresolved.warning(audio_path) {
+    if let Some(warning) = unresolved.warning(Path::new(input_name)) {
         crate::ui::warn(warning);
     }
 
-    crate::dlog!(1, "Transcribed {window_count} window(s) of audio");
-    report(90);
-    report(100);
-    Ok(entries)
+    // A cancelled run keeps only the segments that were finalized: the
+    // provisional one could still have been replaced by a window that was
+    // never submitted.
+    if cancelled {
+        entries.truncate(reported);
+    }
+
+    let outcome = if cancelled {
+        observer(crate::stream::StreamEvent::Cancelled);
+        crate::stream::StreamOutcome::Cancelled { segments: reported }
+    } else {
+        observer(crate::stream::StreamEvent::Completed {
+            total_samples: windows.received_samples(),
+        });
+        crate::stream::StreamOutcome::Completed { segments: reported }
+    };
+
+    Ok(TranscriptionResult {
+        entries,
+        outcome,
+        windows: window_count,
+        detected_language: detected,
+    })
 }
 
 /// A segment that whisper reported for a window.

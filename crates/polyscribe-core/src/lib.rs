@@ -166,6 +166,7 @@ pub mod error;
 pub mod gpu;
 pub mod models;
 pub mod output;
+pub mod stream;
 pub mod ui;
 pub use error::Error;
 pub mod prelude;

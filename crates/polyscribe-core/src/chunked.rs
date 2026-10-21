@@ -147,6 +147,16 @@ impl WindowAssembler {
         self.decoded
     }
 
+    /// The number of samples a window holds.
+    pub fn window_samples(&self) -> usize {
+        self.window_samples
+    }
+
+    /// The samples that are buffered and not part of a window yet.
+    pub fn buffered_samples(&self) -> usize {
+        self.buffer.len()
+    }
+
     /// The index of the first sample that is still available.
     ///
     /// A window cannot start before it: the samples in front of it are
@@ -372,6 +382,15 @@ impl ChunkedAudio {
 
     /// The next window of audio, or `None` at the end of the recording.
     pub fn next_window(&mut self) -> anyhow::Result<Option<AudioWindow>> {
+        crate::stream::WindowSource::next_window(self, &crate::stream::CancellationToken::new())
+    }
+}
+
+impl crate::stream::WindowSource for ChunkedAudio {
+    fn next_window(
+        &mut self,
+        cancel: &crate::stream::CancellationToken,
+    ) -> anyhow::Result<Option<AudioWindow>> {
         if self.finished {
             return Ok(None);
         }
@@ -379,6 +398,9 @@ impl ChunkedAudio {
         loop {
             if self.assembler.available_from(self.next_start) >= window_samples {
                 break;
+            }
+            if cancel.is_cancelled() {
+                return Ok(None);
             }
             if !self.read_more()? {
                 // The recording ended. The last window may be shorter.
@@ -393,6 +415,18 @@ impl ChunkedAudio {
             .take_window(self.next_start)
             .expect("the window is complete");
         Ok(Some(window))
+    }
+
+    fn seek_to(&mut self, start_sample: u64) {
+        self.next_start = start_sample;
+    }
+
+    fn retained_from(&self) -> u64 {
+        self.assembler.retained_from()
+    }
+
+    fn received_samples(&self) -> u64 {
+        self.assembler.decoded_samples()
     }
 }
 

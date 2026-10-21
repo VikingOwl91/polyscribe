@@ -66,6 +66,16 @@ This document describes how to build, test, and run PolyScribe locally, and how 
 - `POLYSCRIBE_WINDOW_TRACE=1` makes a transcription write the sample range of
   every window, its segments and every region that whisper did not report to
   stderr. It is a diagnostic, not part of the normal output.
+- The streaming tests feed a recording to the engine in blocks while the
+  recording is still being delivered:
+  `POLYSCRIBE_E2E_MODEL=/path/to/ggml-tiny.en.bin cargo test -p polyscribe-cli
+  --test integration_stream`. They need no device, no desktop session, no
+  network and no key.
+- The streaming measurement is an ignored test:
+  `cargo test -p polyscribe-cli --test integration_stream -- --ignored
+  --nocapture` with `POLYSCRIBE_E2E_MODEL` set. It reports the time to the
+  first window, the time to the first finalized segment, the largest amount
+  of buffered audio and the peak resident memory.
 
 ## Clippy and formatting
 

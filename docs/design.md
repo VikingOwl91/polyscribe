@@ -55,6 +55,85 @@ of frames, not a voice activity detector, so the pipeline cannot prove that
 every word of a recording is in the transcript. `docs/benchmarks/chunked-transcription.md`
 has the measurements and the limits.
 
+### Streaming input
+
+The file path decodes a media file with ffmpeg and hands the audio to
+whisper in windows of 30 seconds. A live source cannot be a file, so
+`polyscribe-core::stream` provides the way in:
+
+* `AudioSource` delivers **decoded** samples: 16 kHz, mono, f32. The
+  pipeline does not resample; a source that captures at another rate has
+  to convert before it delivers.
+* The samples are **pulled**, never pushed: `next_block` is called when
+  the pipeline needs more audio. That is the backpressure. A slow
+  consumer slows the producer down, and the audio that waits in the
+  pipeline is bounded by one window (30 s) plus the lookback (2 s).
+* The end of the stream is **explicit**: `next_block` returns `None`.
+* A source **error** ends the run and is reported to the caller.
+* `CancellationToken` stops the run at the next safe boundary, which is
+  before the next window is submitted for inference. A whisper call that
+  is already running is not interrupted.
+
+`StreamedAudio` turns a source into the same windows the file path
+produces, and the window loop in `backend.rs` is shared by both paths.
+There is one window assembler, one reconciliation and one recovery; the
+file path keeps its behaviour.
+
+#### The lifecycle of a streaming transcription
+
+```text
+  samples received  ->  window submitted  ->  segment finalized
+  (source)              (inference)           (reconciliation)
+```
+
+* **Samples received** are audio that arrived from the source. They are
+  not transcribed yet.
+* **A window submitted** is a block of 30 seconds that was handed to
+  whisper. The windows are numbered in the order they were submitted.
+* **A segment** belongs to a window. The last segment of a window can
+  be cut short by the end of the window, so it stays *provisional* until
+  the next window confirms it. Only finalized segments reach the caller:
+  a provisional segment is never presented as final.
+* **Stream completion** means the source reached the end and the last
+  window was flushed. A cancelled run reports the cancellation instead,
+  and keeps only the segments that were finalized.
+
+The events of a run are reported through `StreamEvent`: the samples that
+arrived, the windows that were submitted, the segments that became final,
+and either the completion or the cancellation of the run. The per-window
+trace (`POLYSCRIBE_WINDOW_TRACE=1`) stays opt-in and separate from them.
+
+#### The language
+
+`Language::Auto` detects the language on the first window and pins it
+for the windows that follow, because the detector is not stable enough
+to run on every window and a language that changes from window to
+window is worse than one that is slightly wrong. `Language::Explicit`
+uses the language it is given, which is what the command line does
+today. The command line still requires `--language`; the default changes
+with the workflow that brings the automatic detection to the user.
+
+#### What a microphone source has to do
+
+A microphone source implements `AudioSource`: it captures 16 kHz mono
+PCM, delivers it in blocks, and returns `None` when the capture ends.
+The recording, the device selection and the hotkey belong to that
+source, not to the pipeline. The source is the only part that has to
+know about PipeWire.
+
+#### Known limitations
+
+* The windows are 30 seconds long, so the first finalized segment of a
+  live stream arrives after the second window. A live workflow that
+  needs a shorter latency needs a shorter window, which is a separate
+  decision because the window size also decides the overlap and the
+  recovery behaviour.
+* The stream is transcribed in windows, so the transcript of a live
+  recording is complete up to the last finalized segment, not up to the
+  last sample.
+* The cancellation is cooperative. A whisper call that is running is
+  not interrupted, so the cancellation takes effect after it returns.
+
 ### Model context lifecycle
 
 The backend owns a session that holds the loaded Whisper model. The model is
