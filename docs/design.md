@@ -24,6 +24,38 @@ PolyScribe is a Cargo workspace CLI that orchestrates:
 4) The selected backend transcribes via whisper-rs, producing segments.
 5) Segments are sorted, reindexed, and written to JSON + TOML + SRT (or JSON to stdout).
 
+### Model context lifecycle
+
+The backend owns a session that holds the loaded Whisper model. The model is
+located and loaded on the first media input of an invocation and then reused
+for every following input, so a batch of N files loads the model once instead
+of N times. On a GPU build that means one upload of the weights into VRAM
+instead of N.
+
+Each input file gets its own inference state, created from the shared model.
+The state is what carries the decoder state of one file, so the outputs,
+timestamps and error handling of the files stay independent. The model and
+the states are released when the invocation ends; nothing is cached across
+invocations.
+
+### Backend selection
+
+`select_backend` runs once per invocation, before any model is loaded:
+
+- The GPU backends compiled into the binary are known from the cargo
+  features; the devices that are actually present come from the ggml backend
+  registry, the same registry whisper.cpp picks its GPU from.
+- `cpu` always runs on the CPU.
+- `cuda` and `hip` require both the feature and a matching device, and fail
+  with an actionable error otherwise. A GPU request is never silently
+  continued on the CPU.
+- `auto` prefers CUDA, then HIP, and falls back to the CPU when no device is
+  available, which it reports.
+
+A device being present means the runtime found it. It does not claim that
+every kernel of a transcription ran on the GPU; `-vv` shows the device that
+ggml reported and the backend whisper.cpp selected.
+
 ## Data flow (models)
 
 1) The Hugging Face manifest is fetched (API, with an on-disk ETag/TTL cache and an HTML-scrape fallback), enriched via HEAD requests.

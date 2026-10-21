@@ -257,25 +257,59 @@ for the polyscribe end-to-end transcription test."
   support. How to fix: install the ROCm runtime and rebuild with --features
   gpu-hip." (exit 1). A missing model file fails with "WHISPER_MODEL points to a
   non-existing path" (exit 1).
-- **Silent CPU fallback.** If a GPU is requested but no device is visible
-  (`HIP_VISIBLE_DEVICES=`), ggml logs `failed to initialize ROCm: no ROCm-capable
-  device is detected`, the transcription **still succeeds on the CPU with exit 0**, and
-  the log still says "Selected backend: Hip". The native message is only visible with
-  `-vv`, because stderr of the native libraries is suppressed below that. This is the
-  one runtime behaviour that a user can be misled by: verify the GPU path with
-  `polyscribe -vv transcribe ...` and look for `using ROCm0 backend`.
+- **Silent CPU fallback (fixed in sprint 4).** Before sprint 4, a GPU request with
+  no visible device (`HIP_VISIBLE_DEVICES=`) fell through to the CPU: ggml logged
+  `failed to initialize ROCm: no ROCm-capable device is detected`, the
+  transcription **still succeeded on the CPU with exit 0**, and the log still said
+  "Selected backend: Hip". The backend selection now checks the device list in
+  ggml's backend registry, so an explicit GPU request without a device fails with
+  "Requested the ROCm/HIP backend but no compatible GPU device is available" and
+  exit 1, while `auto` falls back to the CPU and says so.
 - **Cold versus warm model loading.** With the model evicted from the page cache,
   the GPU path costs 993 ms against 840 ms warm for tiny.en, and 3611 ms against
   3369 ms warm for medium.en. The disk read overlaps with the VRAM upload, so the
   cold penalty stays in the low hundreds of milliseconds.
-- **Model context reuse.** Each input file in one invocation loads the model again:
-  three inputs produced three model loads and three ROCm backend initializations.
-  On the GPU path that means three PCIe uploads of the whole model (377 ms and
-  2.3 GB of VRAM traffic for medium.en). Reusing one context across the inputs of an
-  invocation would remove that, but it changes the backend API and was not attempted
-  here.
+- **Model context reuse (fixed in sprint 4).** Each input file in one invocation
+  used to load the model again: three inputs produced three model loads and three
+  ROCm backend initializations, so the GPU path uploaded the whole model over PCIe
+  three times (377 ms and 2.3 GB of VRAM traffic for medium.en). The backend now
+  keeps the model for the whole invocation, see section 8.
 
-## 8. Recommended default configuration for this hardware
+## 8. Model context reuse, before and after
+
+Sprint 4 changed the backend so that the Whisper model is loaded once per
+invocation and reused for every input file. Each file still gets its own
+inference state, so the outputs and the error handling stay independent.
+
+Measured with the same model (`ggml-tiny.en`, SHA-256 `921e4cf8...20b1f`), the
+same input files and the same output configuration. 5 measured runs per
+configuration, the configurations interleaved so they all see the same host load
+(load average 14-15 during the run). The raw data is in
+`docs/benchmarks/data/reuse-summary.json`.
+
+| Configuration | Wall median | Wall min | Wall max | Peak RSS | Peak VRAM | Model loads | Transcript |
+|---|---|---|---|---|---|---|---|
+| 1 file, CPU, before | 4297 ms | 3681 ms | 17721 ms | 304 MB | 2264 MiB | 1 | `618f069c235c0dc7` |
+| 1 file, CPU, after | 4601 ms | 3651 ms | 16815 ms | 304 MB | 2264 MiB | 1 | `618f069c235c0dc7` |
+| 1 file, HIP, before | 827 ms | 809 ms | 834 ms | 303 MB | 2818 MiB | 1 | `618f069c235c0dc7` |
+| 1 file, HIP, after | 821 ms | 804 ms | 830 ms | 310 MB | 2818 MiB | 1 | `618f069c235c0dc7` |
+| 3 files, CPU, before | 12337 ms | 10985 ms | 18022 ms | 324 MB | 2264 MiB | **3** | `8095e514e0150cc1` |
+| 3 files, CPU, after | 12885 ms | 12197 ms | 27165 ms | 314 MB | 2264 MiB | **1** | `8095e514e0150cc1` |
+| 3 files, HIP, before | 2091 ms | 2083 ms | 2145 ms | 321 MB | 2818 MiB | **3** | `8095e514e0150cc1` |
+| 3 files, HIP, after | 1993 ms | 1967 ms | 2235 ms | 328 MB | 2818 MiB | **1** | `8095e514e0150cc1` |
+
+- **The model is loaded once instead of three times** for a three-file batch, on
+  both backends. This is the reliable, directly measured effect of the change.
+- **The transcripts are byte-identical** before and after in every configuration.
+- The wall-clock difference of the batch is inside the noise of this host: the
+  CPU runs of the same configuration span 11.0-27.2 s, while the saving is one
+  model load (45 ms on the CPU path, 113 ms on the GPU path for tiny.en). For
+  medium.en on the GPU the saving is one upload of 1.5 GB of weights, which is
+  the case where the change matters most.
+- A single file is unaffected, as expected: the model is loaded once either way.
+- Peak memory is unchanged, and VRAM returns to its idle value after the run.
+
+## 9. Recommended default configuration for this hardware
 
 - Use a HIP build (`--features gpu-hip`) for any model from `base.en` upwards. It is
   4.6x faster than the CPU path even on a loaded host for base.en, and 13.6-25.9x for
@@ -291,7 +325,7 @@ for the polyscribe end-to-end transcription test."
   CPU cost of a `large` model on this host would have added hours of measurement time
   for a result the four tested models already make clear.
 
-## 9. Limitations
+## 10. Limitations
 
 - The CPU numbers come from a shared host with a load average between 6 and 22 and are
   therefore a range, not a single value. The GPU numbers are stable. Speedups
@@ -304,14 +338,16 @@ for the polyscribe end-to-end transcription test."
   and other ROCm versions are untested.
 - The GPU backend is not covered by CI. The GitHub Actions workflow runs the CPU
   build; there is no GPU runner in either CI system.
-- A GPU request that cannot reach a device falls back to the CPU silently (section 7).
-  whisper-rs 0.16 does not expose whether the GPU backend was actually used, so
-  PolyScribe cannot detect this itself.
+- A GPU request that cannot reach a device now fails instead of falling back to
+  the CPU silently (section 7), and `auto` reports the fallback. What PolyScribe
+  still cannot establish is whether every kernel of a transcription ran on the
+  GPU: whisper-rs 0.16 does not expose that, so the guarantee is limited to "a
+  matching device was present and the model was offloaded to it".
 - At the time of measurement the Gitea Actions runner (`somegit-runner`, org
   `Owlibou`) was offline, so the queued Gitea runs had not executed. GitHub Actions is
   the CI of record.
 
-## 10. Reproduction commands
+## 11. Reproduction commands
 
 ```bash
 # 1. Build the HIP binary
@@ -373,24 +409,20 @@ The raw measurement data of the runs behind section 6 is kept in
 `ggml-*.bin-raw.json` (the per-run records of the timing pass), `vram.json` (the
 before/during/after VRAM samples) and `bench.log` (the run log).
 
-## 11. Recommended next steps
+## 12. Recommended next steps
 
 1. **Document the GPU build** in `docs/usage.md`: that a HIP build needs ROCm at
-   runtime, that the ROCm runtime is a hard dependency of such a binary, and that a
-   GPU request without a visible device falls back to the CPU silently. Until
-   whisper-rs exposes whether the GPU backend was used, `-vv` is the only way to
-   confirm it.
+   runtime, that the ROCm runtime is a hard dependency of such a binary, and that
+   an explicit GPU request without a device now fails instead of falling back to
+   the CPU. The contract and the model loading behaviour are documented in
+   `docs/usage.md` and `docs/design.md`.
 2. **Add a `TMPDIR` note** to `docs/development.md` and the CI script, because the HIP
    build needs several GB of temporary space.
-3. **Reuse the model context across the inputs of one invocation.** The measurement
-   shows one model load per input file, which on the GPU path means one full PCIe
-   upload of the model per input. This needs a small change to the backend API
-   (the context has to outlive a single file) and should be measured before and after.
-4. **Measure `large.en` on the GPU only.** The CPU path for a large model is not
+3. **Measure `large.en` on the GPU only.** The CPU path for a large model is not
    practical on this host, but the VRAM budget (2.3 GB for medium.en on a 16 GB card)
    suggests it would fit and run at a few times real time.
-5. **Add a GPU CI job** if GPU support is to be claimed as tested. Until then, describe
+4. **Add a GPU CI job** if GPU support is to be claimed as tested. Until then, describe
    CUDA and HIP as experimental, as the README now does.
-6. **Investigate the Gitea runner outage** separately. It is not a repository problem:
+5. **Investigate the Gitea runner outage** separately. It is not a repository problem:
    the runner host is offline, and the same workflow builds fine in an equivalent
    minimal container.

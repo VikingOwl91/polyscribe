@@ -1,0 +1,186 @@
+  run1 before-cpu-1file wall=   4545.7ms rss=  302MB vram= 2264MiB model_loads=1 load=5.5 rocm=False
+  run1 after-cpu-1file  wall=   4600.8ms rss=  303MB vram= 2264MiB model_loads=1 load=6.5 rocm=False
+  run1 before-hip-1file wall=    827.2ms rss=  302MB vram= 2818MiB model_loads=1 load=6.5 rocm=True
+  run1 after-hip-1file  wall=    828.1ms rss=  310MB vram= 2818MiB model_loads=1 load=6.5 rocm=True
+  run1 before-cpu-3file wall=  18021.5ms rss=  324MB vram= 2264MiB model_loads=3 load=10.1 rocm=False
+  run1 after-cpu-3file  wall=  12885.1ms rss=  313MB vram= 2244MiB model_loads=1 load=11.2 rocm=False
+  run1 before-hip-3file wall=   2145.3ms rss=  321MB vram= 2798MiB model_loads=3 load=10.4 rocm=True
+  run1 after-hip-3file  wall=   2015.7ms rss=  325MB vram= 2750MiB model_loads=1 load=10.4 rocm=True
+  run2 before-cpu-1file wall=   3681.4ms rss=  303MB vram= 2196MiB model_loads=1 load=11.0 rocm=False
+  run2 after-cpu-1file  wall=   5381.0ms rss=  303MB vram= 2264MiB model_loads=1 load=11.9 rocm=False
+  run2 before-hip-1file wall=    825.4ms rss=  302MB vram= 2818MiB model_loads=1 load=11.9 rocm=True
+  run2 after-hip-1file  wall=    829.7ms rss=  309MB vram= 2818MiB model_loads=1 load=11.2 rocm=True
+  run2 before-cpu-3file wall=  11312.4ms rss=  324MB vram= 2264MiB model_loads=3 load=12.5 rocm=False
+  run2 after-cpu-3file  wall=  27164.6ms rss=  313MB vram= 2264MiB model_loads=1 load=14.6 rocm=False
+  run2 before-hip-3file wall=   2090.9ms rss=  321MB vram= 2798MiB model_loads=3 load=13.6 rocm=True
+  run2 after-hip-3file  wall=   2234.6ms rss=  325MB vram= 2798MiB model_loads=1 load=13.6 rocm=True
+  run3 before-cpu-1file wall=  17720.6ms rss=  302MB vram= 2264MiB model_loads=1 load=15.9 rocm=False
+  run3 after-cpu-1file  wall=  16814.5ms rss=  303MB vram= 2264MiB model_loads=1 load=16.6 rocm=False
+  run3 before-hip-1file wall=    828.4ms rss=  302MB vram= 2818MiB model_loads=1 load=15.6 rocm=True
+  run3 after-hip-1file  wall=    809.8ms rss=  310MB vram= 2818MiB model_loads=1 load=15.6 rocm=True
+  run3 before-cpu-3file wall=  12337.1ms rss=  324MB vram= 2264MiB model_loads=3 load=15.9 rocm=False
+  run3 after-cpu-3file  wall=  12370.5ms rss=  313MB vram= 2264MiB model_loads=1 load=16.2 rocm=False
+  run3 before-hip-3file wall=   2083.1ms rss=  321MB vram= 2750MiB model_loads=3 load=16.2 rocm=True
+  run3 after-hip-3file  wall=   1972.4ms rss=  325MB vram= 2750MiB model_loads=1 load=15.2 rocm=True
+  run4 before-cpu-1file wall=   4296.9ms rss=  303MB vram= 2196MiB model_loads=1 load=15.6 rocm=False
+  run4 after-cpu-1file  wall=   4117.7ms rss=  302MB vram= 2264MiB model_loads=1 load=15.6 rocm=False
+  run4 before-hip-1file wall=    834.4ms rss=  302MB vram= 2818MiB model_loads=1 load=14.7 rocm=True
+  run4 after-hip-1file  wall=    820.7ms rss=  309MB vram= 2818MiB model_loads=1 load=14.7 rocm=True
+  run4 before-cpu-3file wall=  10985.3ms rss=  324MB vram= 2264MiB model_loads=3 load=14.6 rocm=False
+  run4 after-cpu-3file  wall=  16368.3ms rss=  313MB vram= 2264MiB model_loads=1 load=15.4 rocm=False
+  run4 before-hip-3file wall=   2090.7ms rss=  321MB vram= 2818MiB model_loads=3 load=14.4 rocm=True
+  run4 after-hip-3file  wall=   1966.5ms rss=  325MB vram= 2818MiB model_loads=1 load=14.4 rocm=True
+  run5 before-cpu-1file wall=   3866.9ms rss=  302MB vram= 2264MiB model_loads=1 load=14.7 rocm=False
+  run5 after-cpu-1file  wall=   3650.7ms rss=  303MB vram= 2264MiB model_loads=1 load=14.9 rocm=False
+  run5 before-hip-1file wall=    808.8ms rss=  302MB vram= 2818MiB model_loads=1 load=14.9 rocm=True
+  run5 after-hip-1file  wall=    803.6ms rss=  309MB vram= 2818MiB model_loads=1 load=14.9 rocm=True
+  run5 before-cpu-3file wall=  12371.1ms rss=  324MB vram= 2264MiB model_loads=3 load=14.8 rocm=False
+  run5 after-cpu-3file  wall=  12196.7ms rss=  313MB vram= 2264MiB model_loads=1 load=15.5 rocm=False
+  run5 before-hip-3file wall=   2122.9ms rss=  321MB vram= 2818MiB model_loads=3 load=14.5 rocm=True
+  run5 after-hip-3file  wall=   1992.6ms rss=  327MB vram= 2818MiB model_loads=1 load=14.5 rocm=True
+{
+  "before-cpu-1file": {
+    "n": 5,
+    "wall_median_ms": 4296.9,
+    "wall_min_ms": 3681.4,
+    "wall_max_ms": 17720.6,
+    "peak_rss_mib": 303.8,
+    "vram_peak_mib": 2264,
+    "model_context_loads": [
+      1
+    ],
+    "transcript_sha": [
+      [
+        "618f069c235c0dc7"
+      ]
+    ],
+    "loadavg_median": 14.7,
+    "rocm_used": false
+  },
+  "after-cpu-1file": {
+    "n": 5,
+    "wall_median_ms": 4600.8,
+    "wall_min_ms": 3650.7,
+    "wall_max_ms": 16814.5,
+    "peak_rss_mib": 304.0,
+    "vram_peak_mib": 2264,
+    "model_context_loads": [
+      1
+    ],
+    "transcript_sha": [
+      [
+        "618f069c235c0dc7"
+      ]
+    ],
+    "loadavg_median": 14.9,
+    "rocm_used": false
+  },
+  "before-hip-1file": {
+    "n": 5,
+    "wall_median_ms": 827.2,
+    "wall_min_ms": 808.8,
+    "wall_max_ms": 834.4,
+    "peak_rss_mib": 302.6,
+    "vram_peak_mib": 2818,
+    "model_context_loads": [
+      1
+    ],
+    "transcript_sha": [
+      [
+        "618f069c235c0dc7"
+      ]
+    ],
+    "loadavg_median": 14.7,
+    "rocm_used": true
+  },
+  "after-hip-1file": {
+    "n": 5,
+    "wall_median_ms": 820.7,
+    "wall_min_ms": 803.6,
+    "wall_max_ms": 829.7,
+    "peak_rss_mib": 310.2,
+    "vram_peak_mib": 2818,
+    "model_context_loads": [
+      1
+    ],
+    "transcript_sha": [
+      [
+        "618f069c235c0dc7"
+      ]
+    ],
+    "loadavg_median": 14.7,
+    "rocm_used": true
+  },
+  "before-cpu-3file": {
+    "n": 5,
+    "wall_median_ms": 12337.1,
+    "wall_min_ms": 10985.3,
+    "wall_max_ms": 18021.5,
+    "peak_rss_mib": 324.2,
+    "vram_peak_mib": 2264,
+    "model_context_loads": [
+      3
+    ],
+    "transcript_sha": [
+      [
+        "8095e514e0150cc1"
+      ]
+    ],
+    "loadavg_median": 14.6,
+    "rocm_used": false
+  },
+  "after-cpu-3file": {
+    "n": 5,
+    "wall_median_ms": 12885.1,
+    "wall_min_ms": 12196.7,
+    "wall_max_ms": 27164.6,
+    "peak_rss_mib": 313.9,
+    "vram_peak_mib": 2264,
+    "model_context_loads": [
+      1
+    ],
+    "transcript_sha": [
+      [
+        "8095e514e0150cc1"
+      ]
+    ],
+    "loadavg_median": 15.4,
+    "rocm_used": false
+  },
+  "before-hip-3file": {
+    "n": 5,
+    "wall_median_ms": 2090.9,
+    "wall_min_ms": 2083.1,
+    "wall_max_ms": 2145.3,
+    "peak_rss_mib": 321.2,
+    "vram_peak_mib": 2818,
+    "model_context_loads": [
+      3
+    ],
+    "transcript_sha": [
+      [
+        "8095e514e0150cc1"
+      ]
+    ],
+    "loadavg_median": 14.4,
+    "rocm_used": true
+  },
+  "after-hip-3file": {
+    "n": 5,
+    "wall_median_ms": 1992.6,
+    "wall_min_ms": 1966.5,
+    "wall_max_ms": 2234.6,
+    "peak_rss_mib": 328.0,
+    "vram_peak_mib": 2818,
+    "model_context_loads": [
+      1
+    ],
+    "transcript_sha": [
+      [
+        "8095e514e0150cc1"
+      ]
+    ],
+    "loadavg_median": 14.4,
+    "rocm_used": true
+  }
+}

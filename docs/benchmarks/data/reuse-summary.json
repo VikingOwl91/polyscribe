@@ -1,0 +1,646 @@
+{
+  "summary": {
+    "before-cpu-1file": {
+      "n": 5,
+      "wall_median_ms": 4296.9,
+      "wall_min_ms": 3681.4,
+      "wall_max_ms": 17720.6,
+      "peak_rss_mib": 303.8,
+      "vram_peak_mib": 2264,
+      "model_context_loads": [
+        1
+      ],
+      "transcript_sha": [
+        [
+          "618f069c235c0dc7"
+        ]
+      ],
+      "loadavg_median": 14.7,
+      "rocm_used": false
+    },
+    "after-cpu-1file": {
+      "n": 5,
+      "wall_median_ms": 4600.8,
+      "wall_min_ms": 3650.7,
+      "wall_max_ms": 16814.5,
+      "peak_rss_mib": 304.0,
+      "vram_peak_mib": 2264,
+      "model_context_loads": [
+        1
+      ],
+      "transcript_sha": [
+        [
+          "618f069c235c0dc7"
+        ]
+      ],
+      "loadavg_median": 14.9,
+      "rocm_used": false
+    },
+    "before-hip-1file": {
+      "n": 5,
+      "wall_median_ms": 827.2,
+      "wall_min_ms": 808.8,
+      "wall_max_ms": 834.4,
+      "peak_rss_mib": 302.6,
+      "vram_peak_mib": 2818,
+      "model_context_loads": [
+        1
+      ],
+      "transcript_sha": [
+        [
+          "618f069c235c0dc7"
+        ]
+      ],
+      "loadavg_median": 14.7,
+      "rocm_used": true
+    },
+    "after-hip-1file": {
+      "n": 5,
+      "wall_median_ms": 820.7,
+      "wall_min_ms": 803.6,
+      "wall_max_ms": 829.7,
+      "peak_rss_mib": 310.2,
+      "vram_peak_mib": 2818,
+      "model_context_loads": [
+        1
+      ],
+      "transcript_sha": [
+        [
+          "618f069c235c0dc7"
+        ]
+      ],
+      "loadavg_median": 14.7,
+      "rocm_used": true
+    },
+    "before-cpu-3file": {
+      "n": 5,
+      "wall_median_ms": 12337.1,
+      "wall_min_ms": 10985.3,
+      "wall_max_ms": 18021.5,
+      "peak_rss_mib": 324.2,
+      "vram_peak_mib": 2264,
+      "model_context_loads": [
+        3
+      ],
+      "transcript_sha": [
+        [
+          "8095e514e0150cc1"
+        ]
+      ],
+      "loadavg_median": 14.6,
+      "rocm_used": false
+    },
+    "after-cpu-3file": {
+      "n": 5,
+      "wall_median_ms": 12885.1,
+      "wall_min_ms": 12196.7,
+      "wall_max_ms": 27164.6,
+      "peak_rss_mib": 313.9,
+      "vram_peak_mib": 2264,
+      "model_context_loads": [
+        1
+      ],
+      "transcript_sha": [
+        [
+          "8095e514e0150cc1"
+        ]
+      ],
+      "loadavg_median": 15.4,
+      "rocm_used": false
+    },
+    "before-hip-3file": {
+      "n": 5,
+      "wall_median_ms": 2090.9,
+      "wall_min_ms": 2083.1,
+      "wall_max_ms": 2145.3,
+      "peak_rss_mib": 321.2,
+      "vram_peak_mib": 2818,
+      "model_context_loads": [
+        3
+      ],
+      "transcript_sha": [
+        [
+          "8095e514e0150cc1"
+        ]
+      ],
+      "loadavg_median": 14.4,
+      "rocm_used": true
+    },
+    "after-hip-3file": {
+      "n": 5,
+      "wall_median_ms": 1992.6,
+      "wall_min_ms": 1966.5,
+      "wall_max_ms": 2234.6,
+      "peak_rss_mib": 328.0,
+      "vram_peak_mib": 2818,
+      "model_context_loads": [
+        1
+      ],
+      "transcript_sha": [
+        [
+          "8095e514e0150cc1"
+        ]
+      ],
+      "loadavg_median": 14.4,
+      "rocm_used": true
+    }
+  },
+  "runs": {
+    "before-cpu-1file": [
+      {
+        "exit_code": 0,
+        "wall_ms": 4545.7,
+        "peak_rss_kb": 309540,
+        "vram_peak_mib": 2264,
+        "model_context_loads": 1,
+        "transcript_sha": [
+          "618f069c235c0dc7"
+        ],
+        "loadavg": 5.51,
+        "rocm": false
+      },
+      {
+        "exit_code": 0,
+        "wall_ms": 3681.4,
+        "peak_rss_kb": 311120,
+        "vram_peak_mib": 2196,
+        "model_context_loads": 1,
+        "transcript_sha": [
+          "618f069c235c0dc7"
+        ],
+        "loadavg": 10.99,
+        "rocm": false
+      },
+      {
+        "exit_code": 0,
+        "wall_ms": 17720.6,
+        "peak_rss_kb": 309588,
+        "vram_peak_mib": 2264,
+        "model_context_loads": 1,
+        "transcript_sha": [
+          "618f069c235c0dc7"
+        ],
+        "loadavg": 15.89,
+        "rocm": false
+      },
+      {
+        "exit_code": 0,
+        "wall_ms": 4296.9,
+        "peak_rss_kb": 310540,
+        "vram_peak_mib": 2196,
+        "model_context_loads": 1,
+        "transcript_sha": [
+          "618f069c235c0dc7"
+        ],
+        "loadavg": 15.64,
+        "rocm": false
+      },
+      {
+        "exit_code": 0,
+        "wall_ms": 3866.9,
+        "peak_rss_kb": 309260,
+        "vram_peak_mib": 2264,
+        "model_context_loads": 1,
+        "transcript_sha": [
+          "618f069c235c0dc7"
+        ],
+        "loadavg": 14.68,
+        "rocm": false
+      }
+    ],
+    "after-cpu-1file": [
+      {
+        "exit_code": 0,
+        "wall_ms": 4600.8,
+        "peak_rss_kb": 311200,
+        "vram_peak_mib": 2264,
+        "model_context_loads": 1,
+        "transcript_sha": [
+          "618f069c235c0dc7"
+        ],
+        "loadavg": 6.51,
+        "rocm": false
+      },
+      {
+        "exit_code": 0,
+        "wall_ms": 5381.0,
+        "peak_rss_kb": 310708,
+        "vram_peak_mib": 2264,
+        "model_context_loads": 1,
+        "transcript_sha": [
+          "618f069c235c0dc7"
+        ],
+        "loadavg": 11.88,
+        "rocm": false
+      },
+      {
+        "exit_code": 0,
+        "wall_ms": 16814.5,
+        "peak_rss_kb": 311284,
+        "vram_peak_mib": 2264,
+        "model_context_loads": 1,
+        "transcript_sha": [
+          "618f069c235c0dc7"
+        ],
+        "loadavg": 16.64,
+        "rocm": false
+      },
+      {
+        "exit_code": 0,
+        "wall_ms": 4117.7,
+        "peak_rss_kb": 310040,
+        "vram_peak_mib": 2264,
+        "model_context_loads": 1,
+        "transcript_sha": [
+          "618f069c235c0dc7"
+        ],
+        "loadavg": 15.64,
+        "rocm": false
+      },
+      {
+        "exit_code": 0,
+        "wall_ms": 3650.7,
+        "peak_rss_kb": 311064,
+        "vram_peak_mib": 2264,
+        "model_context_loads": 1,
+        "transcript_sha": [
+          "618f069c235c0dc7"
+        ],
+        "loadavg": 14.95,
+        "rocm": false
+      }
+    ],
+    "before-hip-1file": [
+      {
+        "exit_code": 0,
+        "wall_ms": 827.2,
+        "peak_rss_kb": 309900,
+        "vram_peak_mib": 2818,
+        "model_context_loads": 1,
+        "transcript_sha": [
+          "618f069c235c0dc7"
+        ],
+        "loadavg": 6.51,
+        "rocm": true
+      },
+      {
+        "exit_code": 0,
+        "wall_ms": 825.4,
+        "peak_rss_kb": 309848,
+        "vram_peak_mib": 2818,
+        "model_context_loads": 1,
+        "transcript_sha": [
+          "618f069c235c0dc7"
+        ],
+        "loadavg": 11.88,
+        "rocm": true
+      },
+      {
+        "exit_code": 0,
+        "wall_ms": 828.4,
+        "peak_rss_kb": 309860,
+        "vram_peak_mib": 2818,
+        "model_context_loads": 1,
+        "transcript_sha": [
+          "618f069c235c0dc7"
+        ],
+        "loadavg": 15.55,
+        "rocm": true
+      },
+      {
+        "exit_code": 0,
+        "wall_ms": 834.4,
+        "peak_rss_kb": 309776,
+        "vram_peak_mib": 2818,
+        "model_context_loads": 1,
+        "transcript_sha": [
+          "618f069c235c0dc7"
+        ],
+        "loadavg": 14.71,
+        "rocm": true
+      },
+      {
+        "exit_code": 0,
+        "wall_ms": 808.8,
+        "peak_rss_kb": 309860,
+        "vram_peak_mib": 2818,
+        "model_context_loads": 1,
+        "transcript_sha": [
+          "618f069c235c0dc7"
+        ],
+        "loadavg": 14.95,
+        "rocm": true
+      }
+    ],
+    "after-hip-1file": [
+      {
+        "exit_code": 0,
+        "wall_ms": 828.1,
+        "peak_rss_kb": 317624,
+        "vram_peak_mib": 2818,
+        "model_context_loads": 1,
+        "transcript_sha": [
+          "618f069c235c0dc7"
+        ],
+        "loadavg": 6.51,
+        "rocm": true
+      },
+      {
+        "exit_code": 0,
+        "wall_ms": 829.7,
+        "peak_rss_kb": 317196,
+        "vram_peak_mib": 2818,
+        "model_context_loads": 1,
+        "transcript_sha": [
+          "618f069c235c0dc7"
+        ],
+        "loadavg": 11.16,
+        "rocm": true
+      },
+      {
+        "exit_code": 0,
+        "wall_ms": 809.8,
+        "peak_rss_kb": 317584,
+        "vram_peak_mib": 2818,
+        "model_context_loads": 1,
+        "transcript_sha": [
+          "618f069c235c0dc7"
+        ],
+        "loadavg": 15.55,
+        "rocm": true
+      },
+      {
+        "exit_code": 0,
+        "wall_ms": 820.7,
+        "peak_rss_kb": 317144,
+        "vram_peak_mib": 2818,
+        "model_context_loads": 1,
+        "transcript_sha": [
+          "618f069c235c0dc7"
+        ],
+        "loadavg": 14.71,
+        "rocm": true
+      },
+      {
+        "exit_code": 0,
+        "wall_ms": 803.6,
+        "peak_rss_kb": 317264,
+        "vram_peak_mib": 2818,
+        "model_context_loads": 1,
+        "transcript_sha": [
+          "618f069c235c0dc7"
+        ],
+        "loadavg": 14.95,
+        "rocm": true
+      }
+    ],
+    "before-cpu-3file": [
+      {
+        "exit_code": 0,
+        "wall_ms": 18021.5,
+        "peak_rss_kb": 331940,
+        "vram_peak_mib": 2264,
+        "model_context_loads": 3,
+        "transcript_sha": [
+          "8095e514e0150cc1"
+        ],
+        "loadavg": 10.06,
+        "rocm": false
+      },
+      {
+        "exit_code": 0,
+        "wall_ms": 11312.4,
+        "peak_rss_kb": 331892,
+        "vram_peak_mib": 2264,
+        "model_context_loads": 3,
+        "transcript_sha": [
+          "8095e514e0150cc1"
+        ],
+        "loadavg": 12.53,
+        "rocm": false
+      },
+      {
+        "exit_code": 0,
+        "wall_ms": 12337.1,
+        "peak_rss_kb": 331968,
+        "vram_peak_mib": 2264,
+        "model_context_loads": 3,
+        "transcript_sha": [
+          "8095e514e0150cc1"
+        ],
+        "loadavg": 15.93,
+        "rocm": false
+      },
+      {
+        "exit_code": 0,
+        "wall_ms": 10985.3,
+        "peak_rss_kb": 331980,
+        "vram_peak_mib": 2264,
+        "model_context_loads": 3,
+        "transcript_sha": [
+          "8095e514e0150cc1"
+        ],
+        "loadavg": 14.63,
+        "rocm": false
+      },
+      {
+        "exit_code": 0,
+        "wall_ms": 12371.1,
+        "peak_rss_kb": 332004,
+        "vram_peak_mib": 2264,
+        "model_context_loads": 3,
+        "transcript_sha": [
+          "8095e514e0150cc1"
+        ],
+        "loadavg": 14.76,
+        "rocm": false
+      }
+    ],
+    "after-cpu-3file": [
+      {
+        "exit_code": 0,
+        "wall_ms": 12885.1,
+        "peak_rss_kb": 321128,
+        "vram_peak_mib": 2244,
+        "model_context_loads": 1,
+        "transcript_sha": [
+          "8095e514e0150cc1"
+        ],
+        "loadavg": 11.2,
+        "rocm": false
+      },
+      {
+        "exit_code": 0,
+        "wall_ms": 27164.6,
+        "peak_rss_kb": 321356,
+        "vram_peak_mib": 2264,
+        "model_context_loads": 1,
+        "transcript_sha": [
+          "8095e514e0150cc1"
+        ],
+        "loadavg": 14.62,
+        "rocm": false
+      },
+      {
+        "exit_code": 0,
+        "wall_ms": 12370.5,
+        "peak_rss_kb": 321408,
+        "vram_peak_mib": 2264,
+        "model_context_loads": 1,
+        "transcript_sha": [
+          "8095e514e0150cc1"
+        ],
+        "loadavg": 16.24,
+        "rocm": false
+      },
+      {
+        "exit_code": 0,
+        "wall_ms": 16368.3,
+        "peak_rss_kb": 321384,
+        "vram_peak_mib": 2264,
+        "model_context_loads": 1,
+        "transcript_sha": [
+          "8095e514e0150cc1"
+        ],
+        "loadavg": 15.39,
+        "rocm": false
+      },
+      {
+        "exit_code": 0,
+        "wall_ms": 12196.7,
+        "peak_rss_kb": 321320,
+        "vram_peak_mib": 2264,
+        "model_context_loads": 1,
+        "transcript_sha": [
+          "8095e514e0150cc1"
+        ],
+        "loadavg": 15.48,
+        "rocm": false
+      }
+    ],
+    "before-hip-3file": [
+      {
+        "exit_code": 0,
+        "wall_ms": 2145.3,
+        "peak_rss_kb": 328852,
+        "vram_peak_mib": 2798,
+        "model_context_loads": 3,
+        "transcript_sha": [
+          "8095e514e0150cc1"
+        ],
+        "loadavg": 10.38,
+        "rocm": true
+      },
+      {
+        "exit_code": 0,
+        "wall_ms": 2090.9,
+        "peak_rss_kb": 328852,
+        "vram_peak_mib": 2798,
+        "model_context_loads": 3,
+        "transcript_sha": [
+          "8095e514e0150cc1"
+        ],
+        "loadavg": 13.61,
+        "rocm": true
+      },
+      {
+        "exit_code": 0,
+        "wall_ms": 2083.1,
+        "peak_rss_kb": 328748,
+        "vram_peak_mib": 2750,
+        "model_context_loads": 3,
+        "transcript_sha": [
+          "8095e514e0150cc1"
+        ],
+        "loadavg": 16.24,
+        "rocm": true
+      },
+      {
+        "exit_code": 0,
+        "wall_ms": 2090.7,
+        "peak_rss_kb": 328860,
+        "vram_peak_mib": 2818,
+        "model_context_loads": 3,
+        "transcript_sha": [
+          "8095e514e0150cc1"
+        ],
+        "loadavg": 14.39,
+        "rocm": true
+      },
+      {
+        "exit_code": 0,
+        "wall_ms": 2122.9,
+        "peak_rss_kb": 328736,
+        "vram_peak_mib": 2818,
+        "model_context_loads": 3,
+        "transcript_sha": [
+          "8095e514e0150cc1"
+        ],
+        "loadavg": 14.48,
+        "rocm": true
+      }
+    ],
+    "after-hip-3file": [
+      {
+        "exit_code": 0,
+        "wall_ms": 2015.7,
+        "peak_rss_kb": 333660,
+        "vram_peak_mib": 2750,
+        "model_context_loads": 1,
+        "transcript_sha": [
+          "8095e514e0150cc1"
+        ],
+        "loadavg": 10.38,
+        "rocm": true
+      },
+      {
+        "exit_code": 0,
+        "wall_ms": 2234.6,
+        "peak_rss_kb": 333592,
+        "vram_peak_mib": 2798,
+        "model_context_loads": 1,
+        "transcript_sha": [
+          "8095e514e0150cc1"
+        ],
+        "loadavg": 13.61,
+        "rocm": true
+      },
+      {
+        "exit_code": 0,
+        "wall_ms": 1972.4,
+        "peak_rss_kb": 333380,
+        "vram_peak_mib": 2750,
+        "model_context_loads": 1,
+        "transcript_sha": [
+          "8095e514e0150cc1"
+        ],
+        "loadavg": 15.18,
+        "rocm": true
+      },
+      {
+        "exit_code": 0,
+        "wall_ms": 1966.5,
+        "peak_rss_kb": 333720,
+        "vram_peak_mib": 2818,
+        "model_context_loads": 1,
+        "transcript_sha": [
+          "8095e514e0150cc1"
+        ],
+        "loadavg": 14.39,
+        "rocm": true
+      },
+      {
+        "exit_code": 0,
+        "wall_ms": 1992.6,
+        "peak_rss_kb": 335848,
+        "vram_peak_mib": 2818,
+        "model_context_loads": 1,
+        "transcript_sha": [
+          "8095e514e0150cc1"
+        ],
+        "loadavg": 14.48,
+        "rocm": true
+      }
+    ]
+  }
+}

@@ -32,7 +32,25 @@ The CLI is organized into subcommands: `transcribe`, `models`, `plugins`, `compl
   - `--language LANG`
     - Language hint (e.g., `en`, `de`). Required when transcribing audio. English-only models reject non-`en` hints.
   - `--gpu-backend [auto|cpu|cuda|hip]`
-    - Choose the backend among those compiled into the binary. Default is `auto` (prefers CUDA → HIP → CPU). Requesting a GPU backend that was not compiled in is an error that explains how to rebuild.
+    - Choose the backend. Default is `auto` (prefers CUDA → HIP → CPU).
+    - `cpu` always runs on the CPU.
+    - `cuda` and `hip` require the matching backend to be compiled in **and** a
+      matching GPU device to be present. If the backend is not compiled in, the
+      error says how to rebuild; if it is compiled in but no device is available,
+      the error says how to check the runtime and the device. An explicit GPU
+      request is never silently continued on the CPU.
+    - `auto` falls back to the CPU when no GPU device is available and says so.
+    - The device list comes from the same registry ggml and whisper.cpp use, so
+      the check reflects what the runtime actually found. Run with `-vv` to see
+      the detected backends and devices.
+
+## Model loading
+
+The Whisper model is loaded once per invocation and reused for every input
+file. On a GPU build the weights are uploaded into VRAM once, which matters
+when several files are transcribed in a single run. Each file still gets its
+own inference state, so the outputs, timestamps and error handling of the
+files stay independent. The model is released when the command finishes.
 
 ## models
 

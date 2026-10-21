@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## Unreleased
+
+### Changed
+- Backends: an explicit `--gpu-backend cuda` or `--gpu-backend hip` now requires a matching GPU device to be present. The device list comes from ggml's backend registry, the same registry whisper.cpp selects its GPU from. Without a device the request fails with an actionable error instead of silently continuing on the CPU; `--gpu-backend auto` falls back to the CPU and reports it.
+- Transcribe: the Whisper model is loaded once per invocation and reused for every input file, instead of being loaded again for each file. Every file still gets its own inference state, so outputs, timestamps and error handling stay independent.
+
+### Added
+- Core: `gpu` module with a device probe for the GPU backends, and unit tests for the backend selection contract (explicit CPU, explicit GPU with and without a device, and the automatic fallback).
+- Tests: CLI integration tests for the backend selection contract.
+- Docs: the backend selection contract and the model context lifecycle in `docs/usage.md` and `docs/design.md`, plus the before/after measurements of the model context reuse in `docs/benchmarks/amd-rx-9070-xt.md`.
+
 ## v0.1.0-alpha.1 - 2026-10-21
 
 ### Added

@@ -7,7 +7,7 @@ use crate::prelude::*;
 use crate::{decode_audio_to_pcm_f32_ffmpeg, find_model_file};
 use anyhow::{Context, anyhow};
 use std::env;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Test-only override for the GPU device probe.
 ///
@@ -31,7 +31,7 @@ pub enum BackendKind {
 pub trait TranscribeBackend {
     fn kind(&self) -> BackendKind;
     fn transcribe(
-        &self,
+        &mut self,
         audio_path: &Path,
         speaker: &str,
         language: Option<&str>,
@@ -69,12 +69,62 @@ fn hip_available() -> bool {
     return false;
 }
 
+/// A Whisper model that is loaded once and reused for every input of one
+/// invocation.
+///
+/// Loading the model is the expensive part of a transcription run. On the GPU
+/// path the weights are uploaded into VRAM, so loading them again for every
+/// input file multiplied that cost by the number of files.
+struct ModelSession {
+    model_path: PathBuf,
+    english_only: bool,
+    context: whisper_rs::WhisperContext,
+}
+
+impl ModelSession {
+    /// Load the model for the given backend.
+    fn load(backend: BackendKind) -> Result<Self> {
+        let model_path = find_model_file()?;
+        let english_only = model_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(|s| s.contains(".en.") || s.ends_with(".en.bin"))
+            .unwrap_or(false);
+        let context = crate::with_suppressed_stderr(|| {
+            let mut params = whisper_rs::WhisperContextParameters::default();
+            // Only a GPU backend may use the GPU. whisper-rs defaults
+            // `use_gpu` to the compiled-in GPU feature, so in a GPU-enabled
+            // build a "cpu" request would still run on the GPU.
+            params.use_gpu(matches!(backend, BackendKind::Cuda | BackendKind::Hip));
+            whisper_rs::WhisperContext::new_with_params(&model_path, params).with_context(|| {
+                format!("Failed to load Whisper model at {}", model_path.display())
+            })
+        })?;
+        Ok(Self {
+            model_path,
+            english_only,
+            context,
+        })
+    }
+}
+
+/// A backend that keeps the loaded model for the whole invocation.
 #[derive(Default)]
-pub struct CpuBackend;
+pub struct CpuBackend {
+    session: Option<ModelSession>,
+}
+
+/// A backend that keeps the loaded model for the whole invocation.
 #[derive(Default)]
-pub struct CudaBackend;
+pub struct CudaBackend {
+    session: Option<ModelSession>,
+}
+
+/// A backend that keeps the loaded model for the whole invocation.
 #[derive(Default)]
-pub struct HipBackend;
+pub struct HipBackend {
+    session: Option<ModelSession>,
+}
 
 macro_rules! impl_whisper_backend {
     ($ty:ty, $kind:expr) => {
@@ -83,14 +133,18 @@ macro_rules! impl_whisper_backend {
                 $kind
             }
             fn transcribe(
-                &self,
+                &mut self,
                 audio_path: &Path,
                 speaker: &str,
                 language: Option<&str>,
                 _gpu_layers: Option<u32>,
                 progress: Option<&(dyn Fn(i32) + Send + Sync)>,
             ) -> Result<Vec<OutputEntry>> {
-                transcribe_with_whisper_rs(audio_path, speaker, language, progress, $kind)
+                if self.session.is_none() {
+                    self.session = Some(ModelSession::load($kind)?);
+                }
+                let session = self.session.as_mut().expect("the session was just created");
+                transcribe_with_whisper_rs(session, audio_path, speaker, language, progress)
             }
         }
     };
@@ -170,10 +224,10 @@ pub fn select_backend(requested: BackendKind, verbose: bool) -> Result<BackendSe
 
     let instantiate_backend = |k: BackendKind| -> Box<dyn TranscribeBackend + Send + Sync> {
         match k {
-            BackendKind::Cpu => Box::new(CpuBackend),
-            BackendKind::Cuda => Box::new(CudaBackend),
-            BackendKind::Hip => Box::new(HipBackend),
-            BackendKind::Auto => Box::new(CpuBackend), // resolved before construction
+            BackendKind::Cpu => Box::new(CpuBackend::default()),
+            BackendKind::Cuda => Box::new(CudaBackend::default()),
+            BackendKind::Hip => Box::new(HipBackend::default()),
+            BackendKind::Auto => Box::new(CpuBackend::default()), // resolved before construction
         }
     };
 
@@ -243,7 +297,7 @@ pub fn select_backend(requested: BackendKind, verbose: bool) -> Result<BackendSe
 /// stderr (suppressed by quiet mode); a transcription failure is logged when
 /// running interactively and then propagated.
 pub fn collect_entries_for_input(
-    backend: &dyn TranscribeBackend,
+    backend: &mut dyn TranscribeBackend,
     path: &Path,
     speaker: &str,
     lang_opt: Option<&str>,
@@ -281,11 +335,11 @@ pub fn collect_entries_for_input(
 
 #[allow(clippy::too_many_arguments)]
 fn transcribe_with_whisper_rs(
+    session: &mut ModelSession,
     audio_path: &Path,
     speaker: &str,
     language: Option<&str>,
     progress: Option<&(dyn Fn(i32) + Send + Sync)>,
-    backend: BackendKind,
 ) -> Result<Vec<OutputEntry>> {
     let report = |p: i32| {
         if let Some(cb) = progress {
@@ -297,19 +351,13 @@ fn transcribe_with_whisper_rs(
     let pcm_samples = decode_audio_to_pcm_f32_ffmpeg(audio_path)?;
     report(5);
 
-    let model_path = find_model_file()?;
-    let english_only_model = model_path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .map(|s| s.contains(".en.") || s.ends_with(".en.bin"))
-        .unwrap_or(false);
     if let Some(lang) = language
-        && english_only_model
+        && session.english_only
         && lang != "en"
     {
         return Err(anyhow!(
             "Selected model is English-only ({}), but a non-English language hint '{}' was provided. Please use a multilingual model or set WHISPER_MODEL.",
-            model_path.display(),
+            session.model_path.display(),
             lang
         ).into());
     }
@@ -323,19 +371,14 @@ fn transcribe_with_whisper_rs(
         }
     }
 
-    // Suppress stderr from whisper/ggml during model load and inference when quiet and not verbose.
-    let (_context, mut state) = crate::with_suppressed_stderr(|| {
-        let mut params = whisper_rs::WhisperContextParameters::default();
-        // Only a GPU backend may use the GPU. whisper-rs defaults `use_gpu`
-        // to the compiled-in GPU feature, so in a GPU-enabled build a
-        // "cpu" request would still run on the GPU.
-        params.use_gpu(matches!(backend, BackendKind::Cuda | BackendKind::Hip));
-        let context = whisper_rs::WhisperContext::new_with_params(&model_path, params)
-            .with_context(|| format!("Failed to load Whisper model at {}", model_path.display()))?;
-        let state = context
+    // The model is loaded once per invocation; every input file gets its own
+    // inference state. The state is created with the native libraries quiet,
+    // the same way the model load is.
+    let mut state = crate::with_suppressed_stderr(|| {
+        session
+            .context
             .create_state()
-            .map_err(|e| anyhow!("Failed to create Whisper state: {:?}", e))?;
-        Ok::<_, anyhow::Error>((context, state))
+            .map_err(|e| anyhow!("Failed to create Whisper state: {:?}", e))
     })?;
     report(20);
 
