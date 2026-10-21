@@ -100,4 +100,7 @@ jobs:
       - name: Run transcription e2e test
         run: |
           export POLYSCRIBE_E2E_MODEL="$HOME/.cache/polyscribe-e2e/ggml-tiny.en.bin"
-          cargo test --locked -p polyscribe-cli --test e2e_transcribe -- --nocapture
+          # One test at a time: every test starts its own transcription
+          # process, and three of them at once need more memory than a
+          # runner has to spare.
+          cargo test --locked -p polyscribe-cli --test e2e_transcribe -- --test-threads=1 --nocapture
