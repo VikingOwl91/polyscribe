@@ -589,6 +589,9 @@ fn transcribe_with_whisper_rs(
                 None => (window_end * rate).round() as u64,
             },
         };
+        // The pipeline always moves forward: a window that would start at
+        // the position of the current one would be decoded again and again.
+        let next_start = next_start.max(window_start_sample + 1);
 
         windows.seek_to(next_start);
         window = windows.next_window()?;
