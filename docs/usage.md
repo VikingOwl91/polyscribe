@@ -43,6 +43,17 @@ The CLI is organized into subcommands: `transcribe`, `models`, `plugins`, `compl
     - The device list comes from the same registry ggml and whisper.cpp use, so
       the check reflects what the runtime actually found. Run with `-vv` to see
       the detected backends and devices.
+- Warnings:
+  - whisper does not always report a segment for the beginning of the audio it
+    is given. PolyScribe decodes such a region again from a slightly
+    different position. If the region still holds no text, the command writes a
+    warning to stderr that names the file and the time range and says that the
+    transcript may be incomplete. The exit status stays the same: the
+    transcription succeeded, and the warning is the only hint that something is
+    missing.
+  - The per-window diagnostics are opt-in: set `POLYSCRIBE_WINDOW_TRACE=1` to
+    get the sample range of every window and every region that whisper did not
+    report on stderr.
 
 ## Model loading
 
