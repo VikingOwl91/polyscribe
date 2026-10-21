@@ -325,41 +325,45 @@ Peak resident memory, the number the change is about:
 
 | Recording | CPU before | CPU after | HIP before | HIP after |
 |---|---|---|---|---|
-| 5.4 s | 220 MB | 222 MB | 261 MB | 262 MB |
-| 600 s | 362 MB | **235 MB** | 363 MB | **275 MB** |
-| 3605 s | 667 MB | **231 MB** | 782 MB | **277 MB** |
+| 5.4 s | 220 MB | 278 MB | 261 MB | 262 MB |
+| 600 s | 362 MB | **292 MB** | 363 MB | **275 MB** |
+| 3605 s | 667 MB | **292 MB** | 782 MB | **277 MB** |
 
 The memory of the old path grows with the length of the recording. The memory
-of the new path is flat: 235 MB for ten minutes and 231 MB for an hour on the
+of the new path is flat: 292 MB for ten minutes and 292 MB for an hour on the
 CPU, 275 MB and 277 MB on the GPU. The remaining memory is the model, the
 decoder state and the transcript, none of which depend on the length of the
 recording.
+
+The "after" numbers of the table are one series of runs with the same binary
+on the same machine state. A single run of the same configuration on this
+host varies by up to 60 MB, the load average of the machine was between 13
+and 37 during the measurements.
 
 Wall clock and the work done:
 
 | Recording | Backend | Before | After | Windows | Model loads | Segments | Host load |
 |---|---|---|---|---|---|---|---|
-| 5.4 s | CPU | 989 ms | 1279 ms | 1 | 1 | 1 | 3.4-3.5 |
+| 5.4 s | CPU | 989 ms | 900 ms | 1 | 1 | 1 | 12.8 |
 | 5.4 s | HIP | 374 ms | 358 ms | 1 | 1 | 1 | 3.5-3.6 |
-| 600 s | CPU | 45.8 s | 261.9 s | 22 | 1 | 111 | 33.5 |
-| 600 s | HIP | 5.5 s | 7.3 s | 22 | 1 | 111 / 112 | 36.9 |
-| 3605 s | CPU | 1202.5 s | 2826.8 s | 131 | 1 | 669 | 33.5 |
-| 3605 s | HIP | 35.4 s | 33.8 s | 129 | 1 | 669 / 674 | 17.6 |
+| 600 s | CPU | 45.8 s | 57.3 s | 22 | 1 | 111 | 20.0 |
+| 600 s | HIP | 5.5 s | 5.6 s | 22 | 1 | 111 / 112 | 18.9 |
+| 3605 s | CPU | 1202.5 s | 481.0 s | 131 | 1 | 669 | 19.6 |
+| 3605 s | HIP | 35.4 s | 32.2 s | 129 | 1 | 669 / 674 | 12.8 |
 
 The real-time factor follows from the wall clock and the duration of the
 recording: for the hour long recording 3.0x on the CPU before the change and
-1.3x after it, 102x on the GPU before and 107x after. For the ten minute
-recording 13.1x on the CPU before and 2.3x after, 109x on the GPU before and
-83x after.
+7.5x after it, 102x on the GPU before and 112x after. For the ten minute
+recording 13.1x on the CPU before and 10.5x after, 109x on the GPU before and
+107x after.
 
 The CPU wall clock is not a reliable comparison on this host: the load average
-moved between 3 and 37 during the measurements, and the CPU runs of the
-"after" column were measured while the window handling, the tests and the
-builds of this sprint ran on the same machine. The GPU path is much less
-sensitive to the host load, and there the change costs 4% for the ten minute
-recording and nothing for the hour long one. The number of encoder passes is
-the reason for the difference on the CPU: 131 windows of 30 seconds instead of
-the 666 encoder passes of the whole file.
+moved between 3 and 37 during the measurements, and the "before" runs are from
+an earlier session with a different load. The GPU path is much less sensitive
+to the host load, and there the change costs nothing for the hour long
+recording. The number of encoder passes is the reason for the difference on
+the CPU: 131 windows of 30 seconds instead of the 666 encoder passes of the
+whole file.
 
 The number of segments is the same or one to five more, and the timestamps are
 monotonic with no overlap in every run. On the hour long recording the

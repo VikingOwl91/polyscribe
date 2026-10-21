@@ -1,14 +1,14 @@
 {
   "label": "medium-after-cpu",
-  "binary": "/var/tmp/polyscribe-s6-notail",
+  "binary": "/var/tmp/polyscribe-final-cpu",
   "backend": "cpu",
   "audio": "/var/tmp/opencode/bench/medium-10min.wav",
-  "runs": 2,
-  "wall_median_ms": 261920.1,
-  "wall_min_ms": 42721.0,
-  "wall_max_ms": 261920.1,
-  "peak_rss_mib": 235.0,
-  "vram_peak_mib": 2796,
+  "runs": 3,
+  "wall_median_ms": 57346.9,
+  "wall_min_ms": 57203.7,
+  "wall_max_ms": 61538.5,
+  "peak_rss_mib": 291.5,
+  "vram_peak_mib": 2311,
   "windows": 22,
   "model_loads": 1,
   "segments": 111,
@@ -17,5 +17,5 @@
   "transcript_sha": [
     "b1b714e8704ad1fc"
   ],
-  "loadavg_median": 27.4
+  "loadavg_median": 20.0
 }
