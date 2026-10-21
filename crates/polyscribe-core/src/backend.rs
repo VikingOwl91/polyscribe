@@ -82,7 +82,7 @@ macro_rules! impl_whisper_backend {
                 _gpu_layers: Option<u32>,
                 progress: Option<&(dyn Fn(i32) + Send + Sync)>,
             ) -> Result<Vec<OutputEntry>> {
-                transcribe_with_whisper_rs(audio_path, speaker, language, progress)
+                transcribe_with_whisper_rs(audio_path, speaker, language, progress, $kind)
             }
         }
     };
@@ -216,6 +216,7 @@ pub(crate) fn transcribe_with_whisper_rs(
     speaker: &str,
     language: Option<&str>,
     progress: Option<&(dyn Fn(i32) + Send + Sync)>,
+    backend: BackendKind,
 ) -> Result<Vec<OutputEntry>> {
     let report = |p: i32| {
         if let Some(cb) = progress {
@@ -255,7 +256,11 @@ pub(crate) fn transcribe_with_whisper_rs(
 
     // Suppress stderr from whisper/ggml during model load and inference when quiet and not verbose.
     let (_context, mut state) = crate::with_suppressed_stderr(|| {
-        let params = whisper_rs::WhisperContextParameters::default();
+        let mut params = whisper_rs::WhisperContextParameters::default();
+        // Only a GPU backend may use the GPU. whisper-rs defaults `use_gpu`
+        // to the compiled-in GPU feature, so in a GPU-enabled build a
+        // "cpu" request would still run on the GPU.
+        params.use_gpu(matches!(backend, BackendKind::Cuda | BackendKind::Hip));
         let context = whisper_rs::WhisperContext::new_with_params(&model_path, params)
             .with_context(|| format!("Failed to load Whisper model at {}", model_path.display()))?;
         let state = context
