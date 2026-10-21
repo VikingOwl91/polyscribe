@@ -21,12 +21,28 @@ ideas** (directional, not scheduled).
 - AC: replace fd redirection with whisper-rs/ggml log callbacks so no global
   state is touched, then enable parallel file processing (F3).
 
-### D3. Long-file memory usage is O(duration) (P2, M)
+### D3. Long-file memory usage is O(duration) (done in v0.1.0-alpha.2)
 - ffmpeg output is streamed into a `Vec<f32>` (64 KiB/s of audio), but
   `whisper_full` still needs the whole sample buffer in memory (~230 MiB per
   hour of audio). True streaming/chunked transcription would cap memory.
 - AC: prototype chunked transcription with a long fixture; measure peak RSS
   before/after.
+- Shipped in `v0.1.0-alpha.2`: the audio is decoded and transcribed in
+  windows of 30 seconds. The peak memory of an hour long recording is about
+  235 MB on the CPU instead of 670 MB, and it does not grow with the length
+  of the recording. See `docs/benchmarks/chunked-transcription.md`.
+
+### D8. A transcript can be incomplete at a window boundary (P2, M)
+- whisper does not always report a segment for the beginning of the audio it
+  is given. The chunked pipeline decodes such a region again from a slightly
+  different position, which recovers it in the recorded cases, but it cannot
+  prove that every word of a recording is in the transcript: a region that
+  carries speech and that no attempt recovers keeps its hole. The
+  transcription warns about it on stderr.
+- AC: a reliable speech presence signal, so that the pipeline can tell
+  ordinary silence from speech that was missed, and so that the region is
+  recovered without a blind retry. The current check is a level and a share of
+  frames, not a voice activity detector.
 
 ### D5. Non-Unix TTY detection (P3, S)
 - `stdin_is_tty` uses `std::io::IsTerminal` (correct); the remaining gap is
