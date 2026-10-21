@@ -1,0 +1,38 @@
+{
+  "tiny": {
+    "vram_idle_mib": 2057,
+    "vram_peak_mib": 2587,
+    "vram_after_mib": 2033,
+    "vram_delta_mib": 530,
+    "gfx_peak_pct": 40,
+    "exit": 0,
+    "model_mib": 74.1
+  },
+  "base": {
+    "vram_idle_mib": 2033,
+    "vram_peak_mib": 2701,
+    "vram_after_mib": 2018,
+    "vram_delta_mib": 668,
+    "gfx_peak_pct": 84,
+    "exit": 0,
+    "model_mib": 141.1
+  },
+  "small": {
+    "vram_idle_mib": 2018,
+    "vram_peak_mib": 3126,
+    "vram_after_mib": 2018,
+    "vram_delta_mib": 1108,
+    "gfx_peak_pct": 89,
+    "exit": 0,
+    "model_mib": 465.0
+  },
+  "medium": {
+    "vram_idle_mib": 2018,
+    "vram_peak_mib": 4310,
+    "vram_after_mib": 1984,
+    "vram_delta_mib": 2292,
+    "gfx_peak_pct": 91,
+    "exit": 0,
+    "model_mib": 1462.7
+  }
+}
