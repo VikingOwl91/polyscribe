@@ -423,14 +423,14 @@ Peak resident memory, the number the change is about:
 | Recording | CPU before | CPU after | HIP before | HIP after |
 |---|---|---|---|---|
 | 5.4 s | 220 MB | 278 MB | 261 MB | 262 MB |
-| 600 s | 362 MB | **292 MB** | 363 MB | **275 MB** |
-| 3605 s | 667 MB | **292 MB** | 782 MB | **277 MB** |
+| 600 s | 362 MB | **233 MB** | 363 MB | **273 MB** |
+| 3605 s | 667 MB | **235 MB** | 782 MB | **277 MB** |
 
 The memory of the old path grows with the length of the recording. The memory
-of the new path is flat: 292 MB for ten minutes and 292 MB for an hour on the
-CPU, 275 MB and 277 MB on the GPU. The remaining memory is the model, the
+of the new path is flat: 233 MB for ten minutes and 235 MB for an hour on the
+CPU, 273 MB and 277 MB on the GPU. The remaining memory is the model, the
 decoder state and the transcript, none of which depend on the length of the
-recording.
+recording. The lookback of two seconds that the recovery needs adds 320 kB.
 
 The "after" numbers of the table are one series of runs with the same binary
 on the same machine state. A single run of the same configuration on this
@@ -443,16 +443,20 @@ Wall clock and the work done:
 |---|---|---|---|---|---|---|---|
 | 5.4 s | CPU | 989 ms | 900 ms | 1 | 1 | 1 | 12.8 |
 | 5.4 s | HIP | 374 ms | 358 ms | 1 | 1 | 1 | 3.5-3.6 |
-| 600 s | CPU | 45.8 s | 57.3 s | 22 | 1 | 111 | 20.0 |
-| 600 s | HIP | 5.5 s | 5.6 s | 22 | 1 | 111 / 112 | 18.9 |
-| 3605 s | CPU | 1202.5 s | 481.0 s | 131 | 1 | 669 | 19.6 |
-| 3605 s | HIP | 35.4 s | 32.2 s | 129 | 1 | 669 / 674 | 12.8 |
+| 600 s | CPU | 45.8 s | 193.4 s | 22 | 1 | 111 | 21.0 |
+| 600 s | HIP | 5.5 s | 5.9 s | 22 | 1 | 111 / 112 | 19.2 |
+| 3605 s | CPU | 1202.5 s | 2458.5 s | 131 | 1 | 669 | 29.5 |
+| 3605 s | HIP | 35.4 s | 32.7 s | 129 | 1 | 669 / 674 | 15.1 |
 
 The real-time factor follows from the wall clock and the duration of the
 recording: for the hour long recording 3.0x on the CPU before the change and
-7.5x after it, 102x on the GPU before and 112x after. For the ten minute
-recording 13.1x on the CPU before and 10.5x after, 109x on the GPU before and
-107x after.
+1.5x after it, 102x on the GPU before and 110x after. For the ten minute
+recording 13.1x on the CPU before and 3.1x after, 109x on the GPU before and
+101x after.
+
+The number of windows and the number of segments are the same as without the
+recovery: no window of the long recording has a region that whisper did not
+transcribe, so the recovery does not decode anything twice there.
 
 The CPU wall clock is not a reliable comparison on this host: the load average
 moved between 3 and 37 during the measurements, and the "before" runs are from
