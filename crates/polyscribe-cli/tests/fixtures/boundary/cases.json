@@ -1,0 +1,85 @@
+{
+  "provenance": {
+    "clips": "Generated with espeak-ng 1.51 (en-us, speed 140), resampled to 16 kHz mono s16 with ffmpeg. The text of every clip is the reference transcript of that clip.",
+    "clips_license": "The speech is synthesized with espeak-ng, which is free software under the GNU General Public License. The generated audio is test data.",
+    "window": "The transcription pipeline cuts the audio into windows of 30 seconds, so the cases place speech around the 30 second mark, where the first window ends."
+  },
+  "clips": {
+    "clip1.wav": { "text": "the quick brown fox jumps over the lazy dog", "duration": 3.651565 },
+    "clip2.wav": { "text": "she sells sea shells by the sea shore", "duration": 2.874649 },
+    "clip3.wav": { "text": "how much wood would a woodchuck chuck", "duration": 2.576735 },
+    "clip4.wav": { "text": "the rain in spain stays mainly in the plain", "duration": 3.052381 },
+    "clip6.wav": { "text": "we promptly judged antique ivory buckles for the next prize", "duration": 4.541134 }
+  },
+  "cases": [
+    {
+      "name": "straddle",
+      "description": "A sentence that starts before the 30 second window boundary and ends after it.",
+      "clips": [{ "file": "clip1.wav", "offset": 28.0 }],
+      "reference": "the quick brown fox jumps over the lazy dog"
+    },
+    {
+      "name": "ends-at-boundary",
+      "description": "Speech that ends exactly at the window boundary.",
+      "clips": [{ "file": "clip1.wav", "offset": 26.348435 }],
+      "reference": "the quick brown fox jumps over the lazy dog"
+    },
+    {
+      "name": "starts-at-boundary",
+      "description": "Speech that starts exactly at the window boundary.",
+      "clips": [{ "file": "clip1.wav", "offset": 30.0 }],
+      "reference": "the quick brown fox jumps over the lazy dog"
+    },
+    {
+      "name": "continuous-across-boundary",
+      "description": "Two sentences back to back, so the speech continues across the boundary without a pause.",
+      "clips": [
+        { "file": "clip1.wav", "offset": 27.0 },
+        { "file": "clip4.wav", "offset": 30.651565 }
+      ],
+      "reference": "the quick brown fox jumps over the lazy dog the rain in spain stays mainly in the plain"
+    },
+    {
+      "name": "long-utterance",
+      "description": "One long utterance without a convenient silence, so it is cut by the window boundary.",
+      "clips": [
+        { "file": "clip6.wav", "offset": 24.0 },
+        { "file": "clip6.wav", "offset": 28.541134 },
+        { "file": "clip6.wav", "offset": 33.082268 }
+      ],
+      "reference": "we promptly judged antique ivory buckles for the next prize we promptly judged antique ivory buckles for the next prize we promptly judged antique ivory buckles for the next prize"
+    },
+    {
+      "name": "repeated-words",
+      "description": "The same sentence three times around the boundary.",
+      "clips": [
+        { "file": "clip1.wav", "offset": 27.0 },
+        { "file": "clip1.wav", "offset": 30.651565 },
+        { "file": "clip1.wav", "offset": 34.30313 }
+      ],
+      "reference": "the quick brown fox jumps over the lazy dog the quick brown fox jumps over the lazy dog the quick brown fox jumps over the lazy dog"
+    },
+    {
+      "name": "silence-then-speech",
+      "description": "The first window is silent, the speech starts in the second one.",
+      "clips": [{ "file": "clip2.wav", "offset": 31.0 }],
+      "reference": "she sells sea shells by the sea shore"
+    },
+    {
+      "name": "partial-final-window",
+      "description": "Speech at the end of the recording, so the last window is shorter than the others.",
+      "clips": [{ "file": "clip1.wav", "offset": 35.0 }],
+      "reference": "the quick brown fox jumps over the lazy dog"
+    },
+    {
+      "name": "multiple-boundaries",
+      "description": "Speech around three window boundaries of a recording that is longer than two windows.",
+      "clips": [
+        { "file": "clip1.wav", "offset": 28.0 },
+        { "file": "clip2.wav", "offset": 55.0 },
+        { "file": "clip4.wav", "offset": 85.0 }
+      ],
+      "reference": "the quick brown fox jumps over the lazy dog she sells sea shells by the sea shore the rain in spain stays mainly in the plain"
+    }
+  ]
+}
