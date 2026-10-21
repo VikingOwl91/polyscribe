@@ -4,7 +4,7 @@ use crate::OutputEntry;
 use crate::gpu::{GpuBackend, GpuDevice, gpu_devices};
 use crate::output::{is_audio_file, is_json_file, load_json_transcript};
 use crate::prelude::*;
-use crate::{decode_audio_to_pcm_f32_ffmpeg, find_model_file};
+use crate::find_model_file;
 use anyhow::{Context, anyhow};
 use std::env;
 use std::path::{Path, PathBuf};
@@ -370,7 +370,22 @@ fn transcribe_with_whisper_rs(
     };
     report(0);
 
-    let pcm_samples = decode_audio_to_pcm_f32_ffmpeg(audio_path)?;
+    // The audio is decoded in windows, so only one window of samples is in
+    // memory at a time. The first window is decoded before the model is
+    // touched, which keeps the order of the errors: a broken input file is
+    // reported before a missing model.
+    let mut windows =
+        crate::chunked::ChunkedAudio::new(audio_path, crate::chunked::ChunkConfig::default())?;
+    let first_window = match windows.next_window()? {
+        Some(window) => window,
+        None => {
+            return Err(anyhow!(
+                "The input contains no audio samples: {}",
+                audio_path.display()
+            )
+            .into());
+        }
+    };
     report(5);
 
     // The model is located and loaded once per invocation; every input file
@@ -426,32 +441,119 @@ fn transcribe_with_whisper_rs(
     }
     report(30);
 
-    crate::with_suppressed_stderr(|| {
-        report(40);
-        state
-            .full(full_params, &pcm_samples)
-            .map_err(|e| anyhow!("Whisper full() failed: {:?}", e))
-    })?;
+    // Every window is transcribed on its own. whisper reports the
+    // timestamps of a window relative to the start of that window, so the
+    // window's position in the recording is added to them.
+    let mut entries: Vec<OutputEntry> = Vec::new();
+    let mut window = Some(first_window);
+    let mut emitted_end = 0.0f64;
+    let mut window_count = 0u64;
+    report(40);
+    while let Some(current) = window.take() {
+        window_count += 1;
+        crate::with_suppressed_stderr(|| {
+            state
+                .full(full_params.clone(), &current.samples)
+                .map_err(|e| anyhow!("Whisper full() failed: {:?}", e))
+        })?;
 
-    report(90);
-    let mut entries = Vec::new();
-    for seg in state.as_iter() {
-        let text = seg
-            .to_str()
-            .map_err(|e| anyhow!("Failed to get segment text: {:?}", e))?;
-        let start = (seg.start_timestamp() as f64) * 0.01;
-        let end = (seg.end_timestamp() as f64) * 0.01;
-        entries.push(OutputEntry {
-            id: 0,
-            speaker: speaker.to_string(),
-            start,
-            end,
-            text: text.trim().to_string(),
-        });
+        let window_start = current.start_seconds();
+        let window_end = current.end_seconds();
+        let mut last: Option<(f64, f64)> = None;
+        for seg in state.as_iter() {
+            let text = seg
+                .to_str()
+                .map_err(|e| anyhow!("Failed to get segment text: {:?}", e))?;
+            let start = window_start + (seg.start_timestamp() as f64) * 0.01;
+            let end = window_start + (seg.end_timestamp() as f64) * 0.01;
+            if segment_is_duplicate(&entries, start, emitted_end) {
+                // Already transcribed by an earlier window.
+                continue;
+            }
+            entries.push(OutputEntry {
+                id: 0,
+                speaker: speaker.to_string(),
+                start,
+                end,
+                text: text.trim().to_string(),
+            });
+            last = Some((start, end));
+        }
+
+        // Where the next window starts:
+        //
+        // * A segment that was cut short by the end of the window is
+        //   decoded again, with context, in the next window. That window
+        //   starts at the beginning of the segment, so the text is
+        //   complete.
+        // * Otherwise the next window starts where the last segment ended,
+        //   so the audio in between is decoded again and no part of the
+        //   recording is skipped.
+        // * A window without any segment advances by its own length.
+        let rate = crate::chunked::WHISPER_SAMPLE_RATE as f64;
+        let next_start = match last {
+            Some((last_start, last_end)) if segment_is_cut(last_end, window_end) => {
+                entries.pop();
+                emitted_end = entries.last().map(|e| e.end).unwrap_or(emitted_end);
+                (last_start * rate).round() as u64
+            }
+            Some((_, last_end)) => {
+                emitted_end = last_end;
+                (last_end * rate).round() as u64
+            }
+            None => (window_end * rate).round() as u64,
+        };
+
+        windows.seek_to(next_start);
+        window = match windows.next_window()? {
+            Some(next) => Some(next),
+            None => None,
+        };
     }
+
+    crate::dlog!(1, "Transcribed {window_count} window(s) of audio");
+    report(90);
     report(100);
     Ok(entries)
 }
+
+/// Whether a segment of a window repeats what an earlier window already
+/// reported.
+///
+/// A segment that starts before the end of the last emitted segment was
+/// transcribed already, usually because the window overlaps the previous
+/// one.
+fn segment_is_duplicate(entries: &[OutputEntry], segment_start: f64, emitted_end: f64) -> bool {
+    if segment_start >= emitted_end - SEGMENT_OVERLAP_TOLERANCE {
+        return false;
+    }
+    // The segment starts before the last emitted segment ended, so it
+    // repeats speech that was already reported.
+    entries
+        .iter()
+        .any(|e| e.start <= segment_start && segment_start < e.end)
+}
+
+/// Whether the last segment of a window can be cut short by the end of the
+/// window.
+///
+/// The audio of a window ends with the window, so whisper has no context
+/// beyond it and can only report the part of the speech it heard. Such a
+/// segment is decoded again in the next window.
+fn segment_is_cut(segment_end: f64, window_end: f64) -> bool {
+    segment_end >= window_end - SEGMENT_CUT_TOLERANCE
+}
+
+/// How much a segment may start before the end of the last emitted segment
+/// before it counts as a duplicate.
+///
+/// whisper works on 10 millisecond steps, so the start of a segment and the
+/// end of the previous one can differ by a step.
+const SEGMENT_OVERLAP_TOLERANCE: f64 = 0.05;
+
+/// How close to the end of a window a segment has to reach to be treated as
+/// cut short by it.
+const SEGMENT_CUT_TOLERANCE: f64 = 0.02;
 
 #[cfg(test)]
 mod tests {
@@ -485,6 +587,41 @@ mod tests {
             std::env::remove_var("POLYSCRIBE_TEST_FORCE_HIP");
             std::env::remove_var(ENV_TEST_GPU_DEVICES);
         }
+    }
+
+    fn entry(start: f64, end: f64) -> OutputEntry {
+        OutputEntry {
+            id: 0,
+            speaker: "speaker".to_string(),
+            start,
+            end,
+            text: "text".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_segment_duplicate_detection() {
+        let entries = vec![entry(10.0, 15.0)];
+        // A segment that starts before the end of the last emitted segment
+        // was already reported.
+        assert!(segment_is_duplicate(&entries, 14.0, 15.0));
+        // A segment that starts at the end of the last one is new.
+        assert!(!segment_is_duplicate(&entries, 15.0, 15.0));
+        // A segment that starts a whisper step earlier is not a duplicate.
+        assert!(!segment_is_duplicate(&entries, 14.98, 15.0));
+        // Without any earlier segment nothing is a duplicate.
+        assert!(!segment_is_duplicate(&[], 1.0, 5.0));
+    }
+
+    #[test]
+    fn test_cut_detection() {
+        // A segment that reaches the end of the window can be cut short by
+        // it and is decoded again in the next window.
+        assert!(segment_is_cut(30.0, 30.0));
+        assert!(segment_is_cut(30.1, 30.0));
+        assert!(segment_is_cut(29.99, 30.0));
+        // A segment that ends well before the end of the window is complete.
+        assert!(!segment_is_cut(25.0, 30.0));
     }
 
     #[test]
