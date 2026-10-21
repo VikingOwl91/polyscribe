@@ -98,7 +98,9 @@ file path keeps its behaviour.
   window was flushed. A cancelled run reports the cancellation instead,
   and keeps only the segments that were finalized.
 
-The events of a run are reported through `StreamEvent`. The per-window
+The events of a run are reported through `StreamEvent`: the samples that
+arrived, the windows that were submitted, the segments that became final,
+and either the completion or the cancellation of the run. The per-window
 trace (`POLYSCRIBE_WINDOW_TRACE=1`) stays opt-in and separate from them.
 
 #### The language

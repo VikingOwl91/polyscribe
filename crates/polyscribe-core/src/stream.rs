@@ -38,7 +38,8 @@
 //!   next window confirms it. A provisional segment is never reported as
 //!   final: only finalized segments reach the caller.
 //! * **Stream completion** means the source reached the end and the last
-//!   window was flushed.
+//!   window was flushed. A cancelled run reports the cancellation instead,
+//!   and keeps only the segments that were finalized.
 //!
 //! The events of the run are reported through [`StreamEvent`].
 
