@@ -7,15 +7,23 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 ## Unreleased
 
 ### Changed
-- Transcribe: long recordings are decoded and transcribed in windows of 30 seconds instead of being loaded into memory as a whole. The peak memory of a transcription no longer grows with the length of the recording: an hour long recording needs about 290 MB instead of 670 MB (CPU) and 780 MB (HIP). The output contracts do not change; a recording shorter than a window is transcribed exactly as before, a longer one keeps the same text with segment boundaries that can move slightly at a window boundary.
+- Transcribe: long recordings are decoded and transcribed in windows of 30 seconds instead of being loaded into memory as a whole. The peak memory of a transcription no longer grows with the length of the recording: an hour long recording needs about 300 MB instead of 670 MB (CPU) and 780 MB (HIP). The output contracts do not change; a recording shorter than a window is transcribed exactly as before, a longer one keeps the same text with segment boundaries that can move slightly at a window boundary.
+- Transcribe: a window now advances by at least half a window. whisper reports short segments for silence, so a window that started where the last segment ended decoded the same stretch of silence again and again: a minute of silence took 16 windows and produced a hallucinated segment per window, it now takes 2 windows. The speech at a window boundary is also recognized better, because the window no longer starts in the middle of a sentence.
 - Backends: an explicit `--gpu-backend cuda` or `--gpu-backend hip` now requires a matching GPU device to be present. The device list comes from ggml's backend registry, the same registry whisper.cpp selects its GPU from. Without a device the request fails with an actionable error instead of silently continuing on the CPU; `--gpu-backend auto` falls back to the CPU and reports it.
 - Transcribe: the Whisper model is loaded once per invocation and reused for every input file, instead of being loaded again for each file. Every file still gets its own inference state, so outputs, timestamps and error handling stay independent.
 
+### Fixed
+- Transcribe: a segment that was cut short by the end of a window is no longer dropped before it is decoded again. The re-decode can start a little before the dropped segment and was then mistaken for a duplicate, so a whole sentence could be missing from the transcript. The cut segment is kept until the re-decode replaces it.
+- Transcribe: segments without a duration are no longer written to the transcript. whisper reports such a segment at the end of a window, with the text of the speech around it; it showed up as a subtitle without a duration, on top of the segment next to it.
+
 ### Added
 - Core: `chunked` module that decodes a media file incrementally and hands it to the transcriber in windows, so the memory of a transcription is independent of the length of the recording
-- Docs: `docs/benchmarks/chunked-transcription.md` describes the pipeline, the memory bounds, the window and reconciliation strategy and the measured before/after results
+- Docs: `docs/benchmarks/chunked-transcription.md` describes the pipeline, the memory bounds, the window and reconciliation strategy, the boundary quality measurement and the measured before/after results
 - Core: `gpu` module with a device probe for the GPU backends, and unit tests for the backend selection contract (explicit CPU, explicit GPU with and without a device, and the automatic fallback).
 - Tests: CLI integration tests for the backend selection contract.
+- Tests: CLI integration tests for the window boundaries, with speech fixtures that cross a boundary. They check that every stretch of speech is covered by a segment, that the timestamps are ordered and do not overlap, and that a minute of silence does not need more than four windows.
+- Tests: speech fixtures for the boundary tests, generated with espeak-ng and resampled to 16 kHz mono, with the reference transcript of every clip.
+- Scripts: `scripts/benchmarks/boundary_quality.py` composes the boundary fixtures, transcribes them with two binaries and reports the word error rate, the missing and the duplicated words against the reference transcript.
 - Docs: the backend selection contract and the model context lifecycle in `docs/usage.md` and `docs/design.md`, plus the before/after measurements of the model context reuse in `docs/benchmarks/amd-rx-9070-xt.md`.
 
 ## v0.1.0-alpha.1 - 2026-10-21

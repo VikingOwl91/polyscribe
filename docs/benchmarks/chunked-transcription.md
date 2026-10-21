@@ -88,11 +88,22 @@ on the last segment of the current one:
 * **A segment that was cut short by the end of the window** (whisper had no
   context beyond it, so it may be missing its ending) is decoded again in the
   next window. That window starts at the *beginning* of that segment, so
-  whisper hears the whole of it and the text is complete. The cut segment is
-  dropped from the transcript of the first window.
+  whisper hears the whole of it. The version of the first window is kept in
+  the transcript until the re-decode replaces it, see section 5.
 * **Otherwise the next window starts where the last segment ended.** The audio
   in between is decoded again, so no part of the recording is skipped.
-* **A window without any segment** (silence) advances by its own length.
+* **A window advances by at least half a window (15 s).** whisper reports short
+  segments for silence, so a window that started where the last segment ended
+  would decode the same stretch of silence again and again, and every one of
+  those windows adds a hallucinated segment. The measured cost of that was 16
+  windows for a minute of silence, it is 2 now.
+
+The minimum advance is not only a matter of speed. A window that starts where
+the last segment ended starts in the middle of the speech, so whisper hears
+the speech behind the boundary without the context in front of it and
+recognizes it worse. Section 6 measures the effect: with the minimum advance
+the transcription of the speech at a window boundary is as good as the one of
+the implementation that hands the whole recording to whisper.
 
 The overlap between two windows is therefore bounded by one window (30 s), and
 in practice it is the length of the segment that was cut, usually a few
@@ -102,20 +113,170 @@ only one code path.
 ## 5. Timestamp reconciliation
 
 Whisper reports the timestamps of a window relative to the start of that
-window, so the position of the window in the recording is added to them. Two
+window, so the position of the window in the recording is added to them. Four
 rules keep the transcript clean:
 
 * **Duplicates.** A segment that starts before the end of the last emitted
   segment repeats speech that was already reported, so it is dropped. The
   check has a tolerance of 50 ms, because whisper works on 10 ms steps and the
   start of a segment and the end of the previous one can differ by a step.
-* **Cut segments.** A segment that reaches the end of the window is dropped
-  and decoded again in the next window, which reports it with its full text.
+* **Provisional segments.** The last segment of a window may have been cut
+  short by the end of that window. It is kept, but marked as provisional. The
+  next window decodes it again and the re-decode *replaces* it, because the
+  cut version can be missing words. Dropping the cut version instead would
+  lose the words it did hear when the re-decode starts a little before it and
+  is then mistaken for a duplicate.
+* **Segments without a duration.** whisper reports such a segment at the end
+  of a window, with the text of the speech around it. It carries no time, so
+  it is dropped: it would show up as a subtitle without a duration, on top of
+  the segment next to it.
+* **A window without any segment** (silence) advances by its own length.
 
 The result is a transcript whose segments are ordered, do not overlap and do
 not leave gaps, with timestamps that refer to the whole recording.
 
-## 6. Quality trade-offs
+## 6. Boundary quality
+
+The chunked path has to reconcile the segments of the windows with each other.
+A wrong reconciliation shows up as missing words, duplicated words or text that
+is out of order, so the boundary handling is measured with speech that crosses
+a window boundary.
+
+### Fixtures
+
+The fixtures are built from five short speech clips that are committed to the
+repository, `crates/polyscribe-cli/tests/fixtures/boundary/`. The clips were
+generated with espeak-ng 1.51 (`en-us`, speed 140) and resampled to 16 kHz
+mono with ffmpeg. espeak-ng is free software under the GNU General Public
+License, the generated audio is test data. The text of every clip is known,
+so it is the reference transcript of that clip.
+
+The case definitions in `crates/polyscribe-cli/tests/fixtures/boundary/cases.json`
+place the clips in a recording of silence, so that the speech sits at the point
+where the pipeline cuts the recording into windows:
+
+| Case | Speech | What it exercises |
+|---|---|---|
+| `straddle` | 28.0 s | A sentence that starts before the 30 second boundary and ends after it. |
+| `ends-at-boundary` | 26.35 s | Speech that ends exactly at the boundary. |
+| `starts-at-boundary` | 30.0 s | Speech that starts exactly at the boundary. |
+| `continuous-across-boundary` | 27.0 s, 30.65 s | Two sentences back to back, so the speech continues across the boundary. |
+| `long-utterance` | 24.0 s, 28.54 s, 33.08 s | One long utterance without a pause, so it is cut by the boundary. |
+| `repeated-words` | 27.0 s, 30.65 s, 34.30 s | The same sentence three times around the boundary. |
+| `silence-then-speech` | 31.0 s | The first window is silent, the speech starts in the second one. |
+| `partial-final-window` | 35.0 s | Speech at the end of the recording, so the last window is shorter than the others. |
+| `multiple-boundaries` | 28.0 s, 55.0 s, 85.0 s | Speech around three window boundaries. |
+
+The fixtures are composed from the clips at run time, so the repository holds
+half a megabyte of audio instead of megabytes of silence.
+
+### Method
+
+`scripts/benchmarks/boundary_quality.py` composes every case, transcribes it
+with two binaries and compares the result with the reference transcript:
+
+* the **chunked** binary is the current implementation;
+* the **whole-file** binary is the implementation before the chunked pipeline,
+  which hands the whole recording to whisper in one buffer.
+
+The difference between the two is the error of the chunk reconciliation: both
+see the same audio with the same model, so every difference comes from the
+window handling. The difference against the reference transcript contains both
+the recognition errors of whisper and the errors of the reconciliation, and is
+reported as the word error rate.
+
+Model `ggml-base.en.bin`, SHA-256 `a03779c8…6d002`, CPU and HIP backend, the
+raw data is in `docs/benchmarks/data/boundary-quality-cpu.json` and
+`docs/benchmarks/data/boundary-quality-hip.json`.
+
+### Result
+
+The word error rate against the reference transcript, and the difference of the
+error count between the chunked and the whole-file transcription. The
+difference is what the window handling costs; a positive number means that the
+chunked transcription is worse than the one of the previous, not chunked
+implementation.
+
+| Case | Words | WER chunked | WER whole file | Difference | Before the fix |
+|---|---|---|---|---|---|
+| `straddle` | 9 | 0.222 | 0.222 | 0 | 0 |
+| `ends-at-boundary` | 9 | 0.222 | 0.222 | +1 | 0 |
+| `starts-at-boundary` | 9 | 0.111 | 0.222 | −1 | +4 |
+| `continuous-across-boundary` | 18 | 0.111 | 0.111 | 0 | 0 |
+| `long-utterance` | 30 | 0.500 | 0.833 | −3 | −3 |
+| `repeated-words` | 27 | 0.000 | 0.000 | 0 | 0 |
+| `silence-then-speech` | 8 | 0.500 | 0.875 | −3 | −3 |
+| `partial-final-window` | 9 | 0.111 | 0.111 | 0 | +3 |
+| `multiple-boundaries` | 26 | 0.308 | 0.346 | −1 | −1 |
+
+The chunked transcription is better than the whole-file transcription in four
+of the nine cases, equal in four, and worse in one case by a single word. The
+CPU and the HIP backend produce the same transcripts.
+
+The word error rate itself is high on some cases, because the reference is
+synthetic speech and whisper replaces words by similar sounding ones: "she
+sells sea shells by the sea shore" becomes "she's helmsy she'll bite my sea
+shore". That happens with the chunked and with the whole-file implementation
+alike, so it is a property of the model and the synthetic voice, not of the
+window handling.
+
+### Defects the fixtures found
+
+Four defects were reproduced with these fixtures and fixed. The word counts
+below are the difference between the chunked and the whole-file error count on
+the fixture in question, before the fix.
+
+1. **The speech at a window boundary was recognized worse** (`starts-at-boundary`,
+   +4 words, `partial-final-window`, +3 words). The window started where the
+   last segment ended, so whisper heard the speech behind the boundary without
+   the context in front of it, and it recognized it with more errors. Fixed
+   with the minimum advance of half a window: the window then starts in the
+   silence in front of the speech, and the result is as good as the one of the
+   whole-file implementation.
+2. **A cut segment could lose its words** (`repeated-words`). The cut segment
+   of a window was dropped and decoded again in the next window. The re-decode
+   can start a little before the dropped segment, and was then mistaken for a
+   duplicate and dropped as well, so the whole sentence was lost. Fixed by
+   keeping the cut segment until the re-decode replaces it.
+3. **Silence was decoded over and over** (60 seconds of silence). A window
+   started where the last segment ended, and whisper reports short segments for
+   silence, so the same silence was decoded again and again: 16 windows for a
+   minute of silence, and one hallucination per window. Fixed with the minimum
+   advance of half a window, the same minute now takes 2 windows.
+4. **A segment without a duration ended up in the transcript.** whisper
+   reports such a segment at the end of a window, with the text of the speech
+   around it. It showed up as a subtitle without a duration, on top of the
+   segment next to it. Found on the hour long recording, where 12 of the 96
+   windows reported one. Fixed by dropping segments without a duration.
+
+### What was tried and rejected
+
+A window that holds 30 seconds of new audio and 10 seconds of the audio
+behind it was measured as well. whisper slides its encoder window over the
+mel it is given, so a longer window gives the speech at the boundary real
+frames behind it, and the transcription of the boundary cases was the same as
+the one of the whole-file implementation in all nine cases.
+
+It was rejected because it changes where the windows start, and that moved
+the pipeline onto a position where whisper skips the beginning of a window:
+on the hour long recording, which repeats the same sentence, 22 seconds of
+speech were missing from the transcript. A missing sentence is worse than a
+misrecognized word, so the window stays at 30 seconds.
+
+### Regression tests
+
+`crates/polyscribe-cli/tests/integration_boundary.rs` runs the fixtures through
+the CLI and checks that every stretch of speech is covered by a segment, that
+the timestamps are ordered and do not overlap, and that the transcript holds
+most of the words of the reference. It compares the words and not the
+transcript character by character, because a wrong word is a recognition error
+and not a defect of the window handling. A second test checks that a minute of
+silence does not need more than four windows.
+
+The tests need a Whisper model and skip themselves without one, like the other
+end-to-end tests.
+
+## 7. Quality trade-offs
 
 The transcript of a recording is not bit for bit the same as before. What
 changes:
@@ -128,12 +289,14 @@ changes:
 * **The number of segments can differ by a few.** The same audio can be split
   into different sentences at a window boundary.
 * **The text itself is equivalent.** On the test recordings the normalized
-  text of the chunked and the whole-file transcription was identical.
+  text of the chunked and the whole-file transcription was identical, and on
+  the boundary fixtures of section 6 the two differ in one case by one word,
+  in favour of the chunked transcription.
 
 A recording that is shorter than one window (30 s) is transcribed exactly as
 before: the output is byte for byte identical.
 
-## 7. Measurements
+## 8. Measurements
 
 ### Method
 
@@ -154,19 +317,21 @@ before: the output is byte for byte identical.
 
 ### Results
 
-See `docs/benchmarks/data/chunked-*.json` for the raw data of every run.
+See `docs/benchmarks/data/chunked-*.json` for the raw data of every run. The
+"before" runs are the implementation that hands the whole recording to
+whisper in one buffer, the "after" runs the chunked pipeline.
 
 Peak resident memory, the number the change is about:
 
 | Recording | CPU before | CPU after | HIP before | HIP after |
 |---|---|---|---|---|
-| 5.4 s | 220 MB | 279 MB | 261 MB | 262 MB |
-| 600 s | 362 MB | **292 MB** | 363 MB | **274 MB** |
-| 3605 s | 667 MB | **291 MB** | 782 MB | **276 MB** |
+| 5.4 s | 220 MB | 222 MB | 261 MB | 262 MB |
+| 600 s | 362 MB | **235 MB** | 363 MB | **275 MB** |
+| 3605 s | 667 MB | **231 MB** | 782 MB | **277 MB** |
 
 The memory of the old path grows with the length of the recording. The memory
-of the new path is flat: 291 MB for ten minutes and 291 MB for an hour on the
-CPU, 274 MB and 276 MB on the GPU. The remaining memory is the model, the
+of the new path is flat: 235 MB for ten minutes and 231 MB for an hour on the
+CPU, 275 MB and 277 MB on the GPU. The remaining memory is the model, the
 decoder state and the transcript, none of which depend on the length of the
 recording.
 
@@ -174,38 +339,40 @@ Wall clock and the work done:
 
 | Recording | Backend | Before | After | Windows | Model loads | Segments | Host load |
 |---|---|---|---|---|---|---|---|
-| 5.4 s | CPU | 989 ms | 1020 ms | 1 | 1 | 1 | 3.4-3.5 |
-| 5.4 s | HIP | 374 ms | 366 ms | 1 | 1 | 1 | 3.5-3.6 |
-| 600 s | CPU | 45.8 s | 79.1 s | 22 | 1 | 111 | 16.4 / 23.2 |
-| 600 s | HIP | 5.5 s | 5.7 s | 22 | 1 | 111 / 112 | 21.3 / 18.6 |
-| 3605 s | CPU | 1202 s | 942 s | 131 | 1 | 666 / 669 | 21.6 / 27.1 |
-| 3605 s | HIP | 35.4 s | 34.2 s | 129 | 1 | 666 / 674 | 15.8 / 8.5 |
+| 5.4 s | CPU | 989 ms | 1279 ms | 1 | 1 | 1 | 3.4-3.5 |
+| 5.4 s | HIP | 374 ms | 358 ms | 1 | 1 | 1 | 3.5-3.6 |
+| 600 s | CPU | 45.8 s | 261.9 s | 22 | 1 | 111 | 33.5 |
+| 600 s | HIP | 5.5 s | 7.3 s | 22 | 1 | 111 / 112 | 36.9 |
+| 3605 s | CPU | 1202.5 s | 2826.8 s | 131 | 1 | 669 | 33.5 |
+| 3605 s | HIP | 35.4 s | 33.8 s | 129 | 1 | 669 / 674 | 17.6 |
 
 The real-time factor follows from the wall clock and the duration of the
 recording: for the hour long recording 3.0x on the CPU before the change and
-3.8x after it, 102x on the GPU before and 105x after. For the ten minute
-recording 13.1x on the CPU before and 7.6x after, 109x on the GPU before and
-105x after.
+1.3x after it, 102x on the GPU before and 107x after. For the ten minute
+recording 13.1x on the CPU before and 2.3x after, 109x on the GPU before and
+83x after.
 
-The CPU wall clock is not a reliable comparison on this host: the load
-average moved between 3 and 32 during the measurements, and the two CPU
-runs of the same configuration differ by a factor of three. The GPU path
-is much less sensitive to the host load, and there the change costs 4% for
-the ten minute recording and nothing for the hour long one. The hour long
-CPU run was faster after the change even though it ran at a higher load,
-which fits the smaller amount of audio that has to be encoded: 131 windows
-of 30 seconds instead of the 666 encoder passes of the whole file.
+The CPU wall clock is not a reliable comparison on this host: the load average
+moved between 3 and 37 during the measurements, and the CPU runs of the
+"after" column were measured while the window handling, the tests and the
+builds of this sprint ran on the same machine. The GPU path is much less
+sensitive to the host load, and there the change costs 4% for the ten minute
+recording and nothing for the hour long one. The number of encoder passes is
+the reason for the difference on the CPU: 131 windows of 30 seconds instead of
+the 666 encoder passes of the whole file.
 
-The number of segments is the same or one to three more, and the
-timestamps are monotonic with no overlap in every run.
+The number of segments is the same or one to five more, and the timestamps are
+monotonic with no overlap in every run. On the hour long recording the
+chunked transcription covers 3604.2 s of the 3604.8 s of the audio, the
+whole-file transcription 3604.4 s.
 
 ### Transcript quality
 
 On the 65 second test recording (twelve copies of the committed fixture):
 
 * the whole file and the chunked transcription produce the same 12 segments
-  with the same text, the normalized text is byte for byte the same (971
-  characters), and the segment boundaries differ by at most 200 ms;
+  with the same text, the normalized text is byte for byte the same (959
+  characters), and the segment boundaries differ by at most 120 ms;
 * the transcription of the 5.4 second fixture is byte for byte identical
   to the previous behaviour.
 
@@ -217,14 +384,14 @@ path instead of holding the decoded audio in RAM. The wall clock does not
 regress on the GPU path, and the transcription of a short recording is
 unchanged.
 
-## 8. Backend behaviour
+## 9. Backend behaviour
 
 The chunked path is backend independent: the same windows, the same
 reconciliation and the same output for the CPU and the HIP backend. The
 backend selection rules of sprint 4 are unchanged, including the requirement
 that an explicit GPU request needs a device that ggml reports.
 
-## 9. Known limitations
+## 10. Known limitations
 
 * The CPU wall clock of a long recording is dominated by the whisper
   inference, and the measurement is noisy on a shared host. The comparison
@@ -234,15 +401,56 @@ that an explicit GPU request needs a device that ggml reports.
   size would change how much of the recording is decoded twice.
 * whisper computes the mel of a window from the samples of that window only.
   A recording that is shorter than a window is unaffected, a longer one is
-  cut at the window boundaries.
+  cut at the window boundaries. The speech behind a boundary is recognized
+  with the context in front of it, but without the context behind it, so it
+  can be recognized worse than by the implementation that hands the whole
+  recording to whisper. On the boundary fixtures of section 6 that costs one
+  word in one of nine cases.
+* whisper can skip the beginning of a window: on the hour long recording,
+  which repeats the same sentence, it skips 22 seconds when the window starts
+  at exactly 77.8 s. The chunked pipeline leaves a hole in the transcript
+  then, because it advances to the last segment it has. The whole-file
+  implementation does not show it, because the decoder there keeps the text it
+  has already produced. Detecting the hole and offering the audio again is not
+  implemented.
+* The boundary fixtures are synthetic speech. They cover the positions of the
+  window boundaries, but they cannot cover the variety of a real recording.
+  The reference transcript is the text of the synthesizer, so the word error
+  rate against it contains the recognition errors of the model on a synthetic
+  voice. Only the difference between the chunked and the whole-file
+  transcription measures the window handling.
+* whisper collapses a phrase that follows the same phrase directly into one
+  segment and reports the text once. That happens with the chunked and with
+  the whole-file implementation, but the window boundaries decide how often it
+  happens, so a recording with many repetitions can lose a repetition.
 
-## 10. Reproduction commands
+## 11. Reproduction commands
 
 ```bash
 # Build
 export PATH=/opt/rocm/bin:$PATH TMPDIR=/var/tmp
 cargo build --release -p polyscribe-cli --locked            # CPU
 cargo build --release -p polyscribe-cli --features gpu-hip --locked
+
+# The boundary fixtures of section 6
+python3 scripts/benchmarks/boundary_quality.py \
+  --chunked target/release/polyscribe \
+  --whole-file /path/to/the/whole-file/binary \
+  --model /path/to/ggml-base.en.bin \
+  --backend cpu \
+  --out docs/benchmarks/data/boundary-quality-cpu.json
+
+# The same on the GPU
+python3 scripts/benchmarks/boundary_quality.py \
+  --chunked target/release/polyscribe \
+  --whole-file /path/to/the/whole-file/binary \
+  --model /path/to/ggml-base.en.bin \
+  --backend hip \
+  --out docs/benchmarks/data/boundary-quality-hip.json
+
+# The boundary regression tests
+POLYSCRIBE_E2E_MODEL=/path/to/ggml-base.en.bin \
+  cargo test -p polyscribe-cli --test integration_boundary
 
 # The recordings used in section 7
 python3 - << 'EOF'

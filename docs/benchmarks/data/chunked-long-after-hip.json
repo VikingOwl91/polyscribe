@@ -1,14 +1,14 @@
 {
   "label": "long-after-hip",
-  "binary": "/var/tmp/polyscribe-chunked-hip2",
+  "binary": "/var/tmp/polyscribe-s6-notail-hip",
   "backend": "hip",
   "audio": "/var/tmp/opencode/bench/long-60min.wav",
   "runs": 2,
-  "wall_median_ms": 34190.3,
-  "wall_min_ms": 33445.6,
-  "wall_max_ms": 34190.3,
-  "peak_rss_mib": 275.5,
-  "vram_peak_mib": 2858,
+  "wall_median_ms": 33774.8,
+  "wall_min_ms": 33065.6,
+  "wall_max_ms": 33774.8,
+  "peak_rss_mib": 277.1,
+  "vram_peak_mib": 2712,
   "windows": 129,
   "model_loads": 1,
   "segments": 674,
@@ -17,5 +17,5 @@
   "transcript_sha": [
     "384dd4d034116f17"
   ],
-  "loadavg_median": 8.5
+  "loadavg_median": 17.6
 }

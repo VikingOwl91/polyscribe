@@ -1,0 +1,493 @@
+{
+  "model": "ggml-base.en.bin",
+  "backend": "cpu",
+  "fixtures": [
+    {
+      "name": "straddle",
+      "description": "A sentence that starts before the 30 second window boundary and ends after it.",
+      "audio_seconds": 31.652,
+      "reference_words": 9,
+      "chunked": {
+        "segments": 1,
+        "words": 8,
+        "text": "with brown fox jumps over the lazy dog",
+        "timestamps_monotonic": true,
+        "max_overlap_s": 0.0,
+        "max_gap_s": 0.0,
+        "first_start_s": 28.14,
+        "last_end_s": 31.18,
+        "windows": 2,
+        "word_errors": 2,
+        "wer": 0.2222,
+        "missing_reference_words": [
+          "the",
+          "quick"
+        ],
+        "duplicated_words": [
+          "with"
+        ]
+      },
+      "whole_file": {
+        "segments": 1,
+        "words": 8,
+        "text": "with brown fox jumps over the lazy dog",
+        "timestamps_monotonic": true,
+        "max_overlap_s": 0.0,
+        "max_gap_s": 0.0,
+        "first_start_s": 28.14,
+        "last_end_s": 31.18,
+        "windows": null,
+        "word_errors": 2,
+        "wer": 0.2222,
+        "missing_reference_words": [
+          "the",
+          "quick"
+        ],
+        "duplicated_words": [
+          "with"
+        ]
+      },
+      "reconciliation_delta_words": 0
+    },
+    {
+      "name": "ends-at-boundary",
+      "description": "Speech that ends exactly at the window boundary.",
+      "audio_seconds": 30.0,
+      "reference_words": 9,
+      "chunked": {
+        "segments": 3,
+        "words": 11,
+        "text": "music the quick brown fox jumps over the lazy dog you",
+        "timestamps_monotonic": true,
+        "max_overlap_s": 0.0,
+        "max_gap_s": 0.0,
+        "first_start_s": 0.0,
+        "last_end_s": 30.0000625,
+        "windows": 2,
+        "word_errors": 2,
+        "wer": 0.2222,
+        "missing_reference_words": [],
+        "duplicated_words": [
+          "music",
+          "you"
+        ]
+      },
+      "whole_file": {
+        "segments": 2,
+        "words": 10,
+        "text": "music the quick brown fox jumps over the lazy dog",
+        "timestamps_monotonic": true,
+        "max_overlap_s": 0.0,
+        "max_gap_s": 0.0,
+        "first_start_s": 0.0,
+        "last_end_s": 29.6,
+        "windows": null,
+        "word_errors": 1,
+        "wer": 0.1111,
+        "missing_reference_words": [],
+        "duplicated_words": [
+          "music"
+        ]
+      },
+      "reconciliation_delta_words": 1
+    },
+    {
+      "name": "starts-at-boundary",
+      "description": "Speech that starts exactly at the window boundary.",
+      "audio_seconds": 33.652,
+      "reference_words": 9,
+      "chunked": {
+        "segments": 2,
+        "words": 10,
+        "text": "you the quick brown fox jumps over the lazy dog",
+        "timestamps_monotonic": true,
+        "max_overlap_s": -12.94,
+        "max_gap_s": 12.94,
+        "first_start_s": 0.0,
+        "last_end_s": 33.2,
+        "windows": 2,
+        "word_errors": 1,
+        "wer": 0.1111,
+        "missing_reference_words": [],
+        "duplicated_words": [
+          "you"
+        ]
+      },
+      "whole_file": {
+        "segments": 2,
+        "words": 11,
+        "text": "blank audio the quick brown fox jumps over the lazy dog",
+        "timestamps_monotonic": true,
+        "max_overlap_s": -20.0,
+        "max_gap_s": 20.0,
+        "first_start_s": 0.0,
+        "last_end_s": 33.2,
+        "windows": null,
+        "word_errors": 2,
+        "wer": 0.2222,
+        "missing_reference_words": [],
+        "duplicated_words": [
+          "blank",
+          "audio"
+        ]
+      },
+      "reconciliation_delta_words": -1
+    },
+    {
+      "name": "continuous-across-boundary",
+      "description": "Two sentences back to back, so the speech continues across the boundary without a pause.",
+      "audio_seconds": 33.704,
+      "reference_words": 18,
+      "chunked": {
+        "segments": 2,
+        "words": 17,
+        "text": "with brown fox jumps over the lazy dog the rain in spain stays mainly in the plain",
+        "timestamps_monotonic": true,
+        "max_overlap_s": 0.0,
+        "max_gap_s": 0.0,
+        "first_start_s": 27.2,
+        "last_end_s": 33.2,
+        "windows": 2,
+        "word_errors": 2,
+        "wer": 0.1111,
+        "missing_reference_words": [
+          "the",
+          "quick"
+        ],
+        "duplicated_words": [
+          "with"
+        ]
+      },
+      "whole_file": {
+        "segments": 2,
+        "words": 17,
+        "text": "with brown fox jumps over the lazy dog the rain in spain stays mainly in the plain",
+        "timestamps_monotonic": true,
+        "max_overlap_s": 0.0,
+        "max_gap_s": 0.0,
+        "first_start_s": 27.2,
+        "last_end_s": 33.2,
+        "windows": null,
+        "word_errors": 2,
+        "wer": 0.1111,
+        "missing_reference_words": [
+          "the",
+          "quick"
+        ],
+        "duplicated_words": [
+          "with"
+        ]
+      },
+      "reconciliation_delta_words": 0
+    },
+    {
+      "name": "long-utterance",
+      "description": "One long utterance without a convenient silence, so it is cut by the window boundary.",
+      "audio_seconds": 37.624,
+      "reference_words": 30,
+      "chunked": {
+        "segments": 5,
+        "words": 32,
+        "text": "we prompt the judge and deciphery burkel for the next prize we promptly judge and t kyvery miracles for the next prize we promptly judge t kyvery miracles for the next prize",
+        "timestamps_monotonic": true,
+        "max_overlap_s": 0.0,
+        "max_gap_s": 0.0,
+        "first_start_s": 0.0,
+        "last_end_s": 37.160000000000004,
+        "windows": 2,
+        "word_errors": 15,
+        "wer": 0.5,
+        "missing_reference_words": [
+          "promptly",
+          "judged",
+          "judged",
+          "judged",
+          "antique",
+          "antique",
+          "antique",
+          "ivory",
+          "ivory",
+          "ivory",
+          "buckles",
+          "buckles",
+          "buckles"
+        ],
+        "duplicated_words": [
+          "prompt",
+          "the",
+          "judge",
+          "judge",
+          "judge",
+          "and",
+          "and",
+          "deciphery",
+          "burkel",
+          "t",
+          "t",
+          "kyvery",
+          "kyvery",
+          "miracles",
+          "miracles"
+        ]
+      },
+      "whole_file": {
+        "segments": 4,
+        "words": 33,
+        "text": "we prompt the judge and deciphery burkel for the next prize we prompt the judge and deciphery burkel for the next prize we prompt the judge and deciphery burkel for the next prize",
+        "timestamps_monotonic": true,
+        "max_overlap_s": 0.0,
+        "max_gap_s": 0.0,
+        "first_start_s": 0.0,
+        "last_end_s": 37.2,
+        "windows": null,
+        "word_errors": 18,
+        "wer": 0.6,
+        "missing_reference_words": [
+          "promptly",
+          "promptly",
+          "promptly",
+          "judged",
+          "judged",
+          "judged",
+          "antique",
+          "antique",
+          "antique",
+          "ivory",
+          "ivory",
+          "ivory",
+          "buckles",
+          "buckles",
+          "buckles"
+        ],
+        "duplicated_words": [
+          "prompt",
+          "prompt",
+          "prompt",
+          "the",
+          "the",
+          "the",
+          "judge",
+          "judge",
+          "judge",
+          "and",
+          "and",
+          "and",
+          "deciphery",
+          "deciphery",
+          "deciphery",
+          "burkel",
+          "burkel",
+          "burkel"
+        ]
+      },
+      "reconciliation_delta_words": -3
+    },
+    {
+      "name": "repeated-words",
+      "description": "The same sentence three times around the boundary.",
+      "audio_seconds": 37.955,
+      "reference_words": 27,
+      "chunked": {
+        "segments": 3,
+        "words": 27,
+        "text": "the quick brown fox jumps over the lazy dog the quick brown fox jumps over the lazy dog the quick brown fox jumps over the lazy dog",
+        "timestamps_monotonic": true,
+        "max_overlap_s": 0.0,
+        "max_gap_s": 0.0,
+        "first_start_s": 27.2,
+        "last_end_s": 37.519999999999996,
+        "windows": 2,
+        "word_errors": 0,
+        "wer": 0.0,
+        "missing_reference_words": [],
+        "duplicated_words": []
+      },
+      "whole_file": {
+        "segments": 3,
+        "words": 27,
+        "text": "the quick brown fox jumps over the lazy dog the quick brown fox jumps over the lazy dog the quick brown fox jumps over the lazy dog",
+        "timestamps_monotonic": true,
+        "max_overlap_s": 0.0,
+        "max_gap_s": 0.0,
+        "first_start_s": 27.2,
+        "last_end_s": 37.52,
+        "windows": null,
+        "word_errors": 0,
+        "wer": 0.0,
+        "missing_reference_words": [],
+        "duplicated_words": []
+      },
+      "reconciliation_delta_words": 0
+    },
+    {
+      "name": "silence-then-speech",
+      "description": "The first window is silent, the speech starts in the second one.",
+      "audio_seconds": 33.875,
+      "reference_words": 8,
+      "chunked": {
+        "segments": 2,
+        "words": 9,
+        "text": "you she fell she fell by the sea shore",
+        "timestamps_monotonic": true,
+        "max_overlap_s": -12.94,
+        "max_gap_s": 12.94,
+        "first_start_s": 0.0,
+        "last_end_s": 33.400000000000006,
+        "windows": 2,
+        "word_errors": 4,
+        "wer": 0.5,
+        "missing_reference_words": [
+          "sells",
+          "sea",
+          "shells"
+        ],
+        "duplicated_words": [
+          "you",
+          "she",
+          "fell",
+          "fell"
+        ]
+      },
+      "whole_file": {
+        "segments": 2,
+        "words": 9,
+        "text": "blank audio she's helmsy she'll bite my sea shore",
+        "timestamps_monotonic": true,
+        "max_overlap_s": -20.0,
+        "max_gap_s": 20.0,
+        "first_start_s": 0.0,
+        "last_end_s": 33.480000000000004,
+        "windows": null,
+        "word_errors": 7,
+        "wer": 0.875,
+        "missing_reference_words": [
+          "she",
+          "sells",
+          "sea",
+          "shells",
+          "by",
+          "the"
+        ],
+        "duplicated_words": [
+          "blank",
+          "audio",
+          "she's",
+          "helmsy",
+          "she'll",
+          "bite",
+          "my"
+        ]
+      },
+      "reconciliation_delta_words": -3
+    },
+    {
+      "name": "partial-final-window",
+      "description": "Speech at the end of the recording, so the last window is shorter than the others.",
+      "audio_seconds": 38.652,
+      "reference_words": 9,
+      "chunked": {
+        "segments": 2,
+        "words": 10,
+        "text": "you the quick brown fox jumps over the lazy dog",
+        "timestamps_monotonic": true,
+        "max_overlap_s": -12.94,
+        "max_gap_s": 12.94,
+        "first_start_s": 0.0,
+        "last_end_s": 38.18,
+        "windows": 2,
+        "word_errors": 1,
+        "wer": 0.1111,
+        "missing_reference_words": [],
+        "duplicated_words": [
+          "you"
+        ]
+      },
+      "whole_file": {
+        "segments": 2,
+        "words": 11,
+        "text": "blank audio the quick brown fox jumps over the lazy dog",
+        "timestamps_monotonic": true,
+        "max_overlap_s": -20.0,
+        "max_gap_s": 20.0,
+        "first_start_s": 0.0,
+        "last_end_s": 38.0,
+        "windows": null,
+        "word_errors": 2,
+        "wer": 0.2222,
+        "missing_reference_words": [],
+        "duplicated_words": [
+          "blank",
+          "audio"
+        ]
+      },
+      "reconciliation_delta_words": -1
+    },
+    {
+      "name": "multiple-boundaries",
+      "description": "Speech around three window boundaries of a recording that is longer than two windows.",
+      "audio_seconds": 88.052,
+      "reference_words": 26,
+      "chunked": {
+        "segments": 3,
+        "words": 23,
+        "text": "quick brown fox jumps over the lazy dog she fell she fell by the sea shore rain in spain spain mainly in spain",
+        "timestamps_monotonic": true,
+        "max_overlap_s": -19.84,
+        "max_gap_s": 27.7,
+        "first_start_s": 28.14,
+        "last_end_s": 87.61999999999999,
+        "windows": 4,
+        "word_errors": 8,
+        "wer": 0.3077,
+        "missing_reference_words": [
+          "the",
+          "the",
+          "the",
+          "sells",
+          "sea",
+          "shells",
+          "stays",
+          "plain"
+        ],
+        "duplicated_words": [
+          "she",
+          "fell",
+          "fell",
+          "spain",
+          "spain"
+        ]
+      },
+      "whole_file": {
+        "segments": 3,
+        "words": 21,
+        "text": "quick brown fox jumps over the lazy dog she's helmsy helmsy shores the rain in spain stays mainly in the plain",
+        "timestamps_monotonic": true,
+        "max_overlap_s": -19.84,
+        "max_gap_s": 23.0,
+        "first_start_s": 28.14,
+        "last_end_s": 87.62,
+        "windows": null,
+        "word_errors": 9,
+        "wer": 0.3462,
+        "missing_reference_words": [
+          "the",
+          "the",
+          "she",
+          "sells",
+          "sea",
+          "sea",
+          "shells",
+          "by",
+          "shore"
+        ],
+        "duplicated_words": [
+          "she's",
+          "helmsy",
+          "helmsy",
+          "shores"
+        ]
+      },
+      "reconciliation_delta_words": -1
+    }
+  ]
+}
