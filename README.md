@@ -26,6 +26,7 @@ PolyScribe is a fast, local-first CLI for transcribing audio/video and merging e
 - Rust 1.88 or newer (MSRV; `rustup` recommended; `rust-toolchain.toml` pins 1.89 for development)
 - A C/C++ toolchain, `cmake`, and `libclang` (needed to build whisper.cpp and its Rust bindings)
 - `ffmpeg` available on `PATH` at runtime
+- A writable `TMPDIR` with a few GB free for GPU builds and GPU runs: the HIP and CUDA runtimes compile device code at runtime, and a full `/tmp` makes the run fail with an LLVM I/O error
 - Optional for GPU builds at build and run time: CUDA toolkit/driver (NVIDIA) or ROCm (AMD)
 
 ## Supported platforms

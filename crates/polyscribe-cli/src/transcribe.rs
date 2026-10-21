@@ -72,7 +72,7 @@ pub fn run(args: TranscribeArgs) -> Result<()> {
         GpuBackend::Cuda => BackendKind::Cuda,
         GpuBackend::Hip => BackendKind::Hip,
     };
-    let sel = select_backend(requested, polyscribe_core::verbose_level() > 0)?;
+    let mut sel = select_backend(requested, polyscribe_core::verbose_level() > 0)?;
     polyscribe_core::dlog!(1, "Using backend: {:?}", sel.chosen);
     let gpu_layers = if args.gpu_layers > 0 {
         Some(args.gpu_layers as u32)
@@ -101,7 +101,7 @@ pub fn run(args: TranscribeArgs) -> Result<()> {
         for input_path in &inputs {
             let speaker = resolve_speaker_name(input_path, args.set_speaker_names);
             let mut entries = collect_entries_for_input(
-                sel.backend.as_ref(),
+                sel.backend.as_mut(),
                 input_path,
                 &speaker,
                 lang_hint.as_deref(),
@@ -141,7 +141,7 @@ pub fn run(args: TranscribeArgs) -> Result<()> {
         for input_path in &inputs {
             let speaker = resolve_speaker_name(input_path, args.set_speaker_names);
             entries.extend(collect_entries_for_input(
-                sel.backend.as_ref(),
+                sel.backend.as_mut(),
                 input_path,
                 &speaker,
                 lang_hint.as_deref(),
@@ -197,7 +197,7 @@ pub fn run(args: TranscribeArgs) -> Result<()> {
         for input_path in &inputs {
             let speaker = resolve_speaker_name(input_path, args.set_speaker_names);
             let mut entries = collect_entries_for_input(
-                sel.backend.as_ref(),
+                sel.backend.as_mut(),
                 input_path,
                 &speaker,
                 lang_hint.as_deref(),
