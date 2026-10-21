@@ -183,7 +183,11 @@ pub(crate) fn spawn_ffmpeg_decoder(audio_path: &Path) -> anyhow::Result<Child> {
                     "ffmpeg not found on PATH. Please install ffmpeg and ensure it is available."
                 )
             } else {
-                anyhow!("Failed to execute ffmpeg for {}: {}", audio_path.display(), e)
+                anyhow!(
+                    "Failed to execute ffmpeg for {}: {}",
+                    audio_path.display(),
+                    e
+                )
             }
         })?;
     Ok(child)
@@ -299,7 +303,10 @@ impl ChunkedAudio {
         let stderr = String::from_utf8_lossy(&stderr).into_owned();
         if let Some(mut child) = self.child.take() {
             let status = child.wait().with_context(|| {
-                format!("Failed to wait for ffmpeg for {}", self.audio_path.display())
+                format!(
+                    "Failed to wait for ffmpeg for {}",
+                    self.audio_path.display()
+                )
             })?;
             if !status.success() {
                 return Err(anyhow!(
@@ -325,9 +332,7 @@ impl ChunkedAudio {
             if !self.read_more()? {
                 // The recording ended. The last window may be shorter.
                 self.finished = true;
-                if let Err(e) = self.ffmpeg_result() {
-                    return Err(e);
-                }
+                self.ffmpeg_result()?;
                 let window = self.assembler.take_window(self.next_start);
                 return Ok(window);
             }
@@ -381,7 +386,9 @@ mod tests {
     fn test_short_input_produces_one_window() {
         let mut a = WindowAssembler::new(config(10));
         a.push(&[1.0, 2.0, 3.0]);
-        let w = a.take_window(0).expect("a short input still has one window");
+        let w = a
+            .take_window(0)
+            .expect("a short input still has one window");
         assert_eq!(w.samples, vec![1.0, 2.0, 3.0]);
         assert_eq!(w.start_sample, 0);
         // Nothing is left over.

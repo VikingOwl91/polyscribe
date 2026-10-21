@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 
 use crate::OutputEntry;
+use crate::find_model_file;
 use crate::gpu::{GpuBackend, GpuDevice, gpu_devices};
 use crate::output::{is_audio_file, is_json_file, load_json_transcript};
 use crate::prelude::*;
-use crate::find_model_file;
 use anyhow::{Context, anyhow};
 use std::env;
 use std::path::{Path, PathBuf};
@@ -505,10 +505,7 @@ fn transcribe_with_whisper_rs(
         };
 
         windows.seek_to(next_start);
-        window = match windows.next_window()? {
-            Some(next) => Some(next),
-            None => None,
-        };
+        window = windows.next_window()?;
     }
 
     crate::dlog!(1, "Transcribed {window_count} window(s) of audio");
