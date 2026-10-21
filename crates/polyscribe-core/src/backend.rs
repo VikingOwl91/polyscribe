@@ -456,6 +456,10 @@ fn transcribe_with_whisper_rs(
     let mut provisional: Option<usize> = None;
     // The recovery of a region that whisper did not transcribe.
     let mut recovery = Recovery::default();
+    // The regions that whisper did not transcribe and that the recovery
+    // could not fix. The transcript may be missing them, so they are
+    // reported to the user.
+    let mut unresolved = UnresolvedRegions::default();
     report(40);
     while let Some(mut current) = window.take() {
         window_count += 1;
@@ -471,16 +475,35 @@ fn transcribe_with_whisper_rs(
         // decoded again from a different position. The attempts are
         // bounded, and the region that could not be recovered is reported.
         loop {
-            if !recovery_enabled() {
-                break;
-            }
             let Some(hole) = detect_hole(&current, &segments, frontier) else {
                 break;
             };
+            if !recovery_enabled() {
+                // The recovery is switched off, so the region stays
+                // untranscribed and the user has to know.
+                if region_may_carry_speech(&current, &hole) {
+                    unresolved.add(UnresolvedRegion {
+                        start: hole.start,
+                        end: hole.end,
+                    });
+                }
+                break;
+            }
             let attempt = recovery.next_attempt(&hole, &current, windows.retained_from());
             trace_hole(&current, &hole, attempt);
-            let Some(rewind) = attempt else {
-                break;
+            let rewind = match attempt {
+                RecoveryAttempt::Decode(rewind) => rewind,
+                RecoveryAttempt::NoSpeech => break,
+                RecoveryAttempt::Exhausted => {
+                    // The region carries speech that whisper did not
+                    // report and that could not be decoded again. The
+                    // transcript may be missing it, so the user has to know.
+                    unresolved.add(UnresolvedRegion {
+                        start: hole.start,
+                        end: hole.end,
+                    });
+                    break;
+                }
             };
             windows.seek_to(rewind);
             let Some(next) = windows.next_window()? else {
@@ -597,6 +620,14 @@ fn transcribe_with_whisper_rs(
         window = windows.next_window()?;
     }
 
+    // A region that whisper did not transcribe and that the recovery could
+    // not fix means that the transcript may be missing speech. The warning
+    // goes to stderr and does not change the exit status: the transcription
+    // itself succeeded.
+    if let Some(warning) = unresolved.warning(audio_path) {
+        crate::ui::warn(warning);
+    }
+
     crate::dlog!(1, "Transcribed {window_count} window(s) of audio");
     report(90);
     report(100);
@@ -702,6 +733,17 @@ fn region_may_carry_speech(window: &AudioWindow, hole: &Hole) -> bool {
     speech_frame_ratio(&window.samples[start..end]) > HOLE_SPEECH_RATIO
 }
 
+/// What the recovery does with a region that whisper did not transcribe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecoveryAttempt {
+    /// The window is decoded again from this position.
+    Decode(u64),
+    /// The region carries no speech, so it is not decoded again.
+    NoSpeech,
+    /// The attempts are used up, or the audio they need is not available.
+    Exhausted,
+}
+
 /// The recovery of a region that whisper did not transcribe.
 ///
 /// The window is decoded again from a slightly different position, because
@@ -716,19 +758,15 @@ struct Recovery {
 }
 
 impl Recovery {
-    /// The position the next window starts at.
-    ///
-    /// Returns `None` when the region cannot be recovered any more: either
-    /// the attempts are used up, or the audio carries no energy, or the
-    /// samples in front of the window are not available any more.
+    /// What to do with the region that whisper did not transcribe.
     fn next_attempt(
         &mut self,
         hole: &Hole,
         window: &AudioWindow,
         retained_from: u64,
-    ) -> Option<u64> {
+    ) -> RecoveryAttempt {
         if !region_may_carry_speech(window, hole) {
-            return None;
+            return RecoveryAttempt::NoSpeech;
         }
         while (self.attempts as usize) < RECOVERY_SHIFTS.len() {
             let shift = RECOVERY_SHIFTS[self.attempts as usize];
@@ -748,9 +786,9 @@ impl Recovery {
             if target < retained_from {
                 continue;
             }
-            return Some(target);
+            return RecoveryAttempt::Decode(target);
         }
-        None
+        RecoveryAttempt::Exhausted
     }
 
     /// Forget the attempts of a region that was not a problem.
@@ -758,6 +796,67 @@ impl Recovery {
         self.attempts = 0;
     }
 }
+
+/// A region that whisper did not transcribe and that the recovery could not
+/// fix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UnresolvedRegion {
+    /// The first sample of the region.
+    start: u64,
+    /// The sample after the region.
+    end: u64,
+}
+
+/// The regions of a recording that whisper did not transcribe and that the
+/// recovery could not fix.
+///
+/// A region like that means that the transcript may be missing speech. The
+/// user has to know that, so the regions are reported in a warning.
+#[derive(Debug, Default)]
+struct UnresolvedRegions {
+    regions: Vec<UnresolvedRegion>,
+}
+
+impl UnresolvedRegions {
+    fn add(&mut self, region: UnresolvedRegion) {
+        self.regions.push(region);
+    }
+
+    /// The warning for the regions, if there are any.
+    ///
+    /// The warning says that speech *may* be missing: the check that decides
+    /// whether a region carries speech is a level and a share of frames, not
+    /// a voice activity detector.
+    fn warning(&self, path: &Path) -> Option<String> {
+        if self.regions.is_empty() {
+            return None;
+        }
+        let rate = crate::chunked::WHISPER_SAMPLE_RATE as f64;
+        let mut ranges = Vec::new();
+        for region in self.regions.iter().take(MAX_REPORTED_REGIONS) {
+            ranges.push(format!(
+                "between {:.1} s and {:.1} s",
+                region.start as f64 / rate,
+                region.end as f64 / rate
+            ));
+        }
+        let mut text = ranges.join(", ");
+        if self.regions.len() > MAX_REPORTED_REGIONS {
+            text.push_str(&format!(
+                " and {} more",
+                self.regions.len() - MAX_REPORTED_REGIONS
+            ));
+        }
+        Some(format!(
+            "{}: the transcript may be incomplete. whisper did not report the audio {}, and it could not be decoded again. Speech may be missing there.",
+            path.display(),
+            text
+        ))
+    }
+}
+
+/// How many regions the warning names.
+const MAX_REPORTED_REGIONS: usize = 5;
 
 /// Whether the recovery of a region that whisper did not transcribe is on.
 ///
@@ -809,7 +908,7 @@ fn trace_window(window: &AudioWindow, segments: &[RawSegment]) {
 }
 
 /// Trace the decision about a region that whisper did not transcribe.
-fn trace_hole(window: &AudioWindow, hole: &Hole, attempt: Option<u64>) {
+fn trace_hole(window: &AudioWindow, hole: &Hole, attempt: RecoveryAttempt) {
     if !trace_enabled() {
         return;
     }
@@ -823,7 +922,7 @@ fn trace_hole(window: &AudioWindow, hole: &Hole, attempt: Option<u64>) {
     let end = (hole.end.saturating_sub(window.start_sample) as usize).min(window.samples.len());
     let speech = speech_frame_ratio(&window.samples[start.min(end)..end]);
     match attempt {
-        Some(rewind) => eprintln!(
+        RecoveryAttempt::Decode(rewind) => eprintln!(
             "TRACE   hole start_sample={} end_sample={} len={:.3}s level={:.1}dBFS speech={:.3} action=recover rewind_sample={}",
             hole.start,
             hole.end,
@@ -832,8 +931,16 @@ fn trace_hole(window: &AudioWindow, hole: &Hole, attempt: Option<u64>) {
             speech,
             rewind
         ),
-        None => eprintln!(
-            "TRACE   hole start_sample={} end_sample={} len={:.3}s level={:.1}dBFS speech={:.3} action=accept",
+        RecoveryAttempt::NoSpeech => eprintln!(
+            "TRACE   hole start_sample={} end_sample={} len={:.3}s level={:.1}dBFS speech={:.3} action=silence",
+            hole.start,
+            hole.end,
+            hole.len() as f64 / rate,
+            level,
+            speech
+        ),
+        RecoveryAttempt::Exhausted => eprintln!(
+            "TRACE   hole start_sample={} end_sample={} len={:.3}s level={:.1}dBFS speech={:.3} action=unresolved",
             hole.start,
             hole.end,
             hole.len() as f64 / rate,
@@ -1193,13 +1300,19 @@ mod tests {
         };
         let mut recovery = Recovery::default();
         let mut attempts = Vec::new();
-        while let Some(target) = recovery.next_attempt(&hole, &w, 0) {
-            attempts.push(target);
-            assert!(
-                target != w.start_sample,
-                "the window must not be decoded again from the same position"
-            );
-            assert!(attempts.len() <= RECOVERY_SHIFTS.len());
+        loop {
+            match recovery.next_attempt(&hole, &w, 0) {
+                RecoveryAttempt::Decode(target) => {
+                    attempts.push(target);
+                    assert!(
+                        target != w.start_sample,
+                        "the window must not be decoded again from the same position"
+                    );
+                    assert!(attempts.len() <= RECOVERY_SHIFTS.len());
+                }
+                RecoveryAttempt::NoSpeech => panic!("the region carries speech"),
+                RecoveryAttempt::Exhausted => break,
+            }
         }
         // Every shift of the list is used once, and the list is the bound.
         assert_eq!(attempts.len(), RECOVERY_SHIFTS.len());
@@ -1221,8 +1334,10 @@ mod tests {
         let mut recovery = Recovery::default();
         // The region starts at the beginning of the recording, so the shifts
         // that look back cannot be used.
-        let target = recovery.next_attempt(&hole, &w, 0).unwrap();
-        assert!(target > hole.start);
+        match recovery.next_attempt(&hole, &w, 0) {
+            RecoveryAttempt::Decode(target) => assert!(target > hole.start),
+            other => panic!("expected a decode attempt, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1234,7 +1349,10 @@ mod tests {
         };
         let mut recovery = Recovery::default();
         // The region is silence, so it is not decoded again.
-        assert!(recovery.next_attempt(&hole, &w, 0).is_none());
+        assert_eq!(
+            recovery.next_attempt(&hole, &w, 0),
+            RecoveryAttempt::NoSpeech
+        );
     }
 
     #[test]
@@ -1249,8 +1367,51 @@ mod tests {
         // The audio in front of the window is gone, so a window that starts
         // before the hole cannot be decoded. The attempt that looks ahead
         // is used instead.
-        let target = recovery.next_attempt(&hole, &w, 100_000).unwrap();
-        assert!(target > hole.start);
+        match recovery.next_attempt(&hole, &w, 100_000) {
+            RecoveryAttempt::Decode(target) => assert!(target > hole.start),
+            other => panic!("expected a decode attempt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_no_warning_without_an_unresolved_region() {
+        let regions = UnresolvedRegions::default();
+        assert_eq!(regions.warning(Path::new("recording.wav")), None);
+    }
+
+    #[test]
+    fn test_the_warning_names_the_file_and_the_region() {
+        let mut regions = UnresolvedRegions::default();
+        regions.add(UnresolvedRegion {
+            start: 1_244_800,
+            end: 1_598_080,
+        });
+        let warning = regions
+            .warning(Path::new("/tmp/recording.wav"))
+            .expect("a region produces a warning");
+        assert!(warning.contains("/tmp/recording.wav"), "{warning}");
+        assert!(warning.contains("between 77.8 s and 99.9 s"), "{warning}");
+        assert!(
+            warning.contains("the transcript may be incomplete"),
+            "{warning}"
+        );
+        assert!(
+            warning.contains("Speech may be missing"),
+            "the warning must not claim that speech was there: {warning}"
+        );
+    }
+
+    #[test]
+    fn test_the_warning_names_a_bounded_number_of_regions() {
+        let mut regions = UnresolvedRegions::default();
+        for i in 0..MAX_REPORTED_REGIONS + 3 {
+            regions.add(UnresolvedRegion {
+                start: i as u64 * 16_000,
+                end: i as u64 * 16_000 + 8_000,
+            });
+        }
+        let warning = regions.warning(Path::new("recording.wav")).unwrap();
+        assert!(warning.contains("and 3 more"), "{warning}");
     }
 
     #[test]

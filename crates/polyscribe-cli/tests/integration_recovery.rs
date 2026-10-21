@@ -246,6 +246,46 @@ fn the_skipped_region_is_transcribed() {
     );
 }
 
+/// An ordinary recording produces no warning about a missing region.
+///
+/// The warning is only for a region that whisper did not report and that the
+/// recovery could not fix. A recording without such a region must stay
+/// silent, also on stderr, so that the output of a script is not disturbed.
+#[test]
+fn an_ordinary_recording_produces_no_warning() {
+    let Some(model) = e2e_model() else {
+        eprintln!("SKIPPED: POLYSCRIBE_E2E_MODEL is not set; skipping the recovery tests");
+        return;
+    };
+    if !ffmpeg_available() {
+        eprintln!("SKIPPED: ffmpeg is not available on PATH; skipping the recovery tests");
+        return;
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let audio = fixture_dir().parent().unwrap().join("speech.wav");
+    let output = Command::new(bin())
+        .args(["--no-interaction", "--no-progress"])
+        .arg("transcribe")
+        .arg(&audio)
+        .args([OsStr::new("--language"), OsStr::new("en")])
+        .arg("-o")
+        .arg(tmp.path().join("out"))
+        .env("WHISPER_MODEL", &model)
+        .output()
+        .expect("failed to spawn polyscribe");
+    assert!(
+        output.status.success(),
+        "transcribe failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("may be incomplete"),
+        "an ordinary recording must not warn about a missing region:\n{stderr}"
+    );
+}
+
 /// A recording with different sentences is transcribed completely.
 #[test]
 fn a_recording_with_varied_speech_is_transcribed_completely() {

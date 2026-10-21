@@ -19,6 +19,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Transcribe: segments without a duration are no longer written to the transcript. whisper reports such a segment at the end of a window, with the text of the speech around it; it showed up as a subtitle without a duration, on top of the segment next to it.
 
 ### Added
+- Transcribe: a warning on stderr when a region that carries speech was not transcribed and could not be decoded again. It names the file and the time range and says that the transcript may be incomplete. The exit status does not change.
 - Core: `chunked` module that decodes a media file incrementally and hands it to the transcriber in windows, so the memory of a transcription is independent of the length of the recording
 - Docs: `docs/benchmarks/chunked-transcription.md` describes the pipeline, the memory bounds, the window and reconciliation strategy, the boundary quality measurement, the recovery of a region that whisper did not transcribe and the measured before/after results
 - Core: `gpu` module with a device probe for the GPU backends, and unit tests for the backend selection contract (explicit CPU, explicit GPU with and without a device, and the automatic fallback).

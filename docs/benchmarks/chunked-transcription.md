@@ -373,6 +373,32 @@ reports the sample range of every window, the segments of the window with
 their window relative and global timestamps, the region that was not
 transcribed and what was done about it.
 
+### The warning for a region that stayed untranscribed
+
+A region that carries speech, that whisper did not report and that none of
+the attempts recovered means that the transcript may be missing it. The
+transcription says so on stderr:
+
+```
+▲  recording.wav: the transcript may be incomplete. whisper did not report the
+   audio between 77.8 s and 99.9 s, and it could not be decoded again. Speech
+   may be missing there.
+```
+
+The warning names the file and the time range, and it says that speech *may*
+be missing: the check that decides whether a region carries speech is a level
+and a share of frames, not a voice activity detector, so the pipeline cannot
+claim that speech was there.
+
+* It is written to stderr, so the output of the transcript on stdout is not
+  changed.
+* It is shown without `-v` and without an environment variable. The per-window
+  trace stays opt-in.
+* A region of ordinary silence does not produce a warning: the region is only
+  reported when it carries speech level energy.
+* The exit status does not change. The transcription itself succeeded, and a
+  non-zero status would break the scripts that use the command.
+
 ## 8. Quality trade-offs
 
 The transcript of a recording is not bit for bit the same as before. What
