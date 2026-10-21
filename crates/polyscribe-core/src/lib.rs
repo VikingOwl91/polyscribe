@@ -163,6 +163,7 @@ macro_rules! dlog {
 pub mod backend;
 pub mod config;
 pub mod error;
+pub mod gpu;
 pub mod models;
 pub mod output;
 pub mod ui;
