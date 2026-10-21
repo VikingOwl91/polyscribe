@@ -448,6 +448,9 @@ fn transcribe_with_whisper_rs(
     let mut window = Some(first_window);
     let mut emitted_end = 0.0f64;
     let mut window_count = 0u64;
+    // The index of a segment that may have been cut short by the end of the
+    // window. The next window decodes it again and replaces it.
+    let mut provisional: Option<usize> = None;
     report(40);
     while let Some(current) = window.take() {
         window_count += 1;
@@ -459,25 +462,50 @@ fn transcribe_with_whisper_rs(
 
         let window_start = current.start_seconds();
         let window_end = current.end_seconds();
-        let mut last: Option<(f64, f64)> = None;
+        // The index of the last segment this window reported.
+        let mut last_index: Option<usize> = None;
         for seg in state.as_iter() {
             let text = seg
                 .to_str()
                 .map_err(|e| anyhow!("Failed to get segment text: {:?}", e))?;
             let start = window_start + (seg.start_timestamp() as f64) * 0.01;
-            let end = window_start + (seg.end_timestamp() as f64) * 0.01;
-            if segment_is_duplicate(&entries, start, emitted_end) {
-                // Already transcribed by an earlier window.
-                continue;
+            // whisper reports the end of a segment behind the audio it has
+            // decoded when the mel is padded with silence. The segment ends
+            // with the window, so that the timestamps stay inside the
+            // recording.
+            let end = (window_start + (seg.end_timestamp() as f64) * 0.01).min(window_end);
+
+            // The re-decode of the provisional segment replaces it: the
+            // version of the previous window may have been cut short by
+            // the end of that window. It is kept, because dropping it
+            // would lose the words that the cut version did not hear.
+            match segment_action(&entries, provisional, start, end, emitted_end) {
+                SegmentAction::Replace(i) => {
+                    entries[i] = OutputEntry {
+                        id: 0,
+                        speaker: speaker.to_string(),
+                        start,
+                        end,
+                        text: text.trim().to_string(),
+                    };
+                    emitted_end = end;
+                    last_index = Some(i);
+                    // The re-decode is the complete version of the segment.
+                    provisional = None;
+                }
+                SegmentAction::Skip => {}
+                SegmentAction::Emit => {
+                    entries.push(OutputEntry {
+                        id: 0,
+                        speaker: speaker.to_string(),
+                        start,
+                        end,
+                        text: text.trim().to_string(),
+                    });
+                    emitted_end = end;
+                    last_index = Some(entries.len() - 1);
+                }
             }
-            entries.push(OutputEntry {
-                id: 0,
-                speaker: speaker.to_string(),
-                start,
-                end,
-                text: text.trim().to_string(),
-            });
-            last = Some((start, end));
         }
 
         // Where the next window starts:
@@ -488,20 +516,30 @@ fn transcribe_with_whisper_rs(
         //   complete.
         // * Otherwise the next window starts where the last segment ended,
         //   so the audio in between is decoded again and no part of the
-        //   recording is skipped.
-        // * A window without any segment advances by its own length.
+        //   recording is skipped. The window still advances by at least half
+        //   a window, so that a stretch of silence, where whisper reports
+        //   short segments, is not decoded over and over.
+        // * A window without any segment advances by at least half a window.
         let rate = crate::chunked::WHISPER_SAMPLE_RATE as f64;
-        let next_start = match last {
-            Some((last_start, last_end)) if segment_is_cut(last_end, window_end) => {
-                entries.pop();
-                emitted_end = entries.last().map(|e| e.end).unwrap_or(emitted_end);
-                (last_start * rate).round() as u64
-            }
-            Some((_, last_end)) => {
-                emitted_end = last_end;
-                (last_end * rate).round() as u64
-            }
-            None => (window_end * rate).round() as u64,
+        let min_advance = (MIN_WINDOW_ADVANCE_SECONDS * rate) as u64;
+        let window_start_sample = current.start_sample;
+
+        // The last segment of the window may have been cut short by the end
+        // of the window. It is kept, and the next window replaces it.
+        provisional = match last_index {
+            Some(i) if segment_is_cut(entries[i].end, window_end) => Some(i),
+            _ => None,
+        };
+
+        let next_start = match provisional {
+            // Decode the cut segment again, with the context it needs.
+            Some(i) => (entries[i].start * rate).round() as u64,
+            None => match entries.last() {
+                Some(last) => {
+                    ((last.end * rate).round() as u64).max(window_start_sample + min_advance)
+                }
+                None => (window_end * rate).round() as u64,
+            },
         };
 
         windows.seek_to(next_start);
@@ -512,6 +550,52 @@ fn transcribe_with_whisper_rs(
     report(90);
     report(100);
     Ok(entries)
+}
+
+/// What to do with a segment that a window reported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SegmentAction {
+    /// Replace the segment at this index: it is the re-decode of a segment
+    /// that may have been cut short by the end of the previous window.
+    Replace(usize),
+    /// The segment repeats speech that was already reported.
+    Skip,
+    /// The segment is new.
+    Emit,
+}
+
+/// Decide what to do with a segment that a window reported.
+///
+/// A segment without a duration carries no time. whisper reports such a
+/// segment at the end of a window, with the text of the speech around it,
+/// so it is dropped: it would show up as a subtitle without a duration,
+/// overlapping the segment next to it.
+///
+/// A segment that overlaps the provisional one is the re-decode of a
+/// segment that may have been cut short by the end of the previous
+/// window, and replaces it: the cut version can be missing words. A
+/// segment that starts inside an already reported segment repeats speech
+/// that was transcribed, and is dropped.
+fn segment_action(
+    entries: &[OutputEntry],
+    provisional: Option<usize>,
+    segment_start: f64,
+    segment_end: f64,
+    emitted_end: f64,
+) -> SegmentAction {
+    if segment_end <= segment_start {
+        return SegmentAction::Skip;
+    }
+    if let Some(i) = provisional
+        && segment_start < entries[i].end
+        && segment_end > entries[i].start
+    {
+        return SegmentAction::Replace(i);
+    }
+    if segment_is_duplicate(entries, segment_start, emitted_end) {
+        return SegmentAction::Skip;
+    }
+    SegmentAction::Emit
 }
 
 /// Whether a segment of a window repeats what an earlier window already
@@ -551,6 +635,14 @@ const SEGMENT_OVERLAP_TOLERANCE: f64 = 0.05;
 /// How close to the end of a window a segment has to reach to be treated as
 /// cut short by it.
 const SEGMENT_CUT_TOLERANCE: f64 = 0.02;
+
+/// The smallest distance a window advances.
+///
+/// whisper reports short segments for silence, so a window that started
+/// where the last segment ended would decode the same stretch of silence
+/// again and again. Half a window is enough to keep the windows moving
+/// while the audio at the boundary is still decoded with context.
+const MIN_WINDOW_ADVANCE_SECONDS: f64 = 15.0;
 
 #[cfg(test)]
 mod tests {
@@ -594,6 +686,55 @@ mod tests {
             end,
             text: "text".to_string(),
         }
+    }
+
+    #[test]
+    fn test_segment_action_replaces_the_provisional_segment() {
+        let entries = vec![entry(10.0, 15.0), entry(20.0, 25.0)];
+        // The provisional segment is the last one, which the next window
+        // decoded again. The re-decode replaces it, because the earlier
+        // version may have been cut short by the end of its window.
+        assert_eq!(
+            segment_action(&entries, Some(1), 20.1, 25.4, 25.0),
+            SegmentAction::Replace(1)
+        );
+        // A re-decode that starts a little before the provisional segment
+        // still replaces it.
+        assert_eq!(
+            segment_action(&entries, Some(1), 19.9, 25.2, 25.0),
+            SegmentAction::Replace(1)
+        );
+    }
+
+    #[test]
+    fn test_segment_action_skips_a_repeated_segment() {
+        let entries = vec![entry(10.0, 15.0), entry(20.0, 25.0)];
+        // A segment that starts inside an already reported segment
+        // repeats speech that was transcribed.
+        assert_eq!(
+            segment_action(&entries, None, 22.0, 23.0, 25.0),
+            SegmentAction::Skip
+        );
+    }
+
+    #[test]
+    fn test_segment_action_emits_a_new_segment() {
+        let entries = vec![entry(10.0, 15.0)];
+        assert_eq!(
+            segment_action(&entries, None, 20.0, 25.0, 15.0),
+            SegmentAction::Emit
+        );
+    }
+
+    #[test]
+    fn test_segment_action_skips_a_segment_without_a_duration() {
+        let entries = vec![entry(10.0, 15.0)];
+        // whisper reports such a segment at the end of a window. It
+        // carries no time and would overlap the segment next to it.
+        assert_eq!(
+            segment_action(&entries, None, 20.0, 20.0, 15.0),
+            SegmentAction::Skip
+        );
     }
 
     #[test]
