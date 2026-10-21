@@ -1,0 +1,21 @@
+{
+  "label": "short-after-cpu",
+  "binary": "/var/tmp/polyscribe-chunked3",
+  "backend": "cpu",
+  "audio": "/home/cnachtigall/git/projects/owlibou/polyscribe/crates/polyscribe-cli/tests/fixtures/speech.wav",
+  "runs": 3,
+  "wall_median_ms": 1020.2,
+  "wall_min_ms": 859.3,
+  "wall_max_ms": 1466.2,
+  "peak_rss_mib": 278.5,
+  "vram_peak_mib": 2331,
+  "windows": 1,
+  "model_loads": 1,
+  "segments": 1,
+  "timestamps_monotonic": true,
+  "max_segment_overlap_s": 0.0,
+  "transcript_sha": [
+    "718e0c1d2cc1978a"
+  ],
+  "loadavg_median": 3.4
+}

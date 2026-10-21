@@ -1,0 +1,21 @@
+{
+  "label": "short-after-hip",
+  "binary": "/var/tmp/polyscribe-chunked-hip2",
+  "backend": "hip",
+  "audio": "/home/cnachtigall/git/projects/owlibou/polyscribe/crates/polyscribe-cli/tests/fixtures/speech.wav",
+  "runs": 3,
+  "wall_median_ms": 366.2,
+  "wall_min_ms": 361.1,
+  "wall_max_ms": 382.8,
+  "peak_rss_mib": 261.6,
+  "vram_peak_mib": 2595,
+  "windows": 1,
+  "model_loads": 1,
+  "segments": 1,
+  "timestamps_monotonic": true,
+  "max_segment_overlap_s": 0.0,
+  "transcript_sha": [
+    "718e0c1d2cc1978a"
+  ],
+  "loadavg_median": 3.6
+}

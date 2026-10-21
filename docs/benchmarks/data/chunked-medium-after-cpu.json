@@ -1,0 +1,21 @@
+{
+  "label": "medium-after-cpu",
+  "binary": "/var/tmp/polyscribe-chunked3",
+  "backend": "cpu",
+  "audio": "/var/tmp/opencode/bench/medium-10min.wav",
+  "runs": 2,
+  "wall_median_ms": 79087.5,
+  "wall_min_ms": 75258.4,
+  "wall_max_ms": 79087.5,
+  "peak_rss_mib": 291.5,
+  "vram_peak_mib": 2482,
+  "windows": 22,
+  "model_loads": 1,
+  "segments": 111,
+  "timestamps_monotonic": true,
+  "max_segment_overlap_s": 0.0,
+  "transcript_sha": [
+    "b1b714e8704ad1fc"
+  ],
+  "loadavg_median": 23.2
+}

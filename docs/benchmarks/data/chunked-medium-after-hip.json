@@ -1,0 +1,21 @@
+{
+  "label": "medium-after-hip",
+  "binary": "/var/tmp/polyscribe-chunked-hip2",
+  "backend": "hip",
+  "audio": "/var/tmp/opencode/bench/medium-10min.wav",
+  "runs": 2,
+  "wall_median_ms": 5702.8,
+  "wall_min_ms": 5643.0,
+  "wall_max_ms": 5702.8,
+  "peak_rss_mib": 273.6,
+  "vram_peak_mib": 2820,
+  "windows": 22,
+  "model_loads": 1,
+  "segments": 112,
+  "timestamps_monotonic": true,
+  "max_segment_overlap_s": 0.0,
+  "transcript_sha": [
+    "a6994ef01501bf14"
+  ],
+  "loadavg_median": 18.6
+}
