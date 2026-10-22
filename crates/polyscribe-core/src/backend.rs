@@ -731,7 +731,7 @@ fn transcribe_windows(
             start_sample: current.start_sample,
             end_sample: current.start_sample + current.samples.len() as u64,
         });
-        let mut segments = decode_window(state, &full_params, &current)?;
+        let mut segments = decode_window(state, &full_params, &current, &policy)?;
         if matches!(&policy, crate::stream::WindowPolicy::Live(_)) {
             filter_live_silent_segments(&current, &mut segments);
         }
@@ -789,6 +789,11 @@ fn transcribe_windows(
         // Whether the window was decoded again to recover a region that
         // whisper did not transcribe.
         let mut recovered = false;
+        // The start of the main window, before any recovery re-decode. The
+        // recovery window can start earlier, so the minimum advance is
+        // measured from here: a re-decode must never move the main window
+        // backwards or stall it at the same position.
+        let main_window_start_sample = current.start_sample;
         trace_window(&current, &segments);
 
         // whisper does not always report a segment for the beginning of the
@@ -828,7 +833,17 @@ fn transcribe_windows(
                 }
             };
             windows.seek_to(rewind);
-            let Some(next) = windows.next_window(cancel)? else {
+            let next = windows.next_recovery_window(cancel)?;
+            observer(crate::stream::StreamEvent::SamplesReceived {
+                total: windows.received_samples(),
+            });
+            let Some(next) = next else {
+                if !cancel.is_cancelled() && region_may_carry_speech(&current, &hole) {
+                    unresolved.add(UnresolvedRegion {
+                        start: hole.start,
+                        end: hole.end,
+                    });
+                }
                 break;
             };
             let window_index = window_counts.submit_recovery_window();
@@ -838,7 +853,7 @@ fn transcribe_windows(
                 start_sample: current.start_sample,
                 end_sample: current.start_sample + current.samples.len() as u64,
             });
-            segments = decode_window(state, &full_params, &current)?;
+            segments = decode_window(state, &full_params, &current, &policy)?;
             if matches!(&policy, crate::stream::WindowPolicy::Live(_)) {
                 filter_live_silent_segments(&current, &mut segments);
             }
@@ -924,25 +939,23 @@ fn transcribe_windows(
         //
         // The re-decode gives the segment the audio that follows it, but
         // only when the new window reaches beyond the window the segment
-        // came from. A segment that covers the whole window is decoded
-        // again in a window that holds the same audio, so it can never be
-        // complete and the pipeline would decode the same window over and
-        // over.
-        //
-        // The batch policy keeps the behaviour of the previous release: the
-        // segment is decoded again, and the position of the new window
-        // decides how the text comes out. The live policy does not decode
-        // the same window again: a live window is short, and the words at
-        // its end are decoded by the window that follows.
+        // came from. A segment that covers the whole window is complete:
+        // re-decoding the same window cannot give it more context, so it
+        // is not re-decoded. Only a segment that is genuinely cut short
+        // (it starts after the beginning of the window) is re-decoded,
+        // and only when the new window advances past its start.
         let rate = crate::chunked::WHISPER_SAMPLE_RATE as f64;
         let window_start_sample = current.start_sample;
         let redecode = match provisional {
             Some(i) => {
                 let segment_start = (entries[i].start * rate).round() as u64;
-                let worth_it = match policy {
-                    crate::stream::WindowPolicy::Batch => true,
-                    crate::stream::WindowPolicy::Live(_) => segment_start > window_start_sample,
-                };
+                // A segment that covers the whole window is not cut short by
+                // the end of it: it is complete, and re-decoding the same
+                // window cannot give it more context. The live policy already
+                // skips such a segment; the batch policy now does the same,
+                // so a stretch of silence (or a hallucinated phrase that
+                // spans a whole window) is not decoded again and again.
+                let worth_it = segment_start > window_start_sample;
                 if worth_it {
                     provisional_attempts += 1;
                     provisional_attempts <= MAX_PROVISIONAL_ATTEMPTS
@@ -999,14 +1012,14 @@ fn transcribe_windows(
             Some(i) => (entries[i].start * rate).round() as u64,
             None => match entries.last() {
                 Some(last) => {
-                    ((last.end * rate).round() as u64).max(window_start_sample + min_advance)
+                    ((last.end * rate).round() as u64).max(main_window_start_sample + min_advance)
                 }
                 None => (window_end * rate).round() as u64,
             },
         };
         // The pipeline always moves forward: a window that would start at
-        // the position of the current one would be decoded again and again.
-        let next_start = next_start.max(window_start_sample + 1);
+        // the position of the main window would be decoded again and again.
+        let next_start = next_start.max(main_window_start_sample + 1);
 
         windows.seek_to(next_start);
         // The window that follows has the length that the policy gives it.
@@ -1397,6 +1410,7 @@ fn decode_window(
     state: &mut whisper_rs::WhisperState,
     full_params: &whisper_rs::FullParams<'_, '_>,
     window: &AudioWindow,
+    policy: &crate::stream::WindowPolicy,
 ) -> Result<Vec<RawSegment>> {
     crate::with_suppressed_stderr(|| {
         state
@@ -1412,10 +1426,7 @@ fn decode_window(
             .to_str()
             .map_err(|e| anyhow!("Failed to get segment text: {:?}", e))?;
         let no_speech = seg.no_speech_probability();
-        if no_speech > NO_SPEECH_PROBABILITY {
-            // whisper reports a segment for audio that carries no speech
-            // now and then, with a text that it made up. The probability
-            // that the segment holds no speech tells the two apart.
+        if should_drop_no_speech_segment(no_speech, policy) {
             continue;
         }
         let start = window.start_sample + (seg.start_timestamp() as u64) * rate / 100;
@@ -1428,6 +1439,10 @@ fn decode_window(
         });
     }
     Ok(segments)
+}
+
+fn should_drop_no_speech_segment(probability: f32, policy: &crate::stream::WindowPolicy) -> bool {
+    matches!(policy, crate::stream::WindowPolicy::Live(_)) && probability > NO_SPEECH_PROBABILITY
 }
 
 /// What to do with a segment that a window reported.
@@ -1625,12 +1640,8 @@ fn filter_live_silent_segments(window: &AudioWindow, segments: &mut Vec<RawSegme
     });
 }
 
-/// The probability above which a segment is treated as an invention.
-///
-/// whisper reports a segment for audio that carries no speech now and then,
-/// with a text that it made up. The probability that the segment holds no
-/// speech tells the two apart: it is around 0.1 for speech and above 0.9
-/// for the silence of a window.
+/// The threshold for the live-only no-speech filter. The batch/file path
+/// retains Whisper's reported segments to preserve its previous behavior.
 const NO_SPEECH_PROBABILITY: f32 = 0.6;
 
 /// The smallest region at the beginning of a window that is treated as
@@ -1643,10 +1654,10 @@ const HOLE_MIN_SAMPLES: u64 = crate::chunked::WHISPER_SAMPLE_RATE as u64;
 /// that it gets the context it needs. The attempts are bounded, so that a
 /// segment that stays cut short does not cost an endless series of decodes.
 ///
-/// The bound is high enough to keep the behaviour of the batch policy of the
-/// previous release: a segment that covers a whole window is decoded again
-/// at every position the window drifts to, and the text of the recording
-/// comes out of that search.
+/// The bound is high enough to keep the behaviour of the batch policy for
+/// segments that are genuinely cut short: the text of the recording comes
+/// out of that search. A segment that covers a whole window is not
+/// re-decoded at all.
 const MAX_PROVISIONAL_ATTEMPTS: u32 = 32;
 
 /// The level below which a frame of audio is treated as silence.
@@ -1732,6 +1743,21 @@ mod tests {
             end,
             text: "text".to_string(),
         }
+    }
+
+    #[test]
+    fn batch_policy_keeps_segments_above_the_no_speech_threshold() {
+        let policy = crate::stream::WindowPolicy::Batch;
+        assert!(!should_drop_no_speech_segment(0.61, &policy));
+        assert!(!should_drop_no_speech_segment(0.99, &policy));
+    }
+
+    #[test]
+    fn live_policy_drops_only_segments_above_the_no_speech_threshold() {
+        let policy = crate::stream::WindowPolicy::Live(crate::stream::LiveWindowPolicy::default());
+        assert!(!should_drop_no_speech_segment(0.59, &policy));
+        assert!(!should_drop_no_speech_segment(0.6, &policy));
+        assert!(should_drop_no_speech_segment(0.61, &policy));
     }
 
     #[test]

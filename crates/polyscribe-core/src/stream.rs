@@ -254,6 +254,15 @@ pub trait WindowSource {
     /// The next window, or `None` at the end of the audio.
     fn next_window(&mut self, cancel: &CancellationToken) -> Result<Option<AudioWindow>>;
 
+    /// A window used to retry a region that was not transcribed.
+    ///
+    /// The final partial window may already have marked its source as
+    /// finished. Implementations keep its buffered samples available for
+    /// these bounded recovery attempts.
+    fn next_recovery_window(&mut self, cancel: &CancellationToken) -> Result<Option<AudioWindow>> {
+        self.next_window(cancel)
+    }
+
     /// Move the start of the next window.
     fn seek_to(&mut self, start_sample: u64);
 
@@ -346,6 +355,16 @@ impl WindowSource for StreamedAudio {
             };
             self.received += block.samples.len() as u64;
             self.assembler.push(&block.samples);
+        }
+        Ok(self.assembler.take_window(self.next_start))
+    }
+
+    fn next_recovery_window(&mut self, cancel: &CancellationToken) -> Result<Option<AudioWindow>> {
+        if !self.finished {
+            return self.next_window(cancel);
+        }
+        if cancel.is_cancelled() {
+            return Ok(None);
         }
         Ok(self.assembler.take_window(self.next_start))
     }
@@ -571,6 +590,31 @@ mod tests {
             lengths.last().copied(),
             Some(5 * STREAM_SAMPLE_RATE as usize)
         );
+    }
+
+    #[test]
+    fn a_final_partial_window_can_be_redecoded_for_recovery() {
+        let samples = (0..14).map(|sample| sample as f32).collect();
+        let config = crate::chunked::ChunkConfig {
+            window_samples: 10,
+            lookback_samples: 2,
+        };
+        let mut audio =
+            StreamedAudio::with_config(Box::new(ScriptedAudioSource::new(samples, 4)), config)
+                .unwrap();
+        let cancel = CancellationToken::new();
+
+        let first = audio.next_window(&cancel).unwrap().unwrap();
+        assert_eq!(first.samples.len(), 10);
+        audio.seek_to(10);
+        let final_window = audio.next_window(&cancel).unwrap().unwrap();
+        assert_eq!(final_window.samples, vec![10.0, 11.0, 12.0, 13.0]);
+
+        audio.seek_to(8);
+        let recovered = audio.next_recovery_window(&cancel).unwrap().unwrap();
+        assert_eq!(recovered.start_sample, 8);
+        assert_eq!(recovered.samples, vec![8.0, 9.0, 10.0, 11.0, 12.0, 13.0]);
+        assert!(audio.next_window(&cancel).unwrap().is_none());
     }
 
     #[test]

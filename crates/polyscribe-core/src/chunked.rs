@@ -192,18 +192,22 @@ impl WindowAssembler {
 
     /// Take a window that starts at `start_sample`.
     ///
-    /// Returns `None` when the recording ends before the window is full. The
-    /// samples of the window stay in the buffer, so a later window can
-    /// start inside it.
+    /// Returns `None` when the requested start is outside the retained audio
+    /// or no samples remain from that position. A window at the end of the
+    /// recording may be shorter than the configured window length. Its
+    /// samples stay in the buffer, so a later window can start inside it.
     pub fn take_window(&mut self, start_sample: u64) -> Option<AudioWindow> {
-        if start_sample < self.buffer_start {
+        if start_sample < self.buffer_start || start_sample >= self.decoded {
             // The window starts before the retained region, which cannot
-            // happen for a window that follows another one.
+            // happen for a window that follows another one, or at/after the
+            // end of decoded audio, which has no samples to return.
             return None;
         }
         // The samples in front of the window are only needed for the
         // lookback, so they are dropped up to that point.
-        let drop_before = start_sample.saturating_sub(self.lookback_samples as u64);
+        let drop_before = start_sample
+            .saturating_sub(self.lookback_samples as u64)
+            .max(self.buffer_start);
         let skip = (drop_before - self.buffer_start) as usize;
         if skip >= self.buffer.len() {
             return None;
@@ -215,6 +219,9 @@ impl WindowAssembler {
         // The window starts at start_sample, so the lookback in front of it
         // is skipped.
         let offset = (start_sample - self.buffer_start) as usize;
+        if offset >= self.buffer.len() {
+            return None;
+        }
         let count = self.window_samples.min(self.buffer.len() - offset);
         if count == 0 {
             return None;
@@ -442,6 +449,19 @@ impl crate::stream::WindowSource for ChunkedAudio {
         Ok(Some(window))
     }
 
+    fn next_recovery_window(
+        &mut self,
+        cancel: &crate::stream::CancellationToken,
+    ) -> anyhow::Result<Option<AudioWindow>> {
+        if !self.finished {
+            return crate::stream::WindowSource::next_window(self, cancel);
+        }
+        if cancel.is_cancelled() {
+            return Ok(None);
+        }
+        Ok(self.assembler.take_window(self.next_start))
+    }
+
     fn seek_to(&mut self, start_sample: u64) {
         self.next_start = start_sample;
     }
@@ -549,6 +569,71 @@ mod tests {
         let w = a.take_window(1).expect("the window is complete");
         assert_eq!(w.start_sample, 1);
         assert_eq!(w.samples, vec![2.0, 3.0, 4.0, 5.0]);
+    }
+
+    #[test]
+    fn test_window_can_rewind_within_the_retained_lookback() {
+        let mut a = WindowAssembler::new(ChunkConfig {
+            window_samples: 10,
+            lookback_samples: 2,
+        });
+        a.push(&(0..14).map(|sample| sample as f32).collect::<Vec<_>>());
+
+        let first = a.take_window(0).expect("the first window is complete");
+        assert_eq!(first.samples.len(), 10);
+        let last = a.take_window(10).expect("the final window is available");
+        assert_eq!(last.samples, vec![10.0, 11.0, 12.0, 13.0]);
+        assert_eq!(a.retained_from(), 8);
+        assert!(a.take_window(7).is_none());
+        assert_eq!(a.retained_from(), 8);
+
+        let recovery = a
+            .take_window(8)
+            .expect("the retained lookback can be decoded again");
+        assert_eq!(recovery.start_sample, 8);
+        assert_eq!(recovery.samples, vec![8.0, 9.0, 10.0, 11.0, 12.0, 13.0]);
+    }
+
+    #[test]
+    fn test_window_starting_beyond_decoded_audio_returns_none() {
+        let mut a = WindowAssembler::new(ChunkConfig {
+            window_samples: 10,
+            lookback_samples: 2,
+        });
+        a.push(&(0..10).map(|sample| sample as f32).collect::<Vec<_>>());
+
+        assert!(a.take_window(11).is_none());
+    }
+
+    #[test]
+    fn test_finished_file_source_can_retry_its_final_partial_window() {
+        let mut audio = ChunkedAudio {
+            audio_path: PathBuf::new(),
+            child: None,
+            stdout: None,
+            stderr_thread: None,
+            assembler: WindowAssembler::new(ChunkConfig {
+                window_samples: 10,
+                lookback_samples: 2,
+            }),
+            next_start: 8,
+            finished: true,
+        };
+        audio
+            .assembler
+            .push(&(0..14).map(|sample| sample as f32).collect::<Vec<_>>());
+        audio.assembler.take_window(0).unwrap();
+        let last = audio.assembler.take_window(10).unwrap();
+        assert_eq!(last.samples, vec![10.0, 11.0, 12.0, 13.0]);
+
+        let recovery = crate::stream::WindowSource::next_recovery_window(
+            &mut audio,
+            &crate::stream::CancellationToken::new(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(recovery.start_sample, 8);
+        assert_eq!(recovery.samples, vec![8.0, 9.0, 10.0, 11.0, 12.0, 13.0]);
     }
 
     #[test]
