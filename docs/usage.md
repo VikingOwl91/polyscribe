@@ -75,15 +75,19 @@ polyscribe record --language de --device voice_arctis_mono --window 5
     `transcribe` finds it (`WHISPER_MODEL`, the models directory, the model
     cache).
   - `--language LANG` — the language of the recording, e.g. `en`, `de`.
-    Without it the language is detected from the audio.
+    Without it multilingual models detect the language from speech. An
+    English-only model uses English directly and rejects non-English hints.
   - `--device NODE` — the PipeWire node to record from, e.g.
     `voice_arctis_mono`. Without it the default source of the session is
     used. A node that does not exist is refused: `pw-record` would record
-    from the default source instead and would not say so.
+    from the default source instead and would not say so. When the sources
+    of the session cannot be listed, the run continues and the risk is
+    named on stderr.
   - `--window SECONDS` — the length of a live window. The default is 5.
     Shorter windows show the text sooner and need more decoding.
-  - `-o, --output FILE` — write the transcript to this file as well. The
-    file is written while the recording runs.
+  - `-o, --output FILE` — write the transcript to this file as well,
+    replacing its existing contents. The file is written while the recording
+    runs.
   - `--gpu-backend [auto|cpu|cuda|hip]` — the backend, as in `transcribe`.
 - The capture needs a running PipeWire session and the program `pw-record`
   (the Arch package `pipewire-audio`).
@@ -97,12 +101,21 @@ polyscribe record --language de --device voice_arctis_mono --window 5
 - A segment that is still provisional may still change: the next window
   decodes the speech at the end of the window again, with the context it
   needs. Only a finalized segment is final, and it is never reported twice.
+- A live segment reaches the transcript only when its own audio interval
+  carries speech-level energy. The phrases that Whisper makes up for a
+  silent window stay out of the transcript, and a short utterance is kept
+  even when it fills only a small part of a window.
 - Ctrl+C stops the recording. The segments that were finalized are kept and
-  the exit status is 0. A capture that failed exits with a nonzero status.
-- The language detection: the first windows of a run are longer, so that
-  the detection has enough speech to work with. A language is only pinned
-  when the window carries speech; a language that was detected in silence
-  is a guess, and the guess is named on stderr.
+  the exit status is 0. A second Ctrl+C ends the run at once: the capture
+  is stopped and the process ends, because a whisper call that is running
+  is not interrupted. A capture that failed exits with a nonzero status.
+- Multilingual models detect the language by default. The first live
+  windows are longer to give the detector enough speech; a language is
+  pinned only when a window carries speech. If the startup windows contain
+  only silence, the last guess is pinned and named on stderr. English-only
+  models use English directly and skip detection.
+- The live-window quality and latency measurements are in
+  `docs/benchmarks/live-transcription.md`.
 
 ## Model loading
 

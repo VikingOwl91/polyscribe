@@ -92,8 +92,9 @@ impl ModelSession {
     /// A session for one model file.
     pub fn with_model(model_path: PathBuf) -> Self {
         Self {
+            english_only: is_english_only_model(&model_path),
             model_path: Some(model_path),
-            ..Self::default()
+            context: None,
         }
     }
 
@@ -107,11 +108,7 @@ impl ModelSession {
             return Ok(());
         }
         let model_path = find_model_file()?;
-        self.english_only = model_path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .map(|s| s.contains(".en.") || s.ends_with(".en.bin"))
-            .unwrap_or(false);
+        self.english_only = is_english_only_model(&model_path);
         self.model_path = Some(model_path);
         Ok(())
     }
@@ -138,6 +135,20 @@ impl ModelSession {
         self.context = Some(context);
         Ok(())
     }
+
+    /// Whether the model can only transcribe English.
+    ///
+    /// The flag is only known after the model was located, so it is false
+    /// before that.
+    pub fn is_english_only(&self) -> bool {
+        self.english_only
+    }
+}
+
+fn is_english_only_model(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.contains(".en.") || name.ends_with(".en.bin"))
 }
 
 /// A backend that keeps the loaded model for the whole invocation.
@@ -570,6 +581,14 @@ pub fn transcribe_stream(
         )
         .into());
     }
+    // An English-only model cannot transcribe anything else, so its
+    // language is not detected: the detector reports a language that the
+    // model cannot produce, and the recording would be transcribed with
+    // the wrong expectations.
+    let language = match (language, session.is_english_only()) {
+        (Language::Auto, true) => Language::Explicit("en".to_string()),
+        (language, _) => language,
+    };
 
     // Try to reduce native library logging via environment variables when not super-verbose.
     if crate::verbose_level() < 2 {
@@ -661,7 +680,7 @@ fn transcribe_windows(
     let mut emitted_end = 0.0f64;
     // The end of the transcribed timeline, in samples.
     let mut frontier = 0u64;
-    let mut window_count = 0u64;
+    let mut window_counts = WindowCounts::default();
     // The index of a segment that may have been cut short by the end of the
     // window. The next window decodes it again and replaces it.
     let mut provisional: Option<usize> = None;
@@ -693,7 +712,8 @@ fn transcribe_windows(
         // The length of the window follows the policy. The live policy
         // starts with a longer window and switches to the shorter one when
         // the language of the recording is known.
-        let window_samples = policy_window_samples(&policy, window_count, language_known);
+        let window_samples =
+            policy_window_samples(&policy, window_counts.startup_windows(), language_known);
         windows.set_window_samples(window_samples);
         let mut current = match window.take() {
             Some(current) => current,
@@ -702,16 +722,19 @@ fn transcribe_windows(
                 None => break,
             },
         };
-        window_count += 1;
+        let window_index = window_counts.submit_main_window();
         observer(crate::stream::StreamEvent::SamplesReceived {
             total: windows.received_samples(),
         });
         observer(crate::stream::StreamEvent::WindowSubmitted {
-            index: window_count - 1,
+            index: window_index,
             start_sample: current.start_sample,
             end_sample: current.start_sample + current.samples.len() as u64,
         });
         let mut segments = decode_window(state, &full_params, &current)?;
+        if matches!(&policy, crate::stream::WindowPolicy::Live(_)) {
+            filter_live_silent_segments(&current, &mut segments);
+        }
         // The language is detected once and pinned for the windows that
         // follow: the detector is not stable enough to be run on every
         // window, and a language that changes from window to window is
@@ -724,9 +747,10 @@ fn transcribe_windows(
         let detect_language = match &language {
             Language::Explicit(_) => false,
             Language::Auto => match &policy {
-                crate::stream::WindowPolicy::Batch => window_count == 1,
+                crate::stream::WindowPolicy::Batch => window_counts.startup_windows() == 1,
                 crate::stream::WindowPolicy::Live(live) => {
-                    detected.is_none() && window_count <= live.max_startup_windows as u64
+                    detected.is_none()
+                        && window_counts.startup_windows() <= live.max_startup_windows as u64
                 }
             },
         };
@@ -741,7 +765,7 @@ fn transcribe_windows(
             let last_startup = match &policy {
                 crate::stream::WindowPolicy::Batch => false,
                 crate::stream::WindowPolicy::Live(live) => {
-                    window_count >= live.max_startup_windows as u64
+                    window_counts.startup_windows() >= live.max_startup_windows as u64
                 }
             };
             if carries_speech || last_startup {
@@ -749,8 +773,9 @@ fn transcribe_windows(
                 if let Some(name) = whisper_rs::get_lang_str(id) {
                     if !carries_speech {
                         crate::ui::warn(format!(
-                            "{}: the language of the recording was not heard in the first {window_count} s of audio, so '{name}' is a guess. Use --language to set it.",
-                            input_name
+                            "{}: the language of the recording was not heard in the first {:.0} s of audio, so '{name}' is a guess. Use --language to set it.",
+                            input_name,
+                            current.end_seconds()
                         ));
                     }
                     // The name of the language is a static string, so the
@@ -806,9 +831,17 @@ fn transcribe_windows(
             let Some(next) = windows.next_window(cancel)? else {
                 break;
             };
-            window_count += 1;
+            let window_index = window_counts.submit_recovery_window();
             current = next;
+            observer(crate::stream::StreamEvent::WindowSubmitted {
+                index: window_index,
+                start_sample: current.start_sample,
+                end_sample: current.start_sample + current.samples.len() as u64,
+            });
             segments = decode_window(state, &full_params, &current)?;
+            if matches!(&policy, crate::stream::WindowPolicy::Live(_)) {
+                filter_live_silent_segments(&current, &mut segments);
+            }
             recovered = true;
             trace_window(&current, &segments);
         }
@@ -977,7 +1010,8 @@ fn transcribe_windows(
 
         windows.seek_to(next_start);
         // The window that follows has the length that the policy gives it.
-        let next_samples = policy_window_samples(&policy, window_count, language_known);
+        let next_samples =
+            policy_window_samples(&policy, window_counts.startup_windows(), language_known);
         windows.set_window_samples(next_samples);
         window = windows.next_window(cancel)?;
     }
@@ -1030,7 +1064,7 @@ fn transcribe_windows(
     Ok(TranscriptionResult {
         entries,
         outcome,
-        windows: window_count,
+        windows: window_counts.total_windows(),
         detected_language: detected,
     })
 }
@@ -1107,15 +1141,14 @@ fn speech_frame_ratio(samples: &[f32]) -> f64 {
     if samples.is_empty() {
         return 0.0;
     }
-    let mut loud = 0usize;
-    let mut frames = 0usize;
-    for frame in samples.chunks(ENERGY_FRAME_SAMPLES) {
-        frames += 1;
-        if rms_dbfs(frame) > HOLE_SPEECH_LEVEL_DBFS {
-            loud += 1;
-        }
-    }
-    loud as f64 / frames as f64
+    speech_frame_count(samples) as f64 / samples.chunks(ENERGY_FRAME_SAMPLES).count() as f64
+}
+
+fn speech_frame_count(samples: &[f32]) -> usize {
+    samples
+        .chunks(ENERGY_FRAME_SAMPLES)
+        .filter(|frame| rms_dbfs(frame) > HOLE_SPEECH_LEVEL_DBFS)
+        .count()
 }
 
 /// Whether the audio of a region carries enough speech to be speech that
@@ -1502,6 +1535,37 @@ const SEGMENT_CUT_TOLERANCE: f64 = 0.02;
 /// further away than the window itself.
 const MIN_WINDOW_ADVANCE_SECONDS: f64 = 15.0;
 
+#[derive(Debug, Default)]
+struct WindowCounts {
+    total: u64,
+    startup: u64,
+}
+
+impl WindowCounts {
+    fn submit_main_window(&mut self) -> u64 {
+        self.startup += 1;
+        self.submit()
+    }
+
+    fn submit_recovery_window(&mut self) -> u64 {
+        self.submit()
+    }
+
+    fn startup_windows(&self) -> u64 {
+        self.startup
+    }
+
+    fn total_windows(&self) -> u64 {
+        self.total
+    }
+
+    fn submit(&mut self) -> u64 {
+        let index = self.total;
+        self.total += 1;
+        index
+    }
+}
+
 /// The number of samples a window holds under the given policy.
 ///
 /// The batch policy uses the window of the whisper encoder, so that the
@@ -1510,7 +1574,7 @@ const MIN_WINDOW_ADVANCE_SECONDS: f64 = 15.0;
 /// recording is known, and the short window afterwards.
 fn policy_window_samples(
     policy: &crate::stream::WindowPolicy,
-    window_count: u64,
+    startup_window_count: u64,
     language_pinned: bool,
 ) -> usize {
     match policy {
@@ -1518,7 +1582,7 @@ fn policy_window_samples(
             crate::chunked::ChunkConfig::default().window_samples()
         }
         crate::stream::WindowPolicy::Live(live) => {
-            if language_pinned || window_count >= live.max_startup_windows as u64 {
+            if language_pinned || startup_window_count >= live.max_startup_windows as u64 {
                 live.window_samples
             } else {
                 live.startup_samples
@@ -1544,6 +1608,21 @@ fn min_advance_samples(policy: &crate::stream::WindowPolicy) -> u64 {
 /// and it does not claim that the speech was understood.
 fn window_carries_speech(window: &AudioWindow) -> bool {
     speech_frame_ratio(&window.samples) > HOLE_SPEECH_RATIO
+}
+
+fn filter_live_silent_segments(window: &AudioWindow, segments: &mut Vec<RawSegment>) {
+    let window_samples = window.samples.len() as u64;
+    segments.retain(|segment| {
+        let start = segment
+            .start
+            .saturating_sub(window.start_sample)
+            .min(window_samples) as usize;
+        let end = segment
+            .end
+            .saturating_sub(window.start_sample)
+            .min(window_samples) as usize;
+        start < end && speech_frame_count(&window.samples[start..end]) >= MIN_LIVE_SPEECH_FRAMES
+    });
 }
 
 /// The probability above which a segment is treated as an invention.
@@ -1579,6 +1658,9 @@ const HOLE_SPEECH_LEVEL_DBFS: f64 = -45.0;
 /// The share of the frames of a region that have to carry speech level
 /// energy before the region is decoded again.
 const HOLE_SPEECH_RATIO: f64 = 0.05;
+
+/// Number of speech-level energy frames needed to keep a live segment.
+const MIN_LIVE_SPEECH_FRAMES: usize = 2;
 
 /// The length of the frames the energy of a region is measured in.
 const ENERGY_FRAME_SAMPLES: usize = 320;
@@ -1650,6 +1732,37 @@ mod tests {
             end,
             text: "text".to_string(),
         }
+    }
+
+    #[test]
+    fn model_sessions_recognize_english_only_model_names() {
+        let english = ModelSession::with_model(PathBuf::from("/models/ggml-tiny.en.bin"));
+        let multilingual = ModelSession::with_model(PathBuf::from("/models/ggml-large-v3.bin"));
+        assert!(english.is_english_only());
+        assert!(!multilingual.is_english_only());
+    }
+
+    #[test]
+    fn recovery_windows_do_not_consume_the_live_startup_budget() {
+        let live = crate::stream::LiveWindowPolicy::default();
+        let policy = crate::stream::WindowPolicy::Live(live);
+        let mut counts = WindowCounts::default();
+
+        assert_eq!(counts.submit_main_window(), 0);
+        assert_eq!(counts.submit_recovery_window(), 1);
+        assert_eq!(counts.submit_recovery_window(), 2);
+        assert_eq!(counts.startup_windows(), 1);
+        assert_eq!(
+            policy_window_samples(&policy, counts.startup_windows(), false),
+            live.startup_samples
+        );
+
+        assert_eq!(counts.submit_main_window(), 3);
+        assert_eq!(counts.startup_windows(), 2);
+        assert_eq!(
+            policy_window_samples(&policy, counts.startup_windows(), false),
+            live.startup_samples
+        );
     }
 
     #[test]
@@ -1911,6 +2024,84 @@ mod tests {
             .iter_mut()
             .for_each(|s| *s = 0.5);
         assert!(speech_frame_ratio(&mostly_silence) < HOLE_SPEECH_RATIO);
+    }
+
+    #[test]
+    fn the_live_filter_keeps_a_short_utterance_in_a_sparse_window() {
+        let mut samples = vec![0.0; 5 * crate::chunked::WHISPER_SAMPLE_RATE as usize];
+        samples[..3_200].fill(0.5);
+        let window = AudioWindow {
+            start_sample: 0,
+            samples,
+        };
+        assert!(
+            !window_carries_speech(&window),
+            "the fixture must exercise the sparse-window case"
+        );
+        let mut segments = vec![
+            RawSegment {
+                start: 0,
+                end: window.samples.len() as u64,
+                text: "short utterance".to_string(),
+                no_speech: 0.1,
+            },
+            RawSegment {
+                start: 2 * crate::chunked::WHISPER_SAMPLE_RATE as u64,
+                end: 3 * crate::chunked::WHISPER_SAMPLE_RATE as u64,
+                text: "silence hallucination".to_string(),
+                no_speech: 0.1,
+            },
+        ];
+
+        filter_live_silent_segments(&window, &mut segments);
+
+        assert_eq!(segments.len(), 1, "unexpected segments after filtering");
+        assert_eq!(segments[0].text, "short utterance");
+    }
+
+    #[test]
+    fn the_live_filter_follows_the_position_of_the_window() {
+        // The timestamps of the segments are absolute, so the filter has to
+        // move them into the window before it reads the audio.
+        let start = 30 * crate::chunked::WHISPER_SAMPLE_RATE as u64;
+        let mut samples = vec![0.0; 5 * crate::chunked::WHISPER_SAMPLE_RATE as usize];
+        samples[..3_200].fill(0.5);
+        let window = AudioWindow {
+            start_sample: start,
+            samples,
+        };
+        let mut segments = vec![RawSegment {
+            start: start + 1_600,
+            end: start + 3_200,
+            text: "short utterance".to_string(),
+            no_speech: 0.1,
+        }];
+
+        filter_live_silent_segments(&window, &mut segments);
+
+        assert_eq!(
+            segments.len(),
+            1,
+            "the segment was dropped because the position of the window was ignored"
+        );
+    }
+
+    #[test]
+    fn the_live_filter_discards_a_silence_hallucination() {
+        let window = AudioWindow {
+            start_sample: 0,
+            samples: vec![0.0; 5 * crate::chunked::WHISPER_SAMPLE_RATE as usize],
+        };
+        let mut segments = vec![RawSegment {
+            start: 0,
+            end: window.samples.len() as u64,
+            text: "hallucination".to_string(),
+            no_speech: 0.1,
+        }];
+
+        filter_live_silent_segments(&window, &mut segments);
+
+        assert!(segments.is_empty(), "silent audio was kept as speech");
     }
 
     #[test]

@@ -90,8 +90,10 @@ file path keeps its behaviour.
 
 * **Samples received** are audio that arrived from the source. They are
   not transcribed yet.
-* **A window submitted** is a block of 30 seconds that was handed to
-  whisper. The windows are numbered in the order they were submitted.
+* **A window submitted** is a block of audio that was handed to
+  whisper. Its length follows the policy: 30 seconds for the batch policy,
+  the shorter live window for the live policy. The windows are numbered in
+  the order they were submitted.
 * **A segment** belongs to a window. The last segment of a window can
   be cut short by the end of the window, so it stays *provisional* until
   the next window confirms it. Only finalized segments reach the caller:
@@ -107,16 +109,20 @@ trace (`POLYSCRIBE_WINDOW_TRACE=1`) stays opt-in and separate from them.
 
 #### The language
 
-`Language::Auto` detects the language on the first window and pins it
-for the windows that follow, because the detector is not stable enough
-to run on every window and a language that changes from window to
-window is worse than one that is slightly wrong. `Language::Explicit`
-uses the language it is given, which is what the file path does today.
+`Language::Auto` detects the language on the first window of the batch
+policy and on the startup windows of the live policy, and pins it for the
+windows that follow, because the detector is not stable enough to run on
+every window. An English-only model selects English directly: language
+detection with that model can return a language it cannot transcribe.
+`Language::Explicit` uses the language it is given; an English-only model
+rejects a non-English hint. The file path keeps its existing
+explicit-language behavior.
 
-The workflow that brings the automatic detection to the user exists
-now: `polyscribe record` detects the language by default, and
-`--language` overrides it. The file path still requires `--language` and
-is unchanged.
+The workflow that brings automatic language selection to the user exists
+now: `polyscribe record` detects the language by default with a
+multilingual model, selects English with an English-only model, and lets
+`--language` override either choice. The file path still requires
+`--language` and is unchanged.
 
 #### What a microphone source has to do
 
@@ -130,21 +136,27 @@ know about PipeWire. The source that ships with the pipeline is
 #### Known limitations
 
 * The batch policy uses windows of 30 seconds, so the first finalized
-  segment of a live stream arrives after the second window. The live
-  policy uses shorter windows, and the window size also decides the
-  overlap and the recovery behaviour.
+  segment of a live stream arrives after 30 seconds of audio have been
+  collected and decoded, and a segment that is cut short by the end of the
+  window waits for the next one. The live policy uses shorter windows, and
+  the window size also decides the overlap and the recovery behaviour.
 * The stream is transcribed in windows, so the transcript of a live
   recording is complete up to the last finalized segment, not up to the
   last sample.
 * The cancellation is cooperative. A whisper call that is running is
   not interrupted, so the cancellation takes effect after it returns.
 * The live policy does not decode the same window again. A segment that
-  was cut short by the end of a live window stays as it is, while the
-  batch policy decodes it again with the context it needs.
+  covers a whole live window stays as it is, because a window of the same
+  length cannot give it more context, while the batch policy decodes a cut
+  short segment again with the context it needs.
 * The language of a live recording can only be detected on the longer
   startup windows. A recording that carries no speech in them is
   transcribed in the language that the last startup window reported,
   and a warning names that language as a guess.
+* A live segment is dropped when its own timestamped audio interval holds
+  less than two 20 ms frames above the speech-energy threshold. This filters
+  Whisper's guessed phrases for a silent window without dropping a short
+  utterance because it occupies little of a longer window.
 * The live capture needs a running PipeWire session and the program
   `pw-record`. Without them there is no source, and the file path stays
   the way to transcribe a recording.
@@ -197,14 +209,13 @@ format is refused with an error, instead of feeding misaligned audio
 into whisper.
 
 The child runs in its own process group, so a stop signal that reaches
-the terminal reaches the run first and the run stops the capture in a
-defined order. The child is also told to stop when the parent dies
-(PR_SET_PDEATHSIG with SIGTERM), so it cannot outlive the run.
+the terminal reaches the run first and the capture stops the whole group
+in a defined order. The child is also told to stop when the parent dies
+(PR_SET_PDEATHSIG with SIGTERM).
 
-The stop sequence is: SIGTERM to the child, wait up to 2 seconds, SIGKILL
-if it did not stop, reap the child, then join the reader and the stderr
-thread. The child is only signalled while it can still be running, so a
-process id that was already reused is never hit.
+Normal shutdown sends SIGTERM to the process group, waits up to 2 seconds
+for it to exit and sends SIGKILL if it remains. The direct child is reaped
+before the reader and stderr threads are joined.
 
 `pw-record` leaves with the exit code 1 when it is stopped by a signal.
 The capture therefore does not judge the exit code on its own: it knows
@@ -239,15 +250,16 @@ The window advances by at least half of its own length. The fixed 15
 seconds of the batch policy would make a live pipeline wait for audio
 that is further away than the window itself.
 
-The first windows of a live run are longer (10 seconds by default). The
-language of a recording is detected on them, because a short window
-carries too little speech for a reliable detection.
+The first windows of a live run are longer (10 seconds by default). A
+multilingual model detects the language on them, because a short window
+carries too little speech for a reliable detection. An English-only model
+selects English directly and skips this startup phase.
 
-The language is only pinned when the window carries speech. A language
-that was detected in silence is a guess, and a wrong guess is worse
-than a late one. When the startup windows are used up, the language is
-pinned anyway, so that the rest of the recording is transcribed in one
-language, and a warning names the guess.
+For a multilingual model, the language is only pinned when a window
+carries speech. A language detected in silence is a guess, and a wrong
+guess is worse than a late one. When the startup windows are used up,
+the language is pinned anyway, so that the rest of the recording is
+transcribed in one language, and a warning names the guess.
 
 An explicit `--language` skips the startup phase, because the language
 is known from the start.
@@ -265,6 +277,19 @@ segment that stays cut short cannot cost an endless series of decodes.
 The recovery of a region that whisper did not transcribe is the one of
 the batch path. It is not switched off by the shorter window.
 
+The segments of a live window are filtered by the energy of their own audio
+interval. A segment is kept when its interval holds at least two 20 ms frames
+above the speech-energy threshold. A window that only holds silence
+contributes nothing, and a short utterance is kept even when it is a small
+part of the window. A segment that whisper reports for a silence that lies
+next to real speech keeps the interval of that speech and survives the
+filter, because the filter cannot tell an invented segment from a real one
+that carries energy.
+
+The measured quality and latency of the live windows are in
+`docs/benchmarks/live-transcription.md`. The current five-second default
+has not been validated against natural speech.
+
 #### The output of the record command
 
 The standard output carries the transcript: one finalized segment per
@@ -280,8 +305,11 @@ A provisional segment may still change. Only a finalized segment is
 final, and it is never reported twice.
 
 Ctrl+C stops the recording, the segments that were finalized are kept
-and the exit status is 0. A capture that failed exits with a nonzero
-status.
+and the exit status is 0. The stop is cooperative: a whisper call that is
+running is not interrupted, so the run ends when the call returns. A
+second Ctrl+C ends the run at once: the capture is stopped and the
+process ends, because a user that presses the key again waits for
+nothing. A capture that failed exits with a nonzero status.
 
 ### Model context lifecycle
 

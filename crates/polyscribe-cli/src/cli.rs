@@ -96,7 +96,8 @@ pub enum Commands {
         model: Option<String>,
 
         /// Language code of the recording, e.g. en, de. Without it the
-        /// language is detected from the audio.
+        /// language is detected for multilingual models; English-only models
+        /// use English and reject non-English hints.
         #[arg(long)]
         language: Option<String>,
 
@@ -109,7 +110,7 @@ pub enum Commands {
         #[arg(long)]
         window: Option<f64>,
 
-        /// Write the transcript to this file as well
+        /// Write the transcript to this file as well, replacing its contents
         #[arg(short, long)]
         output: Option<PathBuf>,
 
@@ -298,6 +299,52 @@ mod tests {
     #[test]
     fn test_transcribe_requires_inputs() {
         assert!(Cli::try_parse_from(["polyscribe", "transcribe"]).is_err());
+    }
+
+    #[test]
+    fn test_record_parses() {
+        let cli = Cli::try_parse_from(["polyscribe", "record"]).unwrap();
+        let Commands::Record {
+            model,
+            language,
+            device,
+            window,
+            output,
+            gpu_backend,
+        } = cli.command
+        else {
+            panic!("expected the record command");
+        };
+        // The language is selected automatically when no language is given.
+        assert!(language.is_none());
+        assert!(model.is_none());
+        assert!(device.is_none());
+        assert!(window.is_none());
+        assert!(output.is_none());
+        assert!(matches!(gpu_backend, GpuBackend::Auto));
+
+        // The flags of the command.
+        Cli::try_parse_from([
+            "polyscribe",
+            "record",
+            "--model",
+            "/models/ggml-base.bin",
+            "--language",
+            "de",
+            "--device",
+            "voice_arctis_mono",
+            "--window",
+            "8",
+            "--output",
+            "out.txt",
+        ])
+        .unwrap();
+    }
+
+    #[test]
+    fn test_record_needs_no_argument() {
+        // The command takes no positional argument.
+        assert!(Cli::try_parse_from(["polyscribe", "record", "extra"]).is_err());
     }
 
     #[test]

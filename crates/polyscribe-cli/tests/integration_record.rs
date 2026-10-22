@@ -13,14 +13,25 @@ use std::process::Command;
 
 use assert_cmd::cargo::cargo_bin;
 
+#[cfg(unix)]
+use std::io::BufRead;
+#[cfg(unix)]
+use std::os::unix::process::ExitStatusExt;
+
 /// The program that stands in for `pw-record`.
 const FAKE_PROGRAM: &str = r#"#!/bin/sh
 . "$(dirname "$0")/config"
-if [ -n "$FAKE_FORMAT_LINE" ]; then
-  printf '%s\n' "$FAKE_FORMAT_LINE" >&2
+if [ "${FAKE_SKIP_FORMAT:-}" != "1" ]; then
+  printf '%s\n' "${FAKE_FORMAT_LINE:-raw: rate=16000 channels=1 fmt=s16 samplesize=2 stride=2}" >&2
 fi
 if [ -n "$FAKE_STDERR" ]; then
   printf '%s\n' "$FAKE_STDERR" >&2
+fi
+if [ -n "$FAKE_PID_FILE" ]; then
+  printf '%s\n' "$$" > "$FAKE_PID_FILE"
+fi
+if [ "${FAKE_IGNORE_TERM:-}" = "1" ]; then
+  trap '' TERM
 fi
 if [ -n "$FAKE_PCM" ] && [ -f "$FAKE_PCM" ]; then
   chunk=${FAKE_CHUNK:-32000}
@@ -33,6 +44,9 @@ if [ -n "$FAKE_PCM" ] && [ -f "$FAKE_PCM" ]; then
       sleep "$FAKE_DELAY"
     fi
   done
+fi
+if [ -n "$FAKE_SLEEP" ]; then
+  sleep "$FAKE_SLEEP"
 fi
 exit ${FAKE_EXIT:-0}
 "#;
@@ -223,6 +237,42 @@ fn the_transcript_is_written_to_the_output_file() {
 }
 
 #[test]
+fn the_transcript_output_file_replaces_existing_contents() {
+    let Some(model) = e2e_model() else {
+        eprintln!("SKIPPED: POLYSCRIBE_E2E_MODEL is not set; skipping the record tests");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let pcm = speech_pcm(dir.path(), 1);
+    let fake = Fake::new(&[("FAKE_PCM", &pcm.display().to_string())]);
+    let transcript = dir.path().join("transcript.txt");
+    std::fs::write(&transcript, "previous recording\n").unwrap();
+
+    let output = command(&fake)
+        .arg("record")
+        .arg("--model")
+        .arg(&model)
+        .arg("--language")
+        .arg("en")
+        .arg("--output")
+        .arg(&transcript)
+        .output()
+        .expect("the command runs");
+    assert!(
+        output.status.success(),
+        "the command failed: {:?}\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let written = std::fs::read_to_string(&transcript).unwrap();
+    assert_eq!(
+        written,
+        String::from_utf8_lossy(&output.stdout),
+        "the existing output file was not replaced with this run's transcript"
+    );
+}
+
+#[test]
 fn the_json_output_holds_one_object_per_line() {
     let Some(model) = e2e_model() else {
         eprintln!("SKIPPED: POLYSCRIBE_E2E_MODEL is not set; skipping the record tests");
@@ -263,6 +313,162 @@ fn the_json_output_holds_one_object_per_line() {
         lines += 1;
     }
     assert!(lines > 0, "the transcript is empty");
+    assert!(
+        output.stderr.is_empty(),
+        "JSON mode wrote status or provisional text to stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn an_english_only_model_uses_english_without_a_language_flag() {
+    let Some(model) = e2e_model() else {
+        eprintln!("SKIPPED: POLYSCRIBE_E2E_MODEL is not set; skipping the record tests");
+        return;
+    };
+    let english_only = model
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.contains(".en.") || name.ends_with(".en.bin"));
+    if !english_only {
+        eprintln!("SKIPPED: the configured end-to-end model is multilingual");
+        return;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let pcm = speech_pcm(dir.path(), 1);
+    let fake = Fake::new(&[("FAKE_PCM", &pcm.display().to_string())]);
+    let output = command(&fake)
+        .arg("record")
+        .arg("--model")
+        .arg(&model)
+        .output()
+        .expect("the command runs");
+
+    assert!(
+        output.status.success(),
+        "the command failed: {:?}\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let transcript = String::from_utf8_lossy(&output.stdout).to_lowercase();
+    assert!(
+        transcript.contains("short test recording"),
+        "the English-only model did not transcribe the English fixture: {transcript}"
+    );
+}
+
+#[test]
+fn an_english_only_model_rejects_a_non_english_language_hint() {
+    let Some(model) = e2e_model() else {
+        eprintln!("SKIPPED: POLYSCRIBE_E2E_MODEL is not set; skipping the record tests");
+        return;
+    };
+    let english_only = model
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.contains(".en.") || name.ends_with(".en.bin"));
+    if !english_only {
+        eprintln!("SKIPPED: the configured end-to-end model is multilingual");
+        return;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let pcm = speech_pcm(dir.path(), 1);
+    let fake = Fake::new(&[("FAKE_PCM", &pcm.display().to_string())]);
+    let output = command(&fake)
+        .arg("record")
+        .arg("--model")
+        .arg(&model)
+        .arg("--language")
+        .arg("de")
+        .output()
+        .expect("the command runs");
+
+    assert!(!output.status.success(), "the language hint was accepted");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("English-only") && stderr.contains("non-English"),
+        "the unsupported language hint was not explained: {stderr}"
+    );
+}
+
+#[test]
+fn silent_language_startup_reports_the_audio_duration_not_the_window_count() {
+    let Some(model) = e2e_model() else {
+        eprintln!("SKIPPED: POLYSCRIBE_E2E_MODEL is not set; skipping the record tests");
+        return;
+    };
+    let english_only = model
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.contains(".en.") || name.ends_with(".en.bin"));
+    if english_only {
+        eprintln!("SKIPPED: the configured end-to-end model is English-only");
+        return;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let silence = dir.path().join("silence.raw");
+    std::fs::write(&silence, vec![0u8; 30 * 16_000 * 2]).unwrap();
+    let fake = Fake::new(&[("FAKE_PCM", &silence.display().to_string())]);
+    let output = command(&fake)
+        .arg("record")
+        .arg("--model")
+        .arg(&model)
+        .arg("--window")
+        .arg("5")
+        .output()
+        .expect("the command runs");
+
+    assert!(
+        output.status.success(),
+        "the command failed: {:?}\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "silent audio produced transcript text: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("first 30 s of audio"),
+        "the warning did not report the 30 seconds of silent startup audio: {stderr}"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_transcript_write_failure_is_reported() {
+    let Some(model) = e2e_model() else {
+        eprintln!("SKIPPED: POLYSCRIBE_E2E_MODEL is not set; skipping the record tests");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let pcm = speech_pcm(dir.path(), 1);
+    let fake = Fake::new(&[("FAKE_PCM", &pcm.display().to_string())]);
+
+    let output = command(&fake)
+        .arg("record")
+        .arg("--model")
+        .arg(&model)
+        .arg("--language")
+        .arg("en")
+        .arg("--output")
+        .arg("/dev/full")
+        .output()
+        .expect("the command runs");
+    assert!(
+        !output.status.success(),
+        "a failed transcript write was reported as a success"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("No space left on device"),
+        "the output failure is missing from stderr: {stderr}"
+    );
 }
 
 #[test]
@@ -346,5 +552,105 @@ fn an_unknown_device_is_refused() {
     assert!(
         stderr.contains("no_such_node_in_this_session"),
         "the error does not name the device: {stderr}"
+    );
+}
+
+/// A second stop signal ends the run at once.
+///
+/// The first signal asks the run to stop at its next safe boundary. A
+/// whisper call that is running is not interrupted, so a user that asks
+/// twice waits for nothing: the run ends.
+#[cfg(unix)]
+#[test]
+fn a_second_stop_signal_ends_the_run_at_once() {
+    let Some(model) = e2e_model() else {
+        eprintln!("SKIPPED: POLYSCRIBE_E2E_MODEL is not set; skipping the record tests");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let pid_file = dir.path().join("pid");
+    // The capture ignores the stop signal of the group and stays open, so
+    // that the run is still busy when the second signal arrives.
+    let fake = Fake::new(&[
+        ("FAKE_IGNORE_TERM", "1"),
+        ("FAKE_SLEEP", "30"),
+        ("FAKE_PID_FILE", &pid_file.display().to_string()),
+    ]);
+
+    let mut child = command(&fake)
+        .arg("record")
+        .arg("--model")
+        .arg(&model)
+        .arg("--language")
+        .arg("en")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the command starts");
+
+    let stderr = child.stderr.take().expect("the error output is piped");
+    let mut lines = std::io::BufReader::new(stderr).lines();
+    let mut ready = false;
+    for line in lines.by_ref() {
+        if line.unwrap_or_default().contains("recording from") {
+            ready = true;
+            break;
+        }
+    }
+    assert!(ready, "the run never reported that it was recording");
+    let diagnostics = std::thread::spawn(move || {
+        let mut text = String::new();
+        for line in lines {
+            text.push_str(&line.unwrap_or_default());
+            text.push('\n');
+        }
+        text
+    });
+
+    // The first signal asks the run to stop, the second one ends it.
+    let pid = child.id() as libc::pid_t;
+    // SAFETY: the signal is sent to the process that was started here.
+    unsafe { libc::kill(pid, libc::SIGINT) };
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    // The capture ignores the stop signal of its group, so the first
+    // signal cannot end the run: it waits for the capture to stop.
+    assert!(
+        child.try_wait().expect("the status is readable").is_none(),
+        "the first signal ended the run"
+    );
+    // SAFETY: the signal is sent to the process that was started here.
+    unsafe { libc::kill(pid, libc::SIGINT) };
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let status = loop {
+        match child.try_wait().expect("the status is readable") {
+            Some(status) => break status,
+            None => {
+                if std::time::Instant::now() > deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("the run did not end after the second signal");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+    };
+    let text = diagnostics.join().unwrap_or_default();
+
+    // The capture is left behind by the forced exit, so it is stopped here.
+    // The capture runs in its own process group, so the group is stopped
+    // and not only the program itself.
+    if let Ok(pid) = std::fs::read_to_string(&pid_file)
+        && let Ok(pid) = pid.trim().parse::<libc::pid_t>()
+    {
+        // SAFETY: the signal is sent to the group of the capture that was
+        // started here.
+        unsafe { libc::kill(-pid, libc::SIGKILL) };
+    }
+
+    assert_eq!(
+        status.signal(),
+        Some(libc::SIGINT),
+        "the run was not ended by the second signal: {status:?}\n{text}"
     );
 }

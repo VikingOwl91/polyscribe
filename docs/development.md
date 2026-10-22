@@ -104,6 +104,9 @@ This document describes how to build, test, and run PolyScribe locally, and how 
   `cargo test --locked -p polyscribe-cli --test integration_live -- --ignored --nocapture`,
   with `POLYSCRIBE_LIVE_WINDOW_SECONDS` for the length of the window and
   `POLYSCRIBE_LIVE_POLICY=batch` for the reference of the batch path.
+  The test measures word-level WER against the fixture clips, first-finalized
+  latency, fast-run wall time, duplicate segments and peak RSS. The measured results
+  and their limits are in `docs/benchmarks/live-transcription.md`.
 
 ## Clippy and formatting
 

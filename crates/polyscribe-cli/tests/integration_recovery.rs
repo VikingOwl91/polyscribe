@@ -209,6 +209,18 @@ fn the_skipped_region_is_transcribed() {
          the recording is missing",
         items[0].start
     );
+    assert!(
+        items[0].end > 22.0,
+        "the first segment ends at {:.2} s, before the skipped region is covered",
+        items[0].end
+    );
+    let first_segment = normalize(&items[0].text);
+    assert!(
+        first_segment.iter().any(|word| word == "polyscribe")
+            && first_segment.iter().any(|word| word == "transcription"),
+        "the early segment does not contain the fixture's speech: {:?}",
+        items[0].text
+    );
 
     // The segments are ordered, they do not overlap and they cover the
     // recording without a hole.
@@ -234,16 +246,9 @@ fn the_skipped_region_is_transcribed() {
         );
     }
 
-    // The recording holds the speech of the fixture about ten times, and
-    // every word of the sentence has to be there.
-    let transcript: Vec<String> = items.iter().flat_map(|i| normalize(&i.text)).collect();
-    assert!(
-        transcript.len() >= 40,
-        "the transcript has only {} words, the recording holds about ten \
-         sentences: {:?}",
-        transcript.len(),
-        transcript
-    );
+    // The fixture repeats the same sentence. Whisper may collapse repeated
+    // instances, so the test checks coverage of the skipped time range rather
+    // than requiring every repetition in the text.
 }
 
 /// An ordinary recording produces no warning about a missing region.

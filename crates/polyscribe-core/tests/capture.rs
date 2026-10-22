@@ -23,14 +23,19 @@ use polyscribe_core::stream::{AudioSource, CancellationToken};
 /// that has to stay executable in the repository.
 const FAKE_PROGRAM: &str = r#"#!/bin/sh
 . "$(dirname "$0")/config"
-if [ -n "$FAKE_FORMAT_LINE" ]; then
-  printf '%s\n' "$FAKE_FORMAT_LINE" >&2
+if [ "${FAKE_SKIP_FORMAT:-}" != "1" ]; then
+  printf '%s\n' "${FAKE_FORMAT_LINE:-raw: rate=16000 channels=1 fmt=s16 samplesize=2 stride=2}" >&2
 fi
 if [ -n "$FAKE_STDERR" ]; then
   printf '%s\n' "$FAKE_STDERR" >&2
 fi
 if [ -n "$FAKE_SLEEP" ]; then
   sleep "$FAKE_SLEEP"
+fi
+if [ -n "$FAKE_DESCENDANT_PID_FILE" ]; then
+  sleep "${FAKE_DESCENDANT_SLEEP:-5}" &
+  echo "$!" > "$FAKE_DESCENDANT_PID_FILE"
+  wait
 fi
 if [ -n "$FAKE_PCM" ] && [ -f "$FAKE_PCM" ]; then
   chunk=${FAKE_CHUNK:-32000}
@@ -228,6 +233,29 @@ fn a_capture_with_the_wrong_format_is_refused() {
 }
 
 #[test]
+fn a_capture_without_a_reported_format_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let pcm = raw_pcm(dir.path(), "audio.raw", 4000);
+    let fake = Fake::new(&[
+        ("FAKE_PCM", &pcm.display().to_string()),
+        ("FAKE_SKIP_FORMAT", "1"),
+    ]);
+
+    let config = CaptureConfig::new().with_program(fake.program());
+    let mut capture = PipeWireCapture::new(config, CancellationToken::new()).unwrap();
+    let error = match drain(&mut capture) {
+        Ok(_) => panic!("the capture without a format report was accepted"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("did not report the raw audio format"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn a_capture_with_the_right_format_is_accepted() {
     let dir = tempfile::tempdir().unwrap();
     let pcm = raw_pcm(dir.path(), "audio.raw", 4000);
@@ -243,6 +271,30 @@ fn a_capture_with_the_right_format_is_accepted() {
     let mut capture = PipeWireCapture::new(config, CancellationToken::new()).unwrap();
     let samples = drain(&mut capture).unwrap();
     assert_eq!(samples.len(), 4000);
+}
+
+#[test]
+fn a_wait_error_is_reported_instead_of_a_clean_end() {
+    let fake = Fake::new(&[("FAKE_SLEEP", "0.1")]);
+    let config = CaptureConfig::new().with_program(fake.program());
+    let mut capture = PipeWireCapture::new(config, CancellationToken::new()).unwrap();
+    let pid = capture.child_pid().unwrap() as libc::pid_t;
+
+    let wait = std::thread::spawn(move || {
+        let mut status = 0;
+        // SAFETY: this test owns the capture child and no other thread waits
+        // for it before this call.
+        unsafe { libc::waitpid(pid, &mut status, 0) }
+    });
+    assert_eq!(wait.join().unwrap(), pid);
+
+    let error = capture
+        .next_block()
+        .expect_err("an external wait error must not be reported as clean EOF");
+    assert!(
+        error.to_string().contains("could not be waited for"),
+        "unexpected capture error: {error}"
+    );
 }
 
 #[test]
@@ -298,6 +350,42 @@ fn the_capture_leaves_no_child_behind() {
     assert!(
         !process_alive(pid),
         "the capture program {pid} is still running"
+    );
+}
+
+#[test]
+fn stopping_a_capture_stops_descendants_that_hold_its_pipes() {
+    let dir = tempfile::tempdir().unwrap();
+    let descendant_pid_file = dir.path().join("descendant.pid");
+    let fake = Fake::new(&[
+        (
+            "FAKE_DESCENDANT_PID_FILE",
+            &descendant_pid_file.display().to_string(),
+        ),
+        ("FAKE_DESCENDANT_SLEEP", "5"),
+    ]);
+    let config = CaptureConfig::new().with_program(fake.program());
+    let mut capture = PipeWireCapture::new(config, CancellationToken::new()).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !descendant_pid_file.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        descendant_pid_file.exists(),
+        "the fake descendant did not start"
+    );
+    let descendant: u32 = std::fs::read_to_string(&descendant_pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+
+    let started = std::time::Instant::now();
+    capture.stop();
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "stopping the capture waited for descendant {descendant} to exit: {elapsed:?}"
     );
 }
 

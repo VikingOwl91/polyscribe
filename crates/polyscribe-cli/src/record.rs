@@ -21,7 +21,7 @@
 
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
@@ -47,6 +47,18 @@ pub struct RecordArgs {
 
 /// The flag that the signal handler sets.
 static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// The number of stop signals that were received.
+///
+/// The first one asks the run to stop, the second one ends it at once.
+static STOP_SIGNALS: AtomicU32 = AtomicU32::new(0);
+
+/// The process group of the capture.
+///
+/// The signal handler stops the group when the run ends at once, because
+/// the capture is not unwound in that case. Zero means that no capture
+/// has been started.
+static CAPTURE_GROUP: AtomicU32 = AtomicU32::new(0);
 
 /// The test override for the capture program.
 ///
@@ -108,10 +120,20 @@ pub fn run(args: RecordArgs) -> Result<()> {
         .with_program(capture_program());
     config.format = PcmFormat::S16Le;
 
+    STOP_REQUESTED.store(false, Ordering::SeqCst);
+    STOP_SIGNALS.store(0, Ordering::SeqCst);
     install_signal_handlers();
 
     let cancel = CancellationToken::new();
+    // The watcher is started before the capture, so that a stop signal
+    // that arrives while the capture starts is not lost.
+    let _watcher = Watcher::start(cancel.clone());
     let capture = PipeWireCapture::new(config, cancel.clone())?;
+    // The group is remembered, so that a run that is ended at once stops
+    // the capture instead of leaving it behind.
+    if let Some(group) = capture.process_group() {
+        CAPTURE_GROUP.store(group, Ordering::SeqCst);
+    }
 
     // The capture is only ready when it delivers audio. Waiting for the
     // first samples tells the user that the microphone works, instead of
@@ -129,38 +151,53 @@ pub fn run(args: RecordArgs) -> Result<()> {
         );
     }
 
-    let watcher = watch_for_stop(cancel.clone());
+    if stop_requested() {
+        cancel.cancel();
+        polyscribe_core::ilog!("stopped with 0 finalized segment(s)");
+        return Ok(());
+    }
+
     let mut writer = SegmentWriter::new(args.output.clone(), args.json)?;
-    let mut observer = |event: StreamEvent| {
-        match event {
-            StreamEvent::SegmentProvisional { entry } => {
-                // The text may still change, so it goes to the standard
-                // error and not to the transcript.
-                eprintln!("… {}", entry.text);
+    let show_provisional = !args.json && !polyscribe_core::is_quiet();
+    let mut output_error = None;
+    let result = {
+        let mut observer = |event: StreamEvent| {
+            match event {
+                StreamEvent::SegmentProvisional { entry } => {
+                    // The text may still change, so it goes to the standard
+                    // error and not to the transcript.
+                    if show_provisional {
+                        eprintln!("… {}", entry.text);
+                    }
+                }
+                StreamEvent::SegmentFinalized { entry } => {
+                    if output_error.is_none()
+                        && let Err(error) = writer.write(&entry)
+                    {
+                        output_error = Some(error.context("the transcript could not be written"));
+                        cancel.cancel();
+                    }
+                }
+                _ => {}
             }
-            StreamEvent::SegmentFinalized { entry } => {
-                let _ = writer.write(&entry);
-            }
-            _ => {}
-        }
+        };
+
+        // The capture is stopped by its own drop, which happens inside the
+        // call above.
+        transcribe_stream(
+            &mut session,
+            selection.chosen,
+            Box::new(capture),
+            "speaker",
+            language,
+            policy,
+            &mut observer,
+            &cancel,
+        )
     };
-
-    let result = transcribe_stream(
-        &mut session,
-        selection.chosen,
-        Box::new(capture),
-        "speaker",
-        language,
-        policy,
-        &mut observer,
-        &cancel,
-    );
-
-    // The capture is stopped by its own drop, which happens inside the
-    // call above. The watcher is stopped here.
-    STOP_REQUESTED.store(true, Ordering::SeqCst);
-    let _ = watcher.join();
-
+    if let Some(error) = output_error {
+        return Err(error);
+    }
     let result = result?;
     writer.finish()?;
 
@@ -201,27 +238,88 @@ fn install_signal_handlers() {
 }
 
 /// The handler of the stop signals.
-extern "C" fn handle_stop(_signal: libc::c_int) {
+///
+/// The first signal asks the run to stop at its next safe boundary. The
+/// second one ends the run at once: a whisper call that is running is not
+/// interrupted, and a user that asks twice means it.
+extern "C" fn handle_stop(signal: libc::c_int) {
+    if STOP_SIGNALS.fetch_add(1, Ordering::SeqCst) > 0 {
+        // The capture is stopped first, because the process ends without
+        // unwinding it. `kill` is safe to call from a signal handler.
+        let group = CAPTURE_GROUP.load(Ordering::SeqCst);
+        if group != 0 {
+            // SAFETY: the group id was assigned to the capture child when
+            // it was started.
+            unsafe { libc::kill(-(group as libc::pid_t), libc::SIGTERM) };
+        }
+        // SAFETY: the default handler is restored and the signal is sent
+        // again, so the process ends the way it would end without a
+        // handler. The signal is pending while the handler runs and is
+        // delivered when it returns.
+        unsafe {
+            libc::signal(signal, libc::SIG_DFL);
+            let _ = libc::raise(signal);
+        }
+        return;
+    }
     STOP_REQUESTED.store(true, Ordering::SeqCst);
 }
 
-/// Watch for a stop signal and cancel the run.
-fn watch_for_stop(cancel: CancellationToken) -> std::thread::JoinHandle<()> {
-    std::thread::spawn(move || {
-        while !STOP_REQUESTED.load(Ordering::SeqCst) {
-            if cancel.is_cancelled() {
-                return;
+/// Whether a stop signal was received.
+fn stop_requested() -> bool {
+    STOP_REQUESTED.load(Ordering::SeqCst)
+}
+
+/// The thread that watches for a stop signal.
+///
+/// The thread is stopped when the guard is dropped, so that it cannot
+/// outlive the run, whatever path the run takes.
+struct Watcher {
+    handle: Option<std::thread::JoinHandle<()>>,
+    stop: std::sync::Arc<AtomicBool>,
+}
+
+impl Watcher {
+    /// Start watching for a stop signal.
+    fn start(cancel: CancellationToken) -> Self {
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let thread_stop = std::sync::Arc::clone(&stop);
+        let handle = std::thread::spawn(move || {
+            while !thread_stop.load(Ordering::SeqCst) {
+                if cancel.is_cancelled() {
+                    return;
+                }
+                if stop_requested() {
+                    cancel.cancel();
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(50));
             }
-            std::thread::sleep(Duration::from_millis(50));
+        });
+        Self {
+            handle: Some(handle),
+            stop,
         }
-        cancel.cancel();
-    })
+    }
+}
+
+impl Drop for Watcher {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
 }
 
 /// Wait for the first audio of the capture.
 fn wait_for_audio(capture: &PipeWireCapture) -> bool {
     let deadline = Instant::now() + READY_TIMEOUT;
     while Instant::now() < deadline {
+        if stop_requested() {
+            // The run was asked to stop while it was starting.
+            return false;
+        }
         if capture.samples_received() > 0 {
             return true;
         }
@@ -316,7 +414,8 @@ impl SegmentWriter {
             Some(path) => {
                 let file = std::fs::OpenOptions::new()
                     .create(true)
-                    .append(true)
+                    .write(true)
+                    .truncate(true)
                     .open(&path)
                     .with_context(|| {
                         format!("the output file could not be opened: {}", path.display())

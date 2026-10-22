@@ -17,6 +17,8 @@
 //! like the other end-to-end tests.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use polyscribe_core::backend::{Language, ModelSession, transcribe_stream};
@@ -26,9 +28,17 @@ use polyscribe_core::stream::{
 
 const SAMPLE_RATE: u32 = 16_000;
 
-/// The text of the committed fixture.
-const REFERENCE_TEXT: &str =
-    "this is a short test recording for the polyscribe end to end transcription test";
+/// The text and audio files used to compose a measurement recording.
+const MEASUREMENT_CLIPS: [(&str, &str); 5] = [
+    ("clip1.wav", "the quick brown fox jumps over the lazy dog"),
+    ("clip2.wav", "she sells sea shells by the sea shore"),
+    ("clip3.wav", "how much wood would a woodchuck chuck"),
+    ("clip4.wav", "the rain in spain stays mainly in the plain"),
+    (
+        "clip6.wav",
+        "we promptly judged antique ivory buckles for the next prize",
+    ),
+];
 
 /// The backend the tests run on.
 fn test_backend() -> polyscribe_core::backend::BackendKind {
@@ -111,15 +121,21 @@ fn varied(seconds: f64, phase: usize) -> Vec<f32> {
 /// The length can be changed with `POLYSCRIBE_LIVE_AUDIO_SECONDS`, the
 /// phase with `POLYSCRIBE_LIVE_PHASE`.
 fn measurement_audio() -> Vec<f32> {
-    let seconds: f64 = std::env::var("POLYSCRIBE_LIVE_AUDIO_SECONDS")
+    varied(measurement_seconds(), measurement_phase())
+}
+
+fn measurement_seconds() -> f64 {
+    std::env::var("POLYSCRIBE_LIVE_AUDIO_SECONDS")
         .ok()
         .and_then(|value| value.parse().ok())
-        .unwrap_or(30.0);
-    let phase: usize = std::env::var("POLYSCRIBE_LIVE_PHASE")
+        .unwrap_or(30.0)
+}
+
+fn measurement_phase() -> usize {
+    std::env::var("POLYSCRIBE_LIVE_PHASE")
         .ok()
         .and_then(|value| value.parse().ok())
-        .unwrap_or(0);
-    varied(seconds, phase)
+        .unwrap_or(0)
 }
 
 /// A fixture of the test directory.
@@ -248,13 +264,13 @@ struct Measurement {
 ///
 /// With `pace` the audio is delivered at the speed of the recording, so the
 /// measurement sees what a user sees. Without it the audio is delivered as
-/// fast as it can be consumed, so the measurement shows the cost of the
-/// decoding alone.
-fn measure(samples: Vec<f32>, policy: WindowPolicy, pace: bool) -> Measurement {
+/// fast as it can be consumed, so the measurement shows the fast-path
+/// wall time, including model loading.
+fn measure(samples: Vec<f32>, policy: WindowPolicy, pace: bool, model: PathBuf) -> Measurement {
     let block = SAMPLE_RATE as usize / 10;
     let source = RealtimeSource::new(samples, block, pace);
     let origin = Instant::now();
-    let mut session = ModelSession::new();
+    let mut session = ModelSession::with_model(model);
     let mut first_provisional = None;
     let mut first_finalized = None;
     let mut last_event = None;
@@ -292,6 +308,10 @@ fn measure(samples: Vec<f32>, policy: WindowPolicy, pace: bool) -> Measurement {
         &CancellationToken::new(),
     )
     .expect("the transcription does not fail");
+    assert_eq!(
+        windows, result.windows,
+        "every inference submission must emit WindowSubmitted"
+    );
     assert_eq!(
         result.entries.len(),
         entries.len(),
@@ -346,30 +366,50 @@ fn duplicate_count(entries: &[polyscribe_core::OutputEntry]) -> usize {
     duplicates
 }
 
-/// The words of the reference that the transcript does not hold.
-fn missing_words(entries: &[polyscribe_core::OutputEntry]) -> Vec<String> {
-    let reference = words(REFERENCE_TEXT);
-    let transcript = transcript_words(entries);
-    let mut missing = Vec::new();
-    for word in reference {
-        if !transcript.contains(&word) {
-            missing.push(word);
+/// The reference for the complete clips in a composed measurement recording.
+///
+/// A final clip can be cut by the end of the recording. It is excluded from
+/// the reference because its full utterance was not present in the audio.
+fn measurement_reference(seconds: f64, phase: usize) -> Vec<String> {
+    let total = (seconds * SAMPLE_RATE as f64) as usize;
+    let mut position = (phase as f64 * 0.41 * SAMPLE_RATE as f64) as usize;
+    let mut index = phase % MEASUREMENT_CLIPS.len();
+    let mut reference = Vec::new();
+
+    while position < total {
+        let (file, text) = MEASUREMENT_CLIPS[index % MEASUREMENT_CLIPS.len()];
+        let samples = wav_samples(&fixture(&format!("boundary/{file}"))).len();
+        if position + samples > total {
+            break;
         }
+        reference.extend(words(text));
+        position += samples + SAMPLE_RATE as usize / 2;
+        index += 1;
     }
-    missing
+    reference
 }
 
-/// The words of the transcript that the reference does not hold.
-fn extra_words(entries: &[polyscribe_core::OutputEntry]) -> Vec<String> {
-    let reference = words(REFERENCE_TEXT);
-    let transcript = transcript_words(entries);
-    let mut extra = Vec::new();
-    for word in transcript {
-        if !reference.contains(&word) {
-            extra.push(word);
+/// Word-level Levenshtein distance.
+fn edit_distance(reference: &[String], hypothesis: &[String]) -> usize {
+    let mut previous: Vec<usize> = (0..=hypothesis.len()).collect();
+    for (index, expected) in reference.iter().enumerate() {
+        let mut current = vec![index + 1; hypothesis.len() + 1];
+        for (column, actual) in hypothesis.iter().enumerate() {
+            current[column + 1] = if expected == actual {
+                previous[column]
+            } else {
+                1 + previous[column]
+                    .min(previous[column + 1])
+                    .min(current[column])
+            };
         }
+        previous = current;
     }
-    extra
+    previous[hypothesis.len()]
+}
+
+fn word_error_rate(reference: &[String], hypothesis: &[String]) -> f64 {
+    edit_distance(reference, hypothesis) as f64 / reference.len().max(1) as f64
 }
 
 /// The live policy produces ordered segments that are finalized once.
@@ -379,12 +419,8 @@ fn the_live_policy_produces_ordered_segments() {
         eprintln!("SKIPPED: POLYSCRIBE_E2E_MODEL is not set; skipping the live tests");
         return;
     };
-    // SAFETY: the test process sets the variable before the transcription
-    // reads it.
-    unsafe { std::env::set_var("WHISPER_MODEL", &model) };
-
     let policy = WindowPolicy::Live(LiveWindowPolicy::new(5.0));
-    let measurement = measure(speech(), policy, true);
+    let measurement = measure(speech(), policy, true, model);
 
     assert!(
         !measurement.entries.is_empty(),
@@ -408,6 +444,51 @@ fn the_live_policy_produces_ordered_segments() {
     );
 }
 
+#[test]
+fn the_measurement_reference_matches_the_composed_audio() {
+    assert_eq!(measurement_reference(4.0, 0), words(MEASUREMENT_CLIPS[0].1));
+    assert_eq!(measurement_reference(3.0, 0), Vec::<String>::new());
+    assert_eq!(measurement_reference(4.0, 1), words(MEASUREMENT_CLIPS[1].1));
+    assert_eq!(edit_distance(&words("one two"), &words("one three")), 1);
+}
+
+#[test]
+fn recovery_decodes_are_reported_as_window_submissions() {
+    let Some(model) = e2e_model() else {
+        eprintln!("SKIPPED: POLYSCRIBE_E2E_MODEL is not set; skipping the live tests");
+        return;
+    };
+    let samples = wav_samples(&fixture("recovery/skipped-22s.wav"));
+    let source = RealtimeSource::new(samples, SAMPLE_RATE as usize / 10, false);
+    let mut session = ModelSession::with_model(model);
+    let mut submitted = 0;
+    let result = transcribe_stream(
+        &mut session,
+        test_backend(),
+        Box::new(source),
+        "test",
+        Language::Explicit("en".to_string()),
+        WindowPolicy::Batch,
+        &mut |event: StreamEvent| {
+            if matches!(event, StreamEvent::WindowSubmitted { .. }) {
+                submitted += 1;
+            }
+        },
+        &CancellationToken::new(),
+    )
+    .expect("the transcription does not fail");
+
+    assert!(
+        result.windows > 2,
+        "the recovery fixture did not trigger a recovery decode: {} windows",
+        result.windows
+    );
+    assert_eq!(
+        submitted, result.windows,
+        "every inference window, including recovery decodes, must be reported"
+    );
+}
+
 /// The live policy reports the text while the recording is still running.
 #[test]
 fn the_live_policy_reports_the_text_before_the_source_ends() {
@@ -415,20 +496,173 @@ fn the_live_policy_reports_the_text_before_the_source_ends() {
         eprintln!("SKIPPED: POLYSCRIBE_E2E_MODEL is not set; skipping the live tests");
         return;
     };
-    unsafe { std::env::set_var("WHISPER_MODEL", &model) };
+    let samples = speech();
+    let total = samples.len() as u64;
+    // The source counts the samples it delivered, so that the test can see
+    // whether the recording was still running when the text appeared.
+    let delivered = Arc::new(AtomicU64::new(0));
+    let source = RealtimeSource::new(samples, SAMPLE_RATE as usize, true);
+    let source = CountingSource {
+        inner: source,
+        delivered: Arc::clone(&delivered),
+    };
 
-    let policy = WindowPolicy::Live(LiveWindowPolicy::new(3.0));
-    let measurement = measure(speech(), policy, true);
+    let mut session = ModelSession::with_model(model);
+    let mut first_finalized_at: Option<u64> = None;
+    transcribe_stream(
+        &mut session,
+        test_backend(),
+        Box::new(source),
+        "test",
+        Language::Explicit("en".to_string()),
+        WindowPolicy::Live(LiveWindowPolicy::new(3.0)),
+        &mut |event: StreamEvent| {
+            if let StreamEvent::SegmentFinalized { .. } = event
+                && first_finalized_at.is_none()
+            {
+                first_finalized_at = Some(delivered.load(Ordering::Relaxed));
+            }
+        },
+        &CancellationToken::new(),
+    )
+    .expect("the transcription does not fail");
 
-    let audio_seconds = speech().len() as f64 / SAMPLE_RATE as f64;
-    let first = measurement
-        .first_finalized
-        .expect("the live policy finalized a segment");
+    let delivered_at_first_segment =
+        first_finalized_at.expect("the live policy finalized a segment");
     assert!(
-        first.as_secs_f64() < audio_seconds,
-        "the first segment was finalized after {} s, the recording is {audio_seconds} s long",
-        first.as_secs_f64()
+        delivered_at_first_segment < total,
+        "the recording delivered all {total} samples before the first segment was finalized"
     );
+}
+
+/// A source that counts the samples it delivered.
+struct CountingSource {
+    inner: RealtimeSource,
+    delivered: Arc<AtomicU64>,
+}
+
+impl AudioSource for CountingSource {
+    fn sample_rate(&self) -> u32 {
+        self.inner.sample_rate()
+    }
+
+    fn channels(&self) -> u16 {
+        self.inner.channels()
+    }
+
+    fn next_block(&mut self) -> anyhow::Result<Option<AudioBlock>> {
+        let block = self.inner.next_block()?;
+        if let Some(block) = &block {
+            self.delivered
+                .fetch_add(block.samples.len() as u64, Ordering::Relaxed);
+        }
+        Ok(block)
+    }
+}
+
+/// The language of a recording is detected and pinned.
+#[test]
+fn the_language_is_detected() {
+    let Some(model) = e2e_model() else {
+        eprintln!("SKIPPED: POLYSCRIBE_E2E_MODEL is not set; skipping the live tests");
+        return;
+    };
+    let source = RealtimeSource::new(speech(), SAMPLE_RATE as usize, false);
+    let mut session = ModelSession::with_model(model);
+    let result = transcribe_stream(
+        &mut session,
+        test_backend(),
+        Box::new(source),
+        "test",
+        Language::Auto,
+        WindowPolicy::Live(LiveWindowPolicy::new(5.0)),
+        &mut |_event: StreamEvent| {},
+        &CancellationToken::new(),
+    )
+    .expect("the transcription does not fail");
+
+    let detected = result.detected_language.clone();
+    // The language of the recording is either detected or known from the
+    // model: an English-only model can only transcribe English, so its
+    // language is not detected at all.
+    if session.is_english_only() {
+        assert!(
+            detected.is_none(),
+            "an English-only model must not detect a language: {detected:?}"
+        );
+    } else {
+        assert_eq!(
+            detected.as_deref(),
+            Some("en"),
+            "the English recording was not detected as English"
+        );
+    }
+    assert!(
+        !result.entries.is_empty(),
+        "the recording was not transcribed"
+    );
+}
+
+/// Every segment of a live run is finalized, and the end of the stream
+/// flushes the last one.
+#[test]
+fn every_segment_is_finalized_once() {
+    let Some(model) = e2e_model() else {
+        eprintln!("SKIPPED: POLYSCRIBE_E2E_MODEL is not set; skipping the live tests");
+        return;
+    };
+    let source = RealtimeSource::new(speech(), SAMPLE_RATE as usize, false);
+    let mut session = ModelSession::with_model(model);
+    let mut finalized: Vec<polyscribe_core::OutputEntry> = Vec::new();
+    let mut provisional: Vec<polyscribe_core::OutputEntry> = Vec::new();
+    let mut completed = false;
+    let result = transcribe_stream(
+        &mut session,
+        test_backend(),
+        Box::new(source),
+        "test",
+        Language::Explicit("en".to_string()),
+        WindowPolicy::Live(LiveWindowPolicy::new(3.0)),
+        &mut |event: StreamEvent| match event {
+            StreamEvent::SegmentFinalized { entry } => finalized.push(entry),
+            StreamEvent::SegmentProvisional { entry } => provisional.push(entry),
+            StreamEvent::Completed { .. } => completed = true,
+            _ => {}
+        },
+        &CancellationToken::new(),
+    )
+    .expect("the transcription does not fail");
+
+    assert!(completed, "the run did not complete");
+    assert!(!finalized.is_empty(), "no segment was finalized");
+    // The end of the stream flushed every segment of the result.
+    assert_eq!(
+        finalized.len(),
+        result.entries.len(),
+        "the finalized events and the result hold a different number of segments"
+    );
+    // No segment is reported twice.
+    assert_eq!(
+        duplicate_count(&finalized),
+        0,
+        "a segment was finalized twice"
+    );
+    // The timestamps move forward.
+    for pair in finalized.windows(2) {
+        assert!(
+            pair[0].start <= pair[1].start,
+            "the segments are not ordered: {pair:?}"
+        );
+    }
+    // A provisional segment is not a final one.
+    for entry in &provisional {
+        assert!(
+            !finalized
+                .iter()
+                .any(|final_entry| final_entry.start == entry.start && final_entry.end == entry.end),
+            "a segment was reported as provisional and as final: {entry:?}"
+        );
+    }
 }
 
 /// The measurement of the live window policy.
@@ -445,22 +679,22 @@ fn measure_the_live_window() {
         eprintln!("SKIPPED: POLYSCRIBE_E2E_MODEL is not set; skipping the measurement");
         return;
     };
-    unsafe { std::env::set_var("WHISPER_MODEL", &model) };
-
     let policy = measurement_policy();
     let samples = measurement_audio();
     let audio_seconds = samples.len() as f64 / SAMPLE_RATE as f64;
 
     // The run at the speed of the recording: the latency of the text.
-    let live = measure(samples.clone(), policy, true);
+    let live = measure(samples.clone(), policy, true, model.clone());
     let wall = live.finished.duration_since(live.origin).as_secs_f64();
 
-    // The run as fast as the machine can: the cost of the decoding.
-    let fast = measure(samples, policy, false);
-    let decode = fast.finished.duration_since(fast.origin).as_secs_f64();
+    // The fast run delivers audio as soon as it is consumed. Its wall time
+    // includes loading the model.
+    let fast = measure(samples, policy, false, model);
+    let fast_wall = fast.finished.duration_since(fast.origin).as_secs_f64();
 
-    let missing = missing_words(&live.entries);
-    let extra = extra_words(&live.entries);
+    let reference = measurement_reference(measurement_seconds(), measurement_phase());
+    let hypothesis = transcript_words(&live.entries);
+    let errors = edit_distance(&reference, &hypothesis);
 
     println!("live window measurement");
     println!("  policy:              {policy:?}");
@@ -496,32 +730,85 @@ fn measure_the_live_window() {
         "  real time factor:    {:.2} (audio seconds per wall second)",
         audio_seconds / wall.max(0.001)
     );
-    println!("  decoding only:      {decode:.2} s");
+    println!("  fast-run wall:       {fast_wall:.2} s (includes model loading)");
     println!(
-        "  decode per call:     {:.2} s",
-        decode / live.decodes.max(1) as f64
+        "  fast-run per call:   {:.2} s",
+        fast_wall / live.decodes.max(1) as f64
     );
     println!(
         "  calls per audio s:   {:.2}",
         live.decodes as f64 / audio_seconds.max(0.001)
     );
     println!(
-        "  decode throughput:   {:.2} (audio seconds per decode second)",
-        audio_seconds / decode.max(0.001)
+        "  fast-path ratio:     {:.2} (audio seconds per fast-run wall second)",
+        audio_seconds / fast_wall.max(0.001)
     );
     println!(
-        "  headroom:            {:.2} (the live pace fits in the decode time)",
-        decode / audio_seconds.max(0.001)
+        "  fast-run / audio:    {:.2} (fast-run wall seconds per audio second)",
+        fast_wall / audio_seconds.max(0.001)
     );
     println!("  duplicate segments:  {}", duplicate_count(&live.entries));
-    println!("  missing words:       {missing:?}");
-    println!("  extra words:         {extra:?}");
+    println!("  reference words:     {}", reference.len());
     println!(
-        "  peak RSS:            {:.1} MB",
+        "  WER:                 {:.3} ({errors} word errors)",
+        word_error_rate(&reference, &hypothesis)
+    );
+    println!(
+        "  peak RSS (both runs): {:.1} MB",
         peak_rss() as f64 / 1024.0 / 1024.0
     );
     println!("  transcript:");
     for entry in &live.entries {
+        println!(
+            "    [{:7.2} -> {:7.2}] {}",
+            entry.start, entry.end, entry.text
+        );
+    }
+}
+
+/// The measurement of the language detection.
+///
+/// The recording is given with `POLYSCRIBE_LIVE_LANG_AUDIO`, the window
+/// with `POLYSCRIBE_LIVE_WINDOW_SECONDS`. The detection runs on the first
+/// window, so the recording has to carry speech.
+#[test]
+#[ignore = "a measurement, not a test"]
+fn measure_the_language_detection() {
+    let Some(model) = e2e_model() else {
+        eprintln!("SKIPPED: POLYSCRIBE_E2E_MODEL is not set; skipping the measurement");
+        return;
+    };
+    let Ok(audio) = std::env::var("POLYSCRIBE_LIVE_LANG_AUDIO") else {
+        eprintln!("SKIPPED: POLYSCRIBE_LIVE_LANG_AUDIO is not set");
+        return;
+    };
+
+    let policy = measurement_policy();
+    let samples = wav_samples(Path::new(&audio));
+    let audio_seconds = samples.len() as f64 / SAMPLE_RATE as f64;
+    let source = RealtimeSource::new(samples, SAMPLE_RATE as usize / 10, false);
+    let mut session = ModelSession::with_model(model);
+    let result = transcribe_stream(
+        &mut session,
+        test_backend(),
+        Box::new(source),
+        "test",
+        Language::Auto,
+        policy,
+        &mut |_event: StreamEvent| {},
+        &CancellationToken::new(),
+    )
+    .expect("the transcription does not fail");
+
+    println!("language detection measurement");
+    println!("  policy:              {policy:?}");
+    println!("  audio:               {audio_seconds:.2} s");
+    println!(
+        "  detected language:   {}",
+        result.detected_language.as_deref().unwrap_or("none")
+    );
+    println!("  segments:            {}", result.entries.len());
+    for entry in &result.entries {
         println!(
             "    [{:7.2} -> {:7.2}] {}",
             entry.start, entry.end, entry.text

@@ -103,6 +103,9 @@ ideas** (directional, not scheduled).
   can be cut in two, and the window that follows decodes it again.
 - The measured word error rate of the live windows against the reference is
   in `docs/benchmarks/live-transcription.md`.
+- The five-second default remains provisional. The current synthetic test
+  set favors 10 seconds for quality, but it is too small to choose a default
+  for natural speech or other languages.
 - AC: a window policy that overlaps the windows by the length of a word
   without paying for the extra decoding, with the same measurement as the
   evidence.

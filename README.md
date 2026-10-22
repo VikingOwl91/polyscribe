@@ -4,7 +4,7 @@ PolyScribe is a fast, local-first CLI for transcribing audio/video and merging e
 
 ## Features
 
-- **Live microphone transcription**: `polyscribe record` captures the microphone through PipeWire and transcribes it while the recording runs. The audio is decoded incrementally, the memory does not grow with the length of the recording, and the language of the recording is detected by default.
+- **Live microphone transcription**: `polyscribe record` captures the microphone through PipeWire and transcribes it while the recording runs. The audio is decoded incrementally, the memory does not grow with the length of the recording, and multilingual models detect the language by default.
 - **Local-first**: transcription runs fully offline once a model is present; network access is only used by the `models` subcommands (Hugging Face over HTTPS).
 - **Transcription**: audio and common video files are decoded to 16 kHz mono PCM via ffmpeg and transcribed with whisper.cpp.
 - **Transcript merging**: merge multiple JSON transcripts, or merge and also keep per-file outputs.
@@ -127,7 +127,7 @@ See `CONTRIBUTING.md` for the full checklist and `docs/development.md` for detai
 - `docs/ci.md` — CI checklist and job outline
 - `CONTRIBUTING.md` — PR checklist and workflow
 - `CHANGELOG.md` — notable changes
-- `docs/benchmarks/` — the chunked pipeline, its measurements and the boundary quality
+- `docs/benchmarks/` — chunked transcription, live-window quality, and backend measurements
 
 ## License
 

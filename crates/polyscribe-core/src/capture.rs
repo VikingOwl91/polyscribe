@@ -25,9 +25,9 @@
 //!   the reader waits, the pipe of the child fills up and the child waits:
 //!   the memory of the capture does not depend on the length of the
 //!   recording.
-//! * The child is asked to stop with `SIGTERM` and killed when it does not
-//!   stop in time. It is reaped either way, and it is killed when the
-//!   parent dies, so it cannot outlive the run.
+//! * The capture's process group is asked to stop with `SIGTERM` and killed
+//!   when it does not stop in time. The direct child is reaped, and it is
+//!   killed when the parent dies, so it cannot outlive the run.
 //!
 //! # What a stop means
 //!
@@ -40,7 +40,7 @@ use std::io::{BufRead, BufReader, Read as _};
 use std::process::{Child, ChildStderr, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -83,6 +83,9 @@ const READ_POLL: Duration = Duration::from_millis(50);
 
 /// How long the child gets to stop before it is killed.
 const STOP_GRACE: Duration = Duration::from_secs(2);
+
+/// How long the capture waits for `pw-record` to report its raw format.
+const FORMAT_REPORT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The raw PCM format the capture delivers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -263,6 +266,12 @@ struct ReportedFormat {
     sample_size: usize,
 }
 
+#[derive(Debug, Default)]
+struct ReportedFormatState {
+    format: Option<ReportedFormat>,
+    stderr_finished: bool,
+}
+
 /// The tail of the diagnostics of the child.
 #[derive(Debug, Default)]
 struct StderrTail {
@@ -299,7 +308,7 @@ pub struct PipeWireCapture {
     /// The diagnostics of the child, bounded.
     stderr: Arc<Mutex<StderrTail>>,
     /// The format the child reported for its raw output.
-    reported: Arc<Mutex<Option<ReportedFormat>>>,
+    reported: Arc<(Mutex<ReportedFormatState>, Condvar)>,
     /// Whether the capture was asked to stop.
     stop_requested: Arc<AtomicBool>,
     /// The token that asks the run to stop.
@@ -346,10 +355,20 @@ impl PipeWireCapture {
         // SAFETY: the child is put into its own process group and told to
         // stop when the parent dies. Both are a single system call, which
         // is safe between the fork and the exec.
+        let parent_pid = unsafe { libc::getpid() };
         unsafe {
             command.process_group(0);
-            command.pre_exec(|| {
-                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+            command.pre_exec(move || {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                // The parent can die between the fork and this call, and
+                // then the signal is never sent. The check catches that
+                // case, even if a subreaper adopts the child instead of
+                // PID 1.
+                if libc::getppid() != parent_pid {
+                    libc::_exit(1);
+                }
                 Ok(())
             });
         }
@@ -381,7 +400,7 @@ impl PipeWireCapture {
         let delivered = Arc::new(AtomicU64::new(0));
         let reader = spawn_reader(stdout, sender, config.format, Arc::clone(&delivered));
         let stderr_tail = Arc::new(Mutex::new(StderrTail::default()));
-        let reported = Arc::new(Mutex::new(None));
+        let reported = Arc::new((Mutex::new(ReportedFormatState::default()), Condvar::new()));
         let stderr_thread =
             spawn_stderr_reader(stderr, Arc::clone(&stderr_tail), Arc::clone(&reported));
 
@@ -419,6 +438,16 @@ impl PipeWireCapture {
         self.child.as_ref().map(|child| child.id())
     }
 
+    /// The process group of the capture.
+    ///
+    /// The child was started in its own process group, so the group id is
+    /// the id of the child. It is `None` when the capture has no child any
+    /// more. A caller that ends the run without unwinding the capture uses
+    /// it to stop the group.
+    pub fn process_group(&self) -> Option<u32> {
+        self.child.as_ref().map(|child| child.id())
+    }
+
     /// The diagnostics of the capture.
     pub fn diagnostics(&self) -> String {
         self.stderr.lock().unwrap().text()
@@ -426,36 +455,13 @@ impl PipeWireCapture {
 
     /// Stop the capture.
     ///
-    /// The child is asked to stop with `SIGTERM` and killed when it does
-    /// stop in time. It is reaped either way, and the threads that read it
-    /// are joined, so nothing is left behind.
+    /// The capture's process group is asked to stop with `SIGTERM` and killed
+    /// when it does not stop in time. The direct child is reaped, and the
+    /// threads that read it are joined, so nothing is left behind.
     pub fn stop(&mut self) {
         self.stop_requested.store(true, Ordering::SeqCst);
-        if let Some(child) = self.child.as_mut() {
-            // The child is only signalled while it can still be running. A
-            // child that left was reaped, and its process id can belong to
-            // another process by now.
-            if matches!(child.try_wait(), Ok(None)) {
-                send_signal(child.id(), libc::SIGTERM);
-            }
-            let deadline = Instant::now() + STOP_GRACE;
-            loop {
-                match child.try_wait() {
-                    Ok(Some(_)) => break,
-                    Ok(None) => {
-                        if Instant::now() >= deadline {
-                            let _ = child.kill();
-                            break;
-                        }
-                        std::thread::sleep(Duration::from_millis(20));
-                    }
-                    Err(_) => break,
-                }
-            }
-            // Reap the child. The status is not used here: a stop that was
-            // asked for is expected, and the exit code of `pw-record` is 1
-            // for a stop by signal.
-            let _ = child.wait();
+        if let Some(mut child) = self.child.take() {
+            stop_process_group(child.id(), Some(&mut child));
         }
         self.join_threads();
     }
@@ -479,11 +485,26 @@ impl PipeWireCapture {
     /// The check is what keeps a capture that delivers the wrong format
     /// from feeding misaligned audio into the pipeline.
     fn check_reported_format(&self) -> Result<()> {
-        let reported = self.reported.lock().unwrap().clone();
-        let Some(reported) = reported else {
-            // The child did not report a format. There is nothing to check.
-            return Ok(());
+        let (state, changed) = &*self.reported;
+        let deadline = Instant::now() + FORMAT_REPORT_TIMEOUT;
+        let mut state = state.lock().unwrap();
+        while state.format.is_none() && !state.stderr_finished {
+            let now = Instant::now();
+            if now >= deadline {
+                break;
+            }
+            let (next, timeout) = changed.wait_timeout(state, deadline - now).unwrap();
+            state = next;
+            if timeout.timed_out() {
+                break;
+            }
+        }
+        let Some(reported) = state.format.clone() else {
+            return Err(anyhow!(
+                "the audio capture did not report the raw audio format"
+            ));
         };
+        drop(state);
         ensure!(
             reported.rate == self.config.sample_rate,
             "the audio capture delivers {} Hz, the pipeline works with {} Hz",
@@ -518,10 +539,14 @@ impl PipeWireCapture {
     fn end_of_capture(&mut self) -> Result<Option<AudioBlock>> {
         self.finished = true;
         let status = self.reap();
+        // The format is checked after the child and stderr reader finish.
+        // Otherwise the raw-format line could still be in the pipe when
+        // the end of stdout is observed.
+        self.join_threads();
         if self.stop_requested.load(Ordering::SeqCst) {
             return Ok(None);
         }
-        match status {
+        match status? {
             Some(status) if !status.success() => {
                 let detail = self.diagnostics();
                 let detail = detail.trim();
@@ -536,6 +561,7 @@ impl PipeWireCapture {
                 ))
             }
             Some(status) => {
+                self.check_reported_format()?;
                 // The child left without an error. The source it recorded
                 // from is gone, so the recording ends here.
                 crate::dlog!(
@@ -553,25 +579,60 @@ impl PipeWireCapture {
     ///
     /// The wait is bounded: a child that closed its output but keeps
     /// running is killed instead of blocking the pipeline.
-    fn reap(&mut self) -> Option<std::process::ExitStatus> {
-        let child = self.child.as_mut()?;
-        if let Ok(Some(status)) = child.try_wait() {
-            return Some(status);
-        }
+    fn reap(&mut self) -> Result<Option<std::process::ExitStatus>> {
+        let Some(process_group) = self.child.as_ref().map(Child::id) else {
+            return Ok(None);
+        };
         let deadline = Instant::now() + STOP_GRACE;
         loop {
-            match child.try_wait() {
-                Ok(Some(status)) => return Some(status),
+            let waited = self
+                .child
+                .as_mut()
+                .expect("the capture child remains present while it is reaped")
+                .try_wait();
+            match waited {
+                Ok(Some(status)) => {
+                    if process_group_exists(process_group) {
+                        stop_process_group(process_group, None);
+                    }
+                    self.child.take();
+                    return Ok(Some(status));
+                }
                 Ok(None) => {
                     if Instant::now() >= deadline {
-                        let _ = child.kill();
-                        return child.wait().ok();
+                        send_group_signal(process_group, libc::SIGKILL);
+                        let waited = self
+                            .child
+                            .as_mut()
+                            .expect("the capture child remains present while it is reaped")
+                            .wait();
+                        match waited {
+                            Ok(status) => {
+                                self.child.take();
+                                return Ok(Some(status));
+                            }
+                            Err(error) => {
+                                return self.reap_after_wait_error(process_group, error);
+                            }
+                        }
                     }
                     std::thread::sleep(Duration::from_millis(20));
                 }
-                Err(_) => return None,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) => return self.reap_after_wait_error(process_group, error),
             }
         }
+    }
+
+    fn reap_after_wait_error(
+        &mut self,
+        process_group: u32,
+        error: std::io::Error,
+    ) -> Result<Option<std::process::ExitStatus>> {
+        if let Some(mut child) = self.child.take() {
+            stop_process_group(process_group, Some(&mut child));
+        }
+        Err(error).context("the audio capture process could not be waited for")
     }
 }
 
@@ -647,13 +708,52 @@ impl Drop for PipeWireCapture {
     }
 }
 
-/// Ask a process to stop.
-fn send_signal(pid: u32, signal: i32) {
-    // SAFETY: the pid belongs to a child of this process that was not
-    // reaped yet, so it names a process. A child that left already makes
-    // the call fail, which is not an error here.
+/// Stop a process group and reap its direct child when one is provided.
+fn stop_process_group(process_group: u32, mut child: Option<&mut Child>) {
+    if !process_group_exists(process_group) {
+        if let Some(child) = child {
+            let _ = child.wait();
+        }
+        return;
+    }
+
+    send_group_signal(process_group, libc::SIGTERM);
+    let deadline = Instant::now() + STOP_GRACE;
+    loop {
+        if let Some(child) = child.as_deref_mut() {
+            let _ = child.try_wait();
+        }
+        if !process_group_exists(process_group) {
+            break;
+        }
+        if Instant::now() >= deadline {
+            send_group_signal(process_group, libc::SIGKILL);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    if let Some(child) = child {
+        let _ = child.wait();
+    }
+}
+
+/// Whether a process group still has processes.
+fn process_group_exists(process_group: u32) -> bool {
+    // SAFETY: signal zero only checks whether the process group exists.
     unsafe {
-        libc::kill(pid as libc::pid_t, signal);
+        if libc::kill(-(process_group as libc::pid_t), 0) == 0 {
+            return true;
+        }
+    }
+    std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+/// Send a signal to the capture's process group.
+fn send_group_signal(process_group: u32, signal: i32) {
+    // SAFETY: the process group id was assigned to the capture child when
+    // it was started. A group that has already exited makes this fail.
+    unsafe {
+        libc::kill(-(process_group as libc::pid_t), signal);
     }
 }
 
@@ -705,19 +805,25 @@ fn spawn_reader(
 fn spawn_stderr_reader(
     stderr: ChildStderr,
     tail: Arc<Mutex<StderrTail>>,
-    reported: Arc<Mutex<Option<ReportedFormat>>>,
+    reported: Arc<(Mutex<ReportedFormatState>, Condvar)>,
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
         let reader = BufReader::new(stderr);
         for line in reader.lines() {
             let Ok(line) = line else { break };
             if let Some(format) = parse_reported_format(&line) {
-                *reported.lock().unwrap() = Some(format);
+                let (state, changed) = &*reported;
+                let mut state = state.lock().unwrap();
+                state.format = Some(format);
+                changed.notify_all();
             }
             let mut tail = tail.lock().unwrap();
             tail.push(line.as_bytes());
             tail.push(b"\n");
         }
+        let (state, changed) = &*reported;
+        state.lock().unwrap().stderr_finished = true;
+        changed.notify_all();
     })
 }
 
@@ -729,8 +835,11 @@ fn spawn_stderr_reader(
 /// ```text
 /// raw: rate=16000 channels=1 fmt=s16 samplesize=2 stride=2
 /// ```
+///
+/// The marker is looked for instead of at the beginning of the line, so
+/// that a build of `pw-record` that prefixes its messages still works.
 fn parse_reported_format(line: &str) -> Option<ReportedFormat> {
-    let rest = line.trim().strip_prefix("raw:")?;
+    let (_, rest) = line.rsplit_once("raw:")?;
     let mut rate = None;
     let mut channels = None;
     let mut format = None;
@@ -928,6 +1037,20 @@ mod tests {
     fn a_line_that_is_not_a_format_is_ignored() {
         assert!(parse_reported_format("stream state changed paused -> streaming").is_none());
         assert!(parse_reported_format("").is_none());
+    }
+
+    #[test]
+    fn a_prefixed_format_line_is_parsed() {
+        // A build of pw-record that prefixes its messages must still be
+        // understood, or the check of the format would never run.
+        let format = parse_reported_format(
+            "[pw-record.c(42):0:main] raw: rate=16000 channels=1 fmt=s16 samplesize=2 stride=2",
+        )
+        .expect("the line is parsed");
+        assert_eq!(format.rate, 16000);
+        assert_eq!(format.channels, 1);
+        assert_eq!(format.format, "s16");
+        assert_eq!(format.sample_size, 2);
     }
 
     #[test]
