@@ -145,10 +145,10 @@ know about PipeWire. The source that ships with the pipeline is
   last sample.
 * The cancellation is cooperative. A whisper call that is running is
   not interrupted, so the cancellation takes effect after it returns.
-* The live policy does not decode the same window again. A segment that
-  covers a whole live window stays as it is, because a window of the same
-  length cannot give it more context, while the batch policy decodes a cut
-  short segment again with the context it needs.
+* Neither policy re-decodes a segment that covers a whole window: such a
+  segment is complete, and a window of the same length cannot give it more
+  context. A segment that is genuinely cut short by the end of the window is
+  still re-decoded in the batch policy.
 * The language of a live recording can only be detected on the longer
   startup windows. A recording that carries no speech in them is
   transcribed in the language that the last startup window reported,
@@ -157,6 +157,9 @@ know about PipeWire. The source that ships with the pipeline is
   less than two 20 ms frames above the speech-energy threshold. This filters
   Whisper's guessed phrases for a silent window without dropping a short
   utterance because it occupies little of a longer window.
+* The live path also drops segments with a no-speech probability above 0.6.
+  The batch/file path does not apply this extra filter, so it retains the
+  behavior of the previous release.
 * The live capture needs a running PipeWire session and the program
   `pw-record`. Without them there is no source, and the file path stays
   the way to transcribe a recording.
@@ -210,12 +213,17 @@ into whisper.
 
 The child runs in its own process group, so a stop signal that reaches
 the terminal reaches the run first and the capture stops the whole group
-in a defined order. The child is also told to stop when the parent dies
-(PR_SET_PDEATHSIG with SIGTERM).
+in a defined order. Normal shutdown sends SIGTERM to the group and escalates
+to SIGKILL after two seconds. The direct child is reaped before the reader
+threads are joined.
 
-Normal shutdown sends SIGTERM to the process group, waits up to 2 seconds
-for it to exit and sends SIGKILL if it remains. The direct child is reaped
-before the reader and stderr threads are joined.
+Linux sends the direct child a catchable SIGTERM when the thread that created
+it exits (PR_SET_PDEATHSIG). This is best effort: it does not propagate to
+descendants, and the child may catch or ignore it. Descendants that remain in
+the process group are stopped during normal shutdown; descendants that leave
+it are outside the cleanup guarantee. The configured capture program runs
+with the caller's privileges and is not sandboxed. Keep its owning thread
+alive while the capture is in use.
 
 `pw-record` leaves with the exit code 1 when it is stopped by a signal.
 The capture therefore does not judge the exit code on its own: it knows

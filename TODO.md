@@ -44,21 +44,18 @@ ideas** (directional, not scheduled).
   recovered without a blind retry. The current check is a level and a share of
   frames, not a voice activity detector.
 
-### D9. The batch path decodes the same window again and again (P2, S)
-- A segment that covers a whole window stays provisional, because it
-  reaches the end of the window. The next window decodes it again, from
-  the position of the segment, and the position drifts by one sample per
-  attempt, until the segment is not cut short any more. The recovery
-  fixture of the repository needs 12 such attempts for its first window.
-- The live policy does not do this: a segment that covers the whole window
-  cannot get more context from a window of the same length, so it is
-  final. The batch policy keeps the behaviour of the previous release,
-  because the text of the recording comes out of that search.
-- The attempts are bounded now, so the pipeline cannot loop forever, but
-  the bound is high enough to keep the output of the batch path.
-- AC: decide whether the batch path should keep the search, and measure
-  what the text of the recordings with a segment over a whole window looks
-  like with and without it.
+### D9. The batch path no longer re-decodes a segment that covers a whole window (done in Sprint 12)
+- A segment that covers a whole window stayed provisional because it reached
+  the end of the window. The next window decoded it again, from the
+  position of the segment, and the position drifted by one sample per
+  attempt. A minute of silence with a hallucinated "Thank you." took 46
+  windows and produced 45 duplicate segments.
+- The live policy already skipped such a segment: a segment that covers the
+  whole window cannot get more context from a window of the same length. The
+  batch policy now does the same. A segment that is genuinely cut short (it
+  starts after the beginning of the window) is still re-decoded.
+- The attempts remain bounded by `MAX_PROVISIONAL_ATTEMPTS` for the segments
+  that are still re-decoded.
 
 ### D5. Non-Unix TTY detection (P3, S)
 - `stdin_is_tty` uses `std::io::IsTerminal` (correct); the remaining gap is
@@ -167,19 +164,20 @@ ideas** (directional, not scheduled).
   - **Local inference**: whisper.cpp is the only supported local engine. The
     openai-whisper CLI path of the Python tools is retired, not ported.
   - **Microphone**: genuine live audio streaming, not
-    record-to-WAV-then-transcribe. The streaming foundation is in place
-    (`polyscribe-core::stream`); a capture source is what is missing.
+    record-to-WAV-then-transcribe. `polyscribe record` now uses the streaming
+    foundation and a PipeWire capture source; it is Linux-only.
   - **Language**: automatic detection is the default, with an explicit
-    override. The core detects the language once and pins it; the command
-    line still requires `--language` and changes with the workflow that
-    brings the automatic default to the user.
-  - **Command line**: the workflows become `polyscribe` subcommands. No
-    compatibility wrappers for `stt` and `ytt` are kept.
+    override. The core detects the language once and pins it. `record` uses
+    automatic detection by default; file transcription still requires
+    `--language`.
+  - **Command line**: `polyscribe transcribe` and `polyscribe record` are
+    implemented workflows. The STT/YTT workflows are not yet migrated, and
+    no compatibility wrappers for `stt` or `ytt` are planned.
   - **Home Assistant**: the YTT bridge is not migrated.
-- Nothing about the migration is implemented yet, apart from the streaming
-  foundation it needs. The decisions that remain: the shape of the source
-  adapters, whether the remote engine (Voxtral) is a first-class engine, and
-  the versioning of the combined project.
+- The STT/YTT consolidation is not implemented yet. PolyScribe's live record
+  workflow is already in place; decisions that remain include the shape of
+  the source adapters, whether the remote engine (Voxtral) is a first-class
+  engine, and the versioning of the combined project.
 
 ### L4. ytt / STT-CLI integration (L)
 - Long-term direction: a reusable speech-processing foundation (file, mic,

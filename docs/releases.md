@@ -29,11 +29,16 @@ Rules:
 
 ## Pull requests
 
-- The review and the CI runs are required before a merge. Both GitHub Actions
-  and Gitea Actions run the same workflow (`.github/workflows/ci.yml`), and
-  both have to be green for the head that is merged.
-- The pull request is opened against Gitea, the source of truth. GitHub is
-  mirrored and its pull requests are not used for reviews.
+- Gitea is the canonical Git repository. Pull requests are opened there and
+  target `dev`; GitHub is the synchronized mirror and is not used for review.
+- GitHub Actions is authoritative for merge decisions. Every required check
+  must pass on the exact commit at the PR head before the merge. A green run
+  for an earlier commit does not satisfy this gate.
+- Gitea Actions checks are informational while no functional Gitea runner is
+  available. A missing Gitea runner is not a reason to bypass a failing GitHub
+  check.
+- Changes to CI authority or required checks need review and must be recorded
+  in `docs/ci.md` and this document.
 - Commits are focused and use the conventional prefix style: `[feat] …`,
   `[fix] …`, `[docs] …`, `[test] …`, `[refactor] …`, `[build] …`,
   `[chore] …`, `[release] …`.
@@ -49,9 +54,10 @@ Rules:
      the known limitations, and what changed since the previous release. The
      notes go into the release body on Gitea.
    - Update the documentation that the release changes (README, `docs/`).
-2. **Verify**: the whole checklist of `docs/ci.md` runs green on the release
-   commit, on Gitea and on GitHub, and the release is tested with real
-   inference on the supported platform.
+2. **Verify**: the checklist of `docs/ci.md` and all required GitHub Actions
+   checks pass on the release commit. Gitea Actions are informational while
+   no functional runner is available. Test the release with real inference on
+   the supported platform.
 3. **Tag** the release commit with an annotated, GPG-signed tag:
    `git tag -s -a vX.Y.Z <commit>`. The tag message names the release and
    the platform support. An unsigned tag is not a release.
@@ -68,11 +74,12 @@ Rules:
 
 - Gitea (`somegit.dev`) is the source of truth: pull requests, releases and
   the release archive live there.
-- GitHub is the mirror: the branches, the tags and the CI runs are mirrored so
-  that the repository is readable and buildable from both. A release is
-  published on Gitea; the GitHub tag is a mirror of it, not a second release.
+- GitHub is the synchronized mirror and runs the authoritative GitHub Actions
+  checks. A release is published on Gitea; the GitHub tag is a mirror of it,
+  not a second release.
 - The CI workflow is the same file on both platforms
-  (`.github/workflows/ci.yml`; Gitea Actions reads it too).
+  (`.github/workflows/ci.yml`). Gitea Actions are informational while its
+  runner is unavailable.
 
 ## What is not published
 

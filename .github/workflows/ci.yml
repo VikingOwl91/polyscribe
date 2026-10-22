@@ -113,6 +113,16 @@ jobs:
           # above and the same one test at a time.
           cargo test --locked -p polyscribe-cli --test integration_stream -- --test-threads=1 --nocapture
 
+      - name: Run live and recovery e2e tests
+        run: |
+          export POLYSCRIBE_E2E_MODEL="$HOME/.cache/polyscribe-e2e/ggml-tiny.en.bin"
+          # These suites cover live windows, window boundaries and recovery.
+          # The skipped-region file-recovery fixture needs a larger model.
+          cargo test --locked -p polyscribe-cli --test integration_boundary -- --test-threads=1 --nocapture
+          cargo test --locked -p polyscribe-cli --test integration_live -- --test-threads=1 --nocapture
+          cargo test --locked -p polyscribe-cli --test integration_recovery a_recording_with_varied_speech_is_transcribed_completely -- --exact --test-threads=1 --nocapture
+          cargo test --locked -p polyscribe-cli --test integration_recovery an_ordinary_recording_produces_no_warning -- --exact --test-threads=1 --nocapture
+
       - name: Run record e2e test
         run: |
           export POLYSCRIBE_E2E_MODEL="$HOME/.cache/polyscribe-e2e/ggml-tiny.en.bin"
