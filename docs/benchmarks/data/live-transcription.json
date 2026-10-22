@@ -1,0 +1,84 @@
+{
+  "date": "2026-10-22",
+  "model": "ggml-large-v3-turbo-q8_0.bin",
+  "model_sha256": "317eb69c11673c9de1e1f0d459b253999804ec71ac4c23c17ecf5fbe24e259a1",
+  "quality_backend": "CPU",
+  "machine": "AMD Ryzen 7 3700X",
+  "audio_seconds": 30,
+  "sample_rate": 16000,
+  "channels": 1,
+  "phases": [0, 1, 2],
+  "quality": [
+    {
+      "policy": "batch",
+      "window_seconds": 30,
+      "phase_errors": [10, 11, 15],
+      "phase_reference_words": [67, 67, 59],
+      "word_errors": 36,
+      "reference_words": 193,
+      "wer": 0.1865
+    },
+    {
+      "policy": "live",
+      "window_seconds": 10,
+      "phase_errors": [13, 14, 20],
+      "phase_reference_words": [67, 67, 59],
+      "word_errors": 47,
+      "reference_words": 193,
+      "wer": 0.2435
+    },
+    {
+      "policy": "live",
+      "window_seconds": 8,
+      "phase_errors": [15, 13, 21],
+      "phase_reference_words": [67, 67, 59],
+      "word_errors": 49,
+      "reference_words": 193,
+      "wer": 0.2539
+    },
+    {
+      "policy": "live",
+      "window_seconds": 5,
+      "phase_errors": [19, 26, 21],
+      "phase_reference_words": [67, 67, 59],
+      "word_errors": 66,
+      "reference_words": 193,
+      "wer": 0.3420
+    },
+    {
+      "policy": "live",
+      "window_seconds": 3,
+      "phase_errors": [20, 23, 25],
+      "phase_reference_words": [67, 67, 59],
+      "word_errors": 68,
+      "reference_words": 193,
+      "wer": 0.3523
+    }
+  ],
+  "hip": {
+    "runtime": "ROCm 7.2.4",
+    "gpu": "AMD Radeon RX 9070 XT",
+    "language": "en",
+    "phase": 0,
+    "peak_rss_scope": "combined process high-water mark after paced and fast runs",
+    "windows": [
+      {
+        "window_seconds": 10,
+        "first_finalized_seconds": 10.34,
+        "fast_run_wall_seconds_including_model_load": 1.49,
+        "whisper_calls": 4,
+        "word_errors": 13,
+        "peak_rss_mb": 388.3
+      },
+      {
+        "window_seconds": 5,
+        "first_finalized_seconds": 5.29,
+        "fast_run_wall_seconds_including_model_load": 2.42,
+        "whisper_calls": 9,
+        "word_errors": 19,
+        "peak_rss_mb": 387.4
+      }
+    ]
+  },
+  "timing_note": "CPU timings were discarded because unrelated CPU-heavy work made them unstable. HIP first-finalized times use explicit English and exclude the startup window used by automatic language detection."
+}

@@ -44,6 +44,19 @@ ideas** (directional, not scheduled).
   recovered without a blind retry. The current check is a level and a share of
   frames, not a voice activity detector.
 
+### D9. The batch path no longer re-decodes a segment that covers a whole window (done in Sprint 12)
+- A segment that covers a whole window stayed provisional because it reached
+  the end of the window. The next window decoded it again, from the
+  position of the segment, and the position drifted by one sample per
+  attempt. A minute of silence with a hallucinated "Thank you." took 46
+  windows and produced 45 duplicate segments.
+- The live policy already skipped such a segment: a segment that covers the
+  whole window cannot get more context from a window of the same length. The
+  batch policy now does the same. A segment that is genuinely cut short (it
+  starts after the beginning of the window) is still re-decoded.
+- The attempts remain bounded by `MAX_PROVISIONAL_ATTEMPTS` for the segments
+  that are still re-decoded.
+
 ### D5. Non-Unix TTY detection (P3, S)
 - `stdin_is_tty` uses `std::io::IsTerminal` (correct); the remaining gap is
   that Windows/macOS are not CI-tested.
@@ -69,10 +82,30 @@ ideas** (directional, not scheduled).
   by speaker turn; keep manual labels as the default; document that
   diarization is approximate.
 
-### F2. Live microphone / URL ingestion (P3, M)
-- Only local files are supported today.
-- AC (future): mic capture via `cpal`, YouTube/URL ingestion via an external
-  downloader. Requires the engine/CLI split to be exercised first.
+### F2. Live microphone ingestion (done in sprint 12, partly)
+- `polyscribe record` captures the microphone through PipeWire and
+  transcribes it while the recording runs. The capture is a supervised
+  `pw-record` child, the samples are decoded incrementally and the memory
+  does not grow with the length of the recording.
+- Still open:
+  - URL ingestion is not wired up. The engine/CLI split that it needs
+    exists now.
+  - The capture is Linux only, and only PipeWire. A native binding or an
+    ALSA backend would widen it, at the price of a dependency.
+- AC: a `--source` that takes a URL, with the same streaming contract.
+
+### F5. A live window that keeps the quality of the batch window (P2, M)
+- The live policy uses shorter windows, so that the text appears while the
+  recording runs. A short window splits the speech at its end, so a word
+  can be cut in two, and the window that follows decodes it again.
+- The measured word error rate of the live windows against the reference is
+  in `docs/benchmarks/live-transcription.md`.
+- The five-second default remains provisional. The current synthetic test
+  set favors 10 seconds for quality, but it is too small to choose a default
+  for natural speech or other languages.
+- AC: a window policy that overlaps the windows by the length of a word
+  without paying for the extra decoding, with the same measurement as the
+  evidence.
 
 ### F3. Parallel transcription of multiple files (P3, M)
 - Inputs are processed sequentially. A `--jobs N` flag could parallelize
@@ -131,19 +164,20 @@ ideas** (directional, not scheduled).
   - **Local inference**: whisper.cpp is the only supported local engine. The
     openai-whisper CLI path of the Python tools is retired, not ported.
   - **Microphone**: genuine live audio streaming, not
-    record-to-WAV-then-transcribe. The streaming foundation is in place
-    (`polyscribe-core::stream`); a capture source is what is missing.
+    record-to-WAV-then-transcribe. `polyscribe record` now uses the streaming
+    foundation and a PipeWire capture source; it is Linux-only.
   - **Language**: automatic detection is the default, with an explicit
-    override. The core detects the language once and pins it; the command
-    line still requires `--language` and changes with the workflow that
-    brings the automatic default to the user.
-  - **Command line**: the workflows become `polyscribe` subcommands. No
-    compatibility wrappers for `stt` and `ytt` are kept.
+    override. The core detects the language once and pins it. `record` uses
+    automatic detection by default; file transcription still requires
+    `--language`.
+  - **Command line**: `polyscribe transcribe` and `polyscribe record` are
+    implemented workflows. The STT/YTT workflows are not yet migrated, and
+    no compatibility wrappers for `stt` or `ytt` are planned.
   - **Home Assistant**: the YTT bridge is not migrated.
-- Nothing about the migration is implemented yet, apart from the streaming
-  foundation it needs. The decisions that remain: the shape of the source
-  adapters, whether the remote engine (Voxtral) is a first-class engine, and
-  the versioning of the combined project.
+- The STT/YTT consolidation is not implemented yet. PolyScribe's live record
+  workflow is already in place; decisions that remain include the shape of
+  the source adapters, whether the remote engine (Voxtral) is a first-class
+  engine, and the versioning of the combined project.
 
 ### L4. ytt / STT-CLI integration (L)
 - Long-term direction: a reusable speech-processing foundation (file, mic,

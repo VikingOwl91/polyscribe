@@ -87,6 +87,40 @@ pub enum Commands {
         inputs: Vec<PathBuf>,
     },
 
+    /// Record the microphone and transcribe it while it records
+    Record {
+        /// The Whisper model to use: a path to a model file, or the name of
+        /// a model in the models directory. Without it the model is found
+        /// the way `transcribe` finds it.
+        #[arg(long)]
+        model: Option<String>,
+
+        /// Language code of the recording, e.g. en, de. Without it the
+        /// language is detected for multilingual models; English-only models
+        /// use English and reject non-English hints.
+        #[arg(long)]
+        language: Option<String>,
+
+        /// The PipeWire node to record from, e.g. voice_arctis_mono.
+        /// Without it the default source of the session is used.
+        #[arg(long)]
+        device: Option<String>,
+
+        /// The length of a live window in seconds. The default is 5.
+        #[arg(long)]
+        window: Option<f64>,
+
+        /// Write the transcript to this file as well, replacing its contents
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+
+        /// Transcription backend among those compiled in (auto|cpu|cuda|hip).
+        /// GPU backends require a build with the matching cargo feature
+        /// (gpu-cuda, gpu-hip). Default: auto.
+        #[arg(long, value_enum, default_value_t = GpuBackend::Auto)]
+        gpu_backend: GpuBackend,
+    },
+
     /// Manage Whisper GGUF models (Hugging Face)
     Models {
         #[command(subcommand)]
@@ -265,6 +299,52 @@ mod tests {
     #[test]
     fn test_transcribe_requires_inputs() {
         assert!(Cli::try_parse_from(["polyscribe", "transcribe"]).is_err());
+    }
+
+    #[test]
+    fn test_record_parses() {
+        let cli = Cli::try_parse_from(["polyscribe", "record"]).unwrap();
+        let Commands::Record {
+            model,
+            language,
+            device,
+            window,
+            output,
+            gpu_backend,
+        } = cli.command
+        else {
+            panic!("expected the record command");
+        };
+        // The language is selected automatically when no language is given.
+        assert!(language.is_none());
+        assert!(model.is_none());
+        assert!(device.is_none());
+        assert!(window.is_none());
+        assert!(output.is_none());
+        assert!(matches!(gpu_backend, GpuBackend::Auto));
+
+        // The flags of the command.
+        Cli::try_parse_from([
+            "polyscribe",
+            "record",
+            "--model",
+            "/models/ggml-base.bin",
+            "--language",
+            "de",
+            "--device",
+            "voice_arctis_mono",
+            "--window",
+            "8",
+            "--output",
+            "out.txt",
+        ])
+        .unwrap();
+    }
+
+    #[test]
+    fn test_record_needs_no_argument() {
+        // The command takes no positional argument.
+        assert!(Cli::try_parse_from(["polyscribe", "record", "extra"]).is_err());
     }
 
     #[test]

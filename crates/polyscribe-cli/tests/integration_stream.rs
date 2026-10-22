@@ -134,6 +134,7 @@ impl Run {
                 Box::new(source),
                 "test",
                 Language::Explicit("en".to_string()),
+                polyscribe_core::stream::WindowPolicy::Batch,
                 &mut |event: StreamEvent| {
                     let _ = sender.send(event);
                 },
@@ -263,6 +264,7 @@ fn a_stream_and_the_same_file_produce_the_same_transcript() {
         Box::new(ScriptedAudioSource::new(samples.clone(), 4096)),
         "test",
         Language::Explicit("en".to_string()),
+        polyscribe_core::stream::WindowPolicy::Batch,
         &mut |event: StreamEvent| events.push(event),
         &CancellationToken::new(),
     )
@@ -313,6 +315,7 @@ fn the_segments_of_a_stream_are_ordered_and_unique() {
         Box::new(ScriptedAudioSource::new(long_recording(), 8192)),
         "test",
         Language::Explicit("en".to_string()),
+        polyscribe_core::stream::WindowPolicy::Batch,
         &mut |event: StreamEvent| events.push(event),
         &CancellationToken::new(),
     )
@@ -393,6 +396,7 @@ fn a_cancelled_stream_stops_and_reports_nothing_provisional() {
             Box::new(source),
             "test",
             Language::Explicit("en".to_string()),
+            polyscribe_core::stream::WindowPolicy::Batch,
             &mut |event: StreamEvent| {
                 let _ = sender.send(event);
             },
@@ -459,6 +463,7 @@ fn a_failing_source_ends_the_run() {
         Box::new(source),
         "test",
         Language::Explicit("en".to_string()),
+        polyscribe_core::stream::WindowPolicy::Batch,
         &mut |_event: StreamEvent| {},
         &CancellationToken::new(),
     ) {
@@ -500,6 +505,7 @@ fn measure_the_streaming_transcription() {
         Box::new(source),
         "test",
         Language::Explicit("en".to_string()),
+        polyscribe_core::stream::WindowPolicy::Batch,
         &mut |event: StreamEvent| match event {
             StreamEvent::SamplesReceived { total } => {
                 // The audio that is not part of a window yet.

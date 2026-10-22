@@ -12,10 +12,13 @@ Workflow (fork → branch → PR)
 4) Run the checklist below.
 5) Push and open a Pull request against `dev` on Gitea, the source of truth.
 
-The branch model, the release procedure and the platform roles are described
-in `docs/releases.md`. In short: `dev` is the integration branch, `main`
-carries the latest published release, feature branches are short-lived, pull
-requests need a review and green CI, and `main` is never force-pushed.
+The branch model, release procedure and platform roles are described in
+`docs/releases.md`. Gitea is the canonical repository and GitHub is its
+synchronized mirror. GitHub Actions is the authoritative CI for merges: every
+required check must pass on the exact PR head. Gitea Actions are informational
+while no functional Gitea runner is available. A missing Gitea runner does not
+justify bypassing a failing GitHub check. CI policy changes need review and
+must be documented in `docs/ci.md` and `docs/releases.md`.
 
 Developer checklist (before opening a PR)
 - Format:
