@@ -142,6 +142,30 @@ pub enum Commands {
 
     /// Generate a man page to stdout
     Man,
+
+    /// Retrieve and transcribe YouTube captions
+    #[command(name = "youtube")]
+    YouTube {
+        /// YouTube URL (watch, youtu.be, embed, or shorts)
+        url: String,
+
+        /// Caption language code, e.g. en, de. Without it the best
+        /// available track is selected automatically.
+        #[arg(long)]
+        language: Option<String>,
+
+        /// Output format: txt, srt, or json.
+        #[arg(long, default_value = "txt")]
+        format: String,
+
+        /// Output file path. Without it the transcript goes to stdout.
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+
+        /// Prefer manual captions over automatic ones.
+        #[arg(long, default_value_t = true)]
+        prefer_manual: bool,
+    },
 }
 
 #[derive(Debug, Clone, Parser)]

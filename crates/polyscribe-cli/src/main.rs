@@ -2,6 +2,7 @@ mod cli;
 mod output;
 mod record;
 mod transcribe;
+mod youtube;
 
 use anyhow::{Context, Result, anyhow};
 use clap::{CommandFactory, Parser};
@@ -667,5 +668,13 @@ fn main() -> Result<()> {
             man.render(&mut std::io::stdout())?;
             Ok(())
         }
+
+        Commands::YouTube {
+            url,
+            language,
+            format,
+            output,
+            prefer_manual,
+        } => youtube::run(url, language, format, output, prefer_manual),
     }
 }
