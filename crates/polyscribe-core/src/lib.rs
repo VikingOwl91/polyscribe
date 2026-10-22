@@ -160,6 +160,7 @@ macro_rules! dlog {
 }
 
 pub mod backend;
+pub mod capture;
 pub mod chunked;
 pub mod config;
 pub mod error;

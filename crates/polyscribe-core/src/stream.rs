@@ -133,6 +133,18 @@ pub enum StreamEvent {
         /// The sample after the window.
         end_sample: u64,
     },
+    /// A segment that may still change.
+    ///
+    /// The last segment of a window can be cut short by the end of the
+    /// window, so it stays provisional until the next window confirms it.
+    /// A provisional segment is reported for the caller that wants to show
+    /// the text of a recording while it is still running. Its text may
+    /// change, and the segment that is reported as final afterwards is the
+    /// one that counts.
+    SegmentProvisional {
+        /// The segment, as it is known now.
+        entry: crate::OutputEntry,
+    },
     /// A segment is final: it will not be replaced by a later window.
     SegmentFinalized {
         /// The segment.
@@ -163,6 +175,77 @@ pub enum StreamOutcome {
     },
 }
 
+/// How the windows of a transcription are cut.
+///
+/// The batch policy is the one of the file path: a window is as long as the
+/// whisper encoder takes at once, so a long recording is decoded in as few
+/// passes as possible. The live policy uses shorter windows, so that the
+/// text of a recording appears while the recording is still running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowPolicy {
+    /// The batch policy: windows of 30 seconds.
+    Batch,
+    /// The live policy: short windows, with a longer startup window until
+    /// the language of the recording is known.
+    Live(LiveWindowPolicy),
+}
+
+/// The window policy of an interactive transcription.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LiveWindowPolicy {
+    /// The number of samples a window holds.
+    pub window_samples: usize,
+    /// The number of samples the startup window holds.
+    ///
+    /// The language of a recording is detected on the first window. A short
+    /// window carries too little speech for a reliable detection, so the
+    /// startup window is longer.
+    pub startup_samples: usize,
+    /// The number of startup windows that are used at most.
+    ///
+    /// The bound keeps a recording that carries no speech from holding the
+    /// startup window forever.
+    pub max_startup_windows: u32,
+}
+
+impl Default for LiveWindowPolicy {
+    fn default() -> Self {
+        Self {
+            window_samples: 5 * crate::chunked::WHISPER_SAMPLE_RATE as usize,
+            startup_samples: 10 * crate::chunked::WHISPER_SAMPLE_RATE as usize,
+            max_startup_windows: 3,
+        }
+    }
+}
+
+impl LiveWindowPolicy {
+    /// The policy for a live window of the given length in seconds.
+    ///
+    /// The startup window is twice as long, because the language is
+    /// detected on it. It is bounded by 30 seconds, the length of the
+    /// window of the whisper encoder.
+    pub fn new(window_seconds: f64) -> Self {
+        let rate = crate::chunked::WHISPER_SAMPLE_RATE as f64;
+        let window_samples = (window_seconds * rate).round().max(rate) as usize;
+        let startup_samples = ((window_seconds * 2.0).min(30.0) * rate).round() as usize;
+        Self {
+            window_samples,
+            startup_samples: startup_samples.max(window_samples),
+            max_startup_windows: 3,
+        }
+    }
+
+    /// The number of samples a window holds.
+    pub fn window_samples(&self) -> usize {
+        self.window_samples
+    }
+
+    /// The number of samples the startup window holds.
+    pub fn startup_samples(&self) -> usize {
+        self.startup_samples
+    }
+}
+
 /// A source of windows of audio.
 ///
 /// The file based decoder and the streaming decoder both implement this, so
@@ -179,6 +262,13 @@ pub trait WindowSource {
 
     /// The samples that were received from the source.
     fn received_samples(&self) -> u64;
+
+    /// Change the number of samples the windows that follow hold.
+    ///
+    /// The live policy uses this to switch from the longer startup window
+    /// to the shorter window once the language of the recording is known.
+    /// The file path keeps its windows and ignores the call.
+    fn set_window_samples(&mut self, _samples: usize) {}
 }
 
 /// Turns an [`AudioSource`] into the windows the transcription loop consumes.
@@ -198,7 +288,17 @@ pub struct StreamedAudio {
 
 impl StreamedAudio {
     /// A streaming decoder for the given source.
+    ///
+    /// The windows are the ones of the batch policy: 30 seconds each.
     pub fn new(source: Box<dyn AudioSource>) -> Result<Self> {
+        Self::with_config(source, crate::chunked::ChunkConfig::default())
+    }
+
+    /// A streaming decoder for the given source and window configuration.
+    pub fn with_config(
+        source: Box<dyn AudioSource>,
+        config: crate::chunked::ChunkConfig,
+    ) -> Result<Self> {
         ensure!(
             source.sample_rate() == STREAM_SAMPLE_RATE,
             "the audio source delivers {} Hz, the pipeline works with {STREAM_SAMPLE_RATE} Hz",
@@ -211,7 +311,7 @@ impl StreamedAudio {
         );
         Ok(Self {
             source,
-            assembler: crate::chunked::WindowAssembler::new(crate::chunked::ChunkConfig::default()),
+            assembler: crate::chunked::WindowAssembler::new(config),
             next_start: 0,
             received: 0,
             finished: false,
@@ -260,6 +360,10 @@ impl WindowSource for StreamedAudio {
 
     fn received_samples(&self) -> u64 {
         self.received
+    }
+
+    fn set_window_samples(&mut self, samples: usize) {
+        self.assembler.set_window_samples(samples);
     }
 }
 

@@ -31,6 +31,9 @@ use std::thread::JoinHandle;
 /// The sample rate whisper expects.
 pub const WHISPER_SAMPLE_RATE: u32 = 16_000;
 
+/// The number of samples that are kept in front of a window by default.
+const DEFAULT_LOOKBACK_SAMPLES: usize = 2 * WHISPER_SAMPLE_RATE as usize;
+
 /// How the recording is cut into windows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChunkConfig {
@@ -54,7 +57,7 @@ impl Default for ChunkConfig {
         // region that whisper skipped again from a different position.
         Self {
             window_samples: 30 * WHISPER_SAMPLE_RATE as usize,
-            lookback_samples: 2 * WHISPER_SAMPLE_RATE as usize,
+            lookback_samples: DEFAULT_LOOKBACK_SAMPLES,
         }
     }
 }
@@ -68,6 +71,18 @@ impl ChunkConfig {
     /// The number of samples that are kept in front of a window.
     pub fn lookback_samples(&self) -> usize {
         self.lookback_samples
+    }
+
+    /// The configuration of a live, interactive transcription.
+    ///
+    /// The lookback is at most the one of the batch policy and at most half
+    /// a window, so that a short window does not hold a large part of the
+    /// recording in memory.
+    pub fn live(policy: crate::stream::LiveWindowPolicy) -> Self {
+        Self {
+            window_samples: policy.window_samples,
+            lookback_samples: (policy.window_samples / 2).min(DEFAULT_LOOKBACK_SAMPLES),
+        }
     }
 }
 
@@ -150,6 +165,16 @@ impl WindowAssembler {
     /// The number of samples a window holds.
     pub fn window_samples(&self) -> usize {
         self.window_samples
+    }
+
+    /// Change the number of samples a window holds.
+    ///
+    /// The live policy starts with a longer window, so that the language of
+    /// the recording can be detected on enough speech, and switches to the
+    /// shorter window afterwards. The samples that are already decoded stay
+    /// in the buffer, so the switch does not lose audio.
+    pub fn set_window_samples(&mut self, samples: usize) {
+        self.window_samples = samples.max(1);
     }
 
     /// The samples that are buffered and not part of a window yet.

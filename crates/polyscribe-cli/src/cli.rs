@@ -87,6 +87,39 @@ pub enum Commands {
         inputs: Vec<PathBuf>,
     },
 
+    /// Record the microphone and transcribe it while it records
+    Record {
+        /// The Whisper model to use: a path to a model file, or the name of
+        /// a model in the models directory. Without it the model is found
+        /// the way `transcribe` finds it.
+        #[arg(long)]
+        model: Option<String>,
+
+        /// Language code of the recording, e.g. en, de. Without it the
+        /// language is detected from the audio.
+        #[arg(long)]
+        language: Option<String>,
+
+        /// The PipeWire node to record from, e.g. voice_arctis_mono.
+        /// Without it the default source of the session is used.
+        #[arg(long)]
+        device: Option<String>,
+
+        /// The length of a live window in seconds. The default is 5.
+        #[arg(long)]
+        window: Option<f64>,
+
+        /// Write the transcript to this file as well
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+
+        /// Transcription backend among those compiled in (auto|cpu|cuda|hip).
+        /// GPU backends require a build with the matching cargo feature
+        /// (gpu-cuda, gpu-hip). Default: auto.
+        #[arg(long, value_enum, default_value_t = GpuBackend::Auto)]
+        gpu_backend: GpuBackend,
+    },
+
     /// Manage Whisper GGUF models (Hugging Face)
     Models {
         #[command(subcommand)]

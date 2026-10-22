@@ -1,5 +1,6 @@
 mod cli;
 mod output;
+mod record;
 mod transcribe;
 
 use anyhow::{Context, Result, anyhow};
@@ -127,6 +128,23 @@ fn main() -> Result<()> {
             gpu_backend,
             gpu_layers,
             inputs,
+        }),
+
+        Commands::Record {
+            model,
+            language,
+            device,
+            window,
+            output,
+            gpu_backend,
+        } => record::run(record::RecordArgs {
+            model,
+            language,
+            device,
+            window,
+            output,
+            gpu_backend,
+            json: matches!(output_mode, OutputMode::Json),
         }),
 
         Commands::Models { cmd } => {
