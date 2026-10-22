@@ -4,6 +4,7 @@ PolyScribe is a fast, local-first CLI for transcribing audio/video and merging e
 
 ## Features
 
+- **Live microphone transcription**: `polyscribe record` captures the microphone through PipeWire and transcribes it while the recording runs. The audio is decoded incrementally, the memory does not grow with the length of the recording, and the language of the recording is detected by default.
 - **Local-first**: transcription runs fully offline once a model is present; network access is only used by the `models` subcommands (Hugging Face over HTTPS).
 - **Transcription**: audio and common video files are decoded to 16 kHz mono PCM via ffmpeg and transcribed with whisper.cpp.
 - **Transcript merging**: merge multiple JSON transcripts, or merge and also keep per-file outputs.
@@ -28,12 +29,13 @@ PolyScribe is a fast, local-first CLI for transcribing audio/video and merging e
 - Rust 1.88 or newer (MSRV; `rustup` recommended; `rust-toolchain.toml` pins 1.89 for development)
 - A C/C++ toolchain, `cmake`, and `libclang` (needed to build whisper.cpp and its Rust bindings)
 - `ffmpeg` available on `PATH` at runtime
+- For `polyscribe record`: a running PipeWire session and `pw-record` on `PATH` (the Arch package `pipewire-audio`)
 - A writable `TMPDIR` with a few GB free for GPU builds and GPU runs: the HIP and CUDA runtimes compile device code at runtime, and a full `/tmp` makes the run fail with an LLVM I/O error
 - Optional for GPU builds at build and run time: CUDA toolkit/driver (NVIDIA) or ROCm (AMD)
 
 ## Supported platforms
 
-- **Linux x86_64**: the tested platform. CI builds the workspace, runs the test suite and transcribes real audio on it, on CPU.
+- **Linux x86_64**: the tested platform. CI builds the workspace, runs the test suite and transcribes real audio on it, on CPU. The live capture was validated on it against a real PipeWire session and a USB microphone.
 - **macOS**: expected to work on CPU, but untested in CI.
 - **Windows**: not supported. The workspace does not compile on Windows yet.
 
@@ -57,6 +59,10 @@ cargo install --path crates/polyscribe-cli
 ```bash
 # Transcribe audio/video (requires --language)
 polyscribe transcribe --language en -o output input.mp4
+
+# Record the microphone and transcribe it while the recording runs
+polyscribe record                            # the language is detected
+polyscribe record --language de --device voice_arctis_mono
 
 # Merge multiple transcripts
 polyscribe transcribe -m -o output merged input1.json input2.json

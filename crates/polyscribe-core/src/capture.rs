@@ -432,7 +432,12 @@ impl PipeWireCapture {
     pub fn stop(&mut self) {
         self.stop_requested.store(true, Ordering::SeqCst);
         if let Some(child) = self.child.as_mut() {
-            send_signal(child.id(), libc::SIGTERM);
+            // The child is only signalled while it can still be running. A
+            // child that left was reaped, and its process id can belong to
+            // another process by now.
+            if matches!(child.try_wait(), Ok(None)) {
+                send_signal(child.id(), libc::SIGTERM);
+            }
             let deadline = Instant::now() + STOP_GRACE;
             loop {
                 match child.try_wait() {
@@ -764,9 +769,10 @@ pub struct CaptureDevice {
 /// The sources of the running PipeWire session that audio can be recorded
 /// from.
 ///
-/// The list comes from `pw-cli`, which belongs to the same package as
-/// `pw-record`, so the check needs no tool that the capture does not
-/// already need.
+/// The list comes from `pw-cli`. On Arch `pw-record` belongs to the package
+/// `pipewire-audio` and `pw-cli` to the package `pipewire`, and
+/// `pipewire-audio` depends on `pipewire`. The check therefore needs no
+/// tool that the capture does not already need.
 ///
 /// The list is only used to check a device that was asked for: `pw-record`
 /// falls back to the default source when it is given a node that does not

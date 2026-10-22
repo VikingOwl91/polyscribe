@@ -7,7 +7,17 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 ## Unreleased
 
 ### Added
+- Record: `polyscribe record` captures the microphone through PipeWire and transcribes it while the recording runs. The audio is captured with `pw-record` in raw mode, so the samples reach the pipeline while the recording is still going, and the recording is never written to a file. The capture is a supervised child process: its standard error is read by its own thread, so the capture cannot deadlock on a full pipe, and it is stopped, killed and reaped in a defined order when the run ends, so it cannot outlive the run. The transcript goes to the standard output, one finalized segment per line, and everything else goes to the standard error.
+- Record: the language of the recording is detected by default and `--language` overrides it. The detection runs on a longer startup window, because a short window carries too little speech for a reliable detection, and a language is only pinned when the window carries speech: a language that was detected in silence is a guess, and the guess is named on stderr. The file path still requires `--language` and is unchanged.
+- Record: `--device` selects the PipeWire node to record from. The node is checked against the nodes of the running session before the capture starts, because `pw-record` records from the default source when it is given a node that does not exist, and does not say so.
+- Record: `--window` sets the length of a live window and `--output` writes the transcript to a file while the recording runs.
+- Core: a live window policy for the streaming path. The batch policy keeps its windows of 30 seconds and its behaviour; the live policy uses shorter windows, so that the text of a recording appears while it is still running, and a window that only holds silence is not decoded. The window handling, the reconciliation of the segments and the recovery of a region that whisper did not transcribe are the ones of the batch path.
+- Core: the streaming path reports the segments that may still change as provisional, separately from the segments that are final. A provisional segment is reported only when its text changed, a final segment is never reported twice, and the cancellation of a run does not present an unconfirmed segment as final.
+- Core: a whisper segment that carries no speech is no longer written to the transcript. whisper reports such a segment for silence now and then, with a text that it made up, and a live window of silence produced one of them per window.
 - Core: a streaming input for the transcription pipeline. A source delivers decoded 16 kHz mono samples in blocks while the transcription runs; the pipeline turns them into the same 30 second windows the file path produces, so the window handling, the reconciliation of the segments and the recovery of a region that whisper did not report are shared. A source error ends the run with that error, and a cancellation token stops the run before the next window is submitted. Only the finalized segments are reported, so a provisional segment is never presented as final. The command line is unchanged.
+
+### Fixed
+- Transcribe: a segment that was cut short by the end of a window is no longer decoded again and again in a window that holds the same audio. The number of the attempts is bounded, so that the pipeline cannot spend an endless series of decodes on a segment that stays cut short. The output of the file path is unchanged.
 
 ## v0.1.0-alpha.2 - 2026-10-21
 

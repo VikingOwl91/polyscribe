@@ -2,7 +2,7 @@
 
 PolyScribe is a command-line tool. Run `polyscribe -h` at any time to see the latest help.
 
-The CLI is organized into subcommands: `transcribe`, `models`, `plugins`, `completions`, and `man`. Global flags `--json` and `--quiet` are accepted before or after the subcommand; `-v/--verbose`, `--no-interaction`, and `--no-progress` are top-level flags (before the subcommand).
+The CLI is organized into subcommands: `transcribe`, `record`, `models`, `plugins`, `completions`, and `man`. Global flags `--json` and `--quiet` are accepted before or after the subcommand; `-v/--verbose`, `--no-interaction`, and `--no-progress` are top-level flags (before the subcommand).
 
 ## Common patterns
 
@@ -54,6 +54,55 @@ The CLI is organized into subcommands: `transcribe`, `models`, `plugins`, `compl
   - The per-window diagnostics are opt-in: set `POLYSCRIBE_WINDOW_TRACE=1` to
     get the sample range of every window and every region that whisper did not
     report on stderr.
+
+## record
+
+Record the microphone and transcribe it while the recording runs. The audio
+is captured from PipeWire and handed to the transcription pipeline while it
+arrives, so the transcript grows during the recording.
+
+```bash
+# Record the default source of the session, detect the language
+polyscribe record
+
+# A language, a device and a shorter window
+polyscribe record --language de --device voice_arctis_mono --window 5
+```
+
+- Flags:
+  - `--model MODEL` — a path to a Whisper model file, or the name of a model
+    in the models directory. Without it the model is found the way
+    `transcribe` finds it (`WHISPER_MODEL`, the models directory, the model
+    cache).
+  - `--language LANG` — the language of the recording, e.g. `en`, `de`.
+    Without it the language is detected from the audio.
+  - `--device NODE` — the PipeWire node to record from, e.g.
+    `voice_arctis_mono`. Without it the default source of the session is
+    used. A node that does not exist is refused: `pw-record` would record
+    from the default source instead and would not say so.
+  - `--window SECONDS` — the length of a live window. The default is 5.
+    Shorter windows show the text sooner and need more decoding.
+  - `-o, --output FILE` — write the transcript to this file as well. The
+    file is written while the recording runs.
+  - `--gpu-backend [auto|cpu|cuda|hip]` — the backend, as in `transcribe`.
+- The capture needs a running PipeWire session and the program `pw-record`
+  (the Arch package `pipewire-audio`).
+- The output contract:
+  - The standard output carries the transcript: one finalized segment per
+    line, as the segments become final. With `--json` the lines are JSON
+    objects with the fields `speaker`, `start`, `end` and `text`.
+  - The standard error carries the readiness of the capture, the text that
+    is still provisional (prefixed with `… `), and the diagnostics of the
+    run. `--quiet` and `--json` suppress the status messages.
+- A segment that is still provisional may still change: the next window
+  decodes the speech at the end of the window again, with the context it
+  needs. Only a finalized segment is final, and it is never reported twice.
+- Ctrl+C stops the recording. The segments that were finalized are kept and
+  the exit status is 0. A capture that failed exits with a nonzero status.
+- The language detection: the first windows of a run are longer, so that
+  the detection has enough speech to work with. A language is only pinned
+  when the window carries speech; a language that was detected in silence
+  is a guess, and the guess is named on stderr.
 
 ## Model loading
 

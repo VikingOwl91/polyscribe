@@ -44,6 +44,22 @@ ideas** (directional, not scheduled).
   recovered without a blind retry. The current check is a level and a share of
   frames, not a voice activity detector.
 
+### D9. The batch path decodes the same window again and again (P2, S)
+- A segment that covers a whole window stays provisional, because it
+  reaches the end of the window. The next window decodes it again, from
+  the position of the segment, and the position drifts by one sample per
+  attempt, until the segment is not cut short any more. The recovery
+  fixture of the repository needs 12 such attempts for its first window.
+- The live policy does not do this: a segment that covers the whole window
+  cannot get more context from a window of the same length, so it is
+  final. The batch policy keeps the behaviour of the previous release,
+  because the text of the recording comes out of that search.
+- The attempts are bounded now, so the pipeline cannot loop forever, but
+  the bound is high enough to keep the output of the batch path.
+- AC: decide whether the batch path should keep the search, and measure
+  what the text of the recordings with a segment over a whole window looks
+  like with and without it.
+
 ### D5. Non-Unix TTY detection (P3, S)
 - `stdin_is_tty` uses `std::io::IsTerminal` (correct); the remaining gap is
   that Windows/macOS are not CI-tested.
@@ -69,10 +85,27 @@ ideas** (directional, not scheduled).
   by speaker turn; keep manual labels as the default; document that
   diarization is approximate.
 
-### F2. Live microphone / URL ingestion (P3, M)
-- Only local files are supported today.
-- AC (future): mic capture via `cpal`, YouTube/URL ingestion via an external
-  downloader. Requires the engine/CLI split to be exercised first.
+### F2. Live microphone ingestion (done in sprint 12, partly)
+- `polyscribe record` captures the microphone through PipeWire and
+  transcribes it while the recording runs. The capture is a supervised
+  `pw-record` child, the samples are decoded incrementally and the memory
+  does not grow with the length of the recording.
+- Still open:
+  - URL ingestion is not wired up. The engine/CLI split that it needs
+    exists now.
+  - The capture is Linux only, and only PipeWire. A native binding or an
+    ALSA backend would widen it, at the price of a dependency.
+- AC: a `--source` that takes a URL, with the same streaming contract.
+
+### F5. A live window that keeps the quality of the batch window (P2, M)
+- The live policy uses shorter windows, so that the text appears while the
+  recording runs. A short window splits the speech at its end, so a word
+  can be cut in two, and the window that follows decodes it again.
+- The measured word error rate of the live windows against the reference is
+  in `docs/benchmarks/live-transcription.md`.
+- AC: a window policy that overlaps the windows by the length of a word
+  without paying for the extra decoding, with the same measurement as the
+  evidence.
 
 ### F3. Parallel transcription of multiple files (P3, M)
 - Inputs are processed sequentially. A `--jobs N` flag could parallelize

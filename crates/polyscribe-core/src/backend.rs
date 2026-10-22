@@ -665,6 +665,12 @@ fn transcribe_windows(
     // The index of a segment that may have been cut short by the end of the
     // window. The next window decodes it again and replaces it.
     let mut provisional: Option<usize> = None;
+    // The provisional segment, with the number of times it was decoded
+    // again. The counter keeps the pipeline from decoding the same window
+    // over and over when the re-decode cannot give the segment more
+    // context.
+    let mut provisional_index: Option<usize> = None;
+    let mut provisional_attempts: u32 = 0;
     // The provisional segment that was reported last, with its text. It
     // keeps a provisional event from being sent again for a text that did
     // not change.
@@ -876,6 +882,46 @@ fn transcribe_windows(
             Some(i) if segment_is_cut(entries[i].end, window_end) => Some(i),
             _ => None,
         };
+        if provisional != provisional_index {
+            provisional_index = provisional;
+            provisional_attempts = 0;
+        }
+
+        // Whether the provisional segment is decoded again.
+        //
+        // The re-decode gives the segment the audio that follows it, but
+        // only when the new window reaches beyond the window the segment
+        // came from. A segment that covers the whole window is decoded
+        // again in a window that holds the same audio, so it can never be
+        // complete and the pipeline would decode the same window over and
+        // over.
+        //
+        // The batch policy keeps the behaviour of the previous release: the
+        // segment is decoded again, and the position of the new window
+        // decides how the text comes out. The live policy does not decode
+        // the same window again: a live window is short, and the words at
+        // its end are decoded by the window that follows.
+        let rate = crate::chunked::WHISPER_SAMPLE_RATE as f64;
+        let window_start_sample = current.start_sample;
+        let redecode = match provisional {
+            Some(i) => {
+                let segment_start = (entries[i].start * rate).round() as u64;
+                let worth_it = match policy {
+                    crate::stream::WindowPolicy::Batch => true,
+                    crate::stream::WindowPolicy::Live(_) => segment_start > window_start_sample,
+                };
+                if worth_it {
+                    provisional_attempts += 1;
+                    provisional_attempts <= MAX_PROVISIONAL_ATTEMPTS
+                } else {
+                    false
+                }
+            }
+            None => false,
+        };
+        if !redecode {
+            provisional = None;
+        }
 
         // Every segment that is not provisional is final: no later window
         // can replace it.
@@ -913,9 +959,7 @@ fn transcribe_windows(
         //   a window, so that a stretch of silence, where whisper reports
         //   short segments, is not decoded over and over.
         // * A window without any segment advances by at least half a window.
-        let rate = crate::chunked::WHISPER_SAMPLE_RATE as f64;
         let min_advance = min_advance_samples(&policy);
-        let window_start_sample = current.start_sample;
 
         let next_start = match provisional {
             // Decode the cut segment again, with the context it needs.
@@ -1000,6 +1044,8 @@ struct RawSegment {
     end: u64,
     /// The text of the segment.
     text: String,
+    /// The probability that the segment carries no speech.
+    no_speech: f32,
 }
 
 /// The region at the beginning of a window that whisper did not transcribe.
@@ -1252,13 +1298,14 @@ fn trace_window(window: &AudioWindow, segments: &[RawSegment]) {
     );
     for segment in segments {
         eprintln!(
-            "TRACE   segment start_sample={} end_sample={} rel=[{:.3},{:.3}) global=[{:.3},{:.3}) text={:?}",
+            "TRACE   segment start_sample={} end_sample={} rel=[{:.3},{:.3}) global=[{:.3},{:.3}) no_speech={:.3} text={:?}",
             segment.start,
             segment.end,
             (segment.start - window.start_sample) as f64 / rate,
             (segment.end - window.start_sample) as f64 / rate,
             segment.start as f64 / rate,
             segment.end as f64 / rate,
+            segment.no_speech,
             segment.text
         );
     }
@@ -1331,12 +1378,20 @@ fn decode_window(
         let text = seg
             .to_str()
             .map_err(|e| anyhow!("Failed to get segment text: {:?}", e))?;
+        let no_speech = seg.no_speech_probability();
+        if no_speech > NO_SPEECH_PROBABILITY {
+            // whisper reports a segment for audio that carries no speech
+            // now and then, with a text that it made up. The probability
+            // that the segment holds no speech tells the two apart.
+            continue;
+        }
         let start = window.start_sample + (seg.start_timestamp() as u64) * rate / 100;
         let end = (window.start_sample + (seg.end_timestamp() as u64) * rate / 100).min(window_end);
         segments.push(RawSegment {
             start,
             end,
             text: text.trim().to_string(),
+            no_speech,
         });
     }
     Ok(segments)
@@ -1491,9 +1546,29 @@ fn window_carries_speech(window: &AudioWindow) -> bool {
     speech_frame_ratio(&window.samples) > HOLE_SPEECH_RATIO
 }
 
+/// The probability above which a segment is treated as an invention.
+///
+/// whisper reports a segment for audio that carries no speech now and then,
+/// with a text that it made up. The probability that the segment holds no
+/// speech tells the two apart: it is around 0.1 for speech and above 0.9
+/// for the silence of a window.
+const NO_SPEECH_PROBABILITY: f32 = 0.6;
+
 /// The smallest region at the beginning of a window that is treated as
 /// audio that whisper did not transcribe.
 const HOLE_MIN_SAMPLES: u64 = crate::chunked::WHISPER_SAMPLE_RATE as u64;
+
+/// How often a segment is decoded again before it is accepted as it is.
+///
+/// A segment that was cut short by the end of a window is decoded again, so
+/// that it gets the context it needs. The attempts are bounded, so that a
+/// segment that stays cut short does not cost an endless series of decodes.
+///
+/// The bound is high enough to keep the behaviour of the batch policy of the
+/// previous release: a segment that covers a whole window is decoded again
+/// at every position the window drifts to, and the text of the recording
+/// comes out of that search.
+const MAX_PROVISIONAL_ATTEMPTS: u32 = 32;
 
 /// The level below which a frame of audio is treated as silence.
 ///
@@ -1656,6 +1731,7 @@ mod tests {
             start,
             end,
             text: "text".to_string(),
+            no_speech: 0.0,
         }
     }
 

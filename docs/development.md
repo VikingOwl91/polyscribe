@@ -11,8 +11,8 @@ This document describes how to build, test, and run PolyScribe locally, and how 
 
 ## Workspace layout
 
-- `crates/polyscribe-core`: engine — backends and the transcription of a recording in windows (`backend.rs`), the incremental audio decoding (`chunked.rs`), transcription glue, model discovery (`models.rs`), `ModelManager` (`model_manager.rs`), config (`config.rs`), error type (`error.rs`), output rendering (`output.rs`), and the cliclack UI helpers (`ui.rs`, `ui/progress.rs`).
-- `crates/polyscribe-cli`: the `polyscribe` binary — CLI parsing (`cli.rs`), command orchestration (`main.rs`), the `transcribe` pipeline (`transcribe.rs`), and stdout modes (`output.rs`).
+- `crates/polyscribe-core`: engine with backends and the transcription of a recording in windows (`backend.rs`), the live capture from PipeWire (`capture.rs`), the incremental audio decoding (`chunked.rs`), transcription glue, model discovery (`models.rs`), `ModelManager` (`model_manager.rs`), config (`config.rs`), error type (`error.rs`), output rendering (`output.rs`), the streaming source contract (`stream.rs`), and the cliclack UI helpers (`ui.rs`, `ui/progress.rs`).
+- `crates/polyscribe-cli`: the `polyscribe` binary with CLI parsing (`cli.rs`), command orchestration (`main.rs`), the `transcribe` pipeline (`transcribe.rs`), the `record` pipeline (`record.rs`), and stdout modes (`output.rs`).
 - `crates/polyscribe-host`: plugin discovery and process management.
 - `crates/polyscribe-protocol`: PSP/1 plugin protocol types.
 - `plugins/polyscribe-plugin-tubescribe`: reference plugin (workspace member; built and tested with the workspace).
@@ -76,6 +76,34 @@ This document describes how to build, test, and run PolyScribe locally, and how 
   --nocapture` with `POLYSCRIBE_E2E_MODEL` set. It reports the time to the
   first window, the time to the first finalized segment, the largest amount
   of buffered audio and the peak resident memory.
+- The record tests replace the capture program with one that delivers raw
+  PCM, so they need neither a microphone nor a running PipeWire session:
+  `cargo test -p polyscribe-cli --test integration_record`. The tests that
+  transcribe need a model and skip themselves without one.
+- The live tests check the window policy of the live path:
+  `cargo test -p polyscribe-cli --test integration_live`. They need a model
+  and skip themselves without one.
+
+## Hardware validation
+
+- The live capture needs a running PipeWire session and the package
+  `pipewire-audio`, which holds `pw-record`.
+- The sources of the session are listed with `pactl list short sources` and
+  `pw-cli ls Node`.
+- To try the capture by hand:
+  - `cargo run -p polyscribe-cli -- record --language en`
+  - Stop the recording with Ctrl+C. The finalized segments stay on the
+    standard output and the exit status is 0.
+- The tests that need a microphone are not part of the automated suite: they
+  need hardware, and the suite runs without it. The automated tests replace
+  the capture program with `POLYSCRIBE_CAPTURE_PROGRAM`, a program that
+  delivers a known amount of raw PCM, so they run everywhere.
+- The model for the end-to-end tests comes from `POLYSCRIBE_E2E_MODEL`, the
+  same variable the other end-to-end tests use.
+- The measurement of the live window policy is an ignored test:
+  `cargo test --locked -p polyscribe-cli --test integration_live -- --ignored --nocapture`,
+  with `POLYSCRIBE_LIVE_WINDOW_SECONDS` for the length of the window and
+  `POLYSCRIBE_LIVE_POLICY=batch` for the reference of the batch path.
 
 ## Clippy and formatting
 
@@ -104,3 +132,7 @@ This document describes how to build, test, and run PolyScribe locally, and how 
   - `export POLYSCRIBE_MODELS_DIR=$PWD/models`
   - `export WHISPER_MODEL=$PWD/models/ggml-tiny.en.bin`
 - For full offline runs of the `models` subcommands, pre-populate the cache dir or use `models add` with a repo reachable on your network.
+- Replace the capture program with one that delivers raw PCM, so that the record tests run without a microphone:
+  - `export POLYSCRIBE_CAPTURE_PROGRAM=/path/to/fake-pw-record`
+- Set the length of a live window for the measurement of the live policy:
+  - `export POLYSCRIBE_LIVE_WINDOW_SECONDS=5`
