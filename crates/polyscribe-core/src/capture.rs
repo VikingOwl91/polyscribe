@@ -26,8 +26,9 @@
 //!   the memory of the capture does not depend on the length of the
 //!   recording.
 //! * The capture's process group is asked to stop with `SIGTERM` and killed
-//!   when it does not stop in time. The direct child is reaped, and it is
-//!   killed when the parent dies, so it cannot outlive the run.
+//!   when it does not stop in time. The direct child is reaped. Linux sends
+//!   it a catchable `SIGTERM` when the thread that created it exits; this is
+//!   best effort and does not apply to descendants.
 //!
 //! # What a stop means
 //!
@@ -326,8 +327,9 @@ impl PipeWireCapture {
     ///
     /// The child is started in its own process group, so that a stop signal
     /// that reaches the terminal reaches the run first and the capture is
-    /// stopped by the run, in a defined order. The child is also told to
-    /// stop when the parent dies, so it cannot be left behind.
+    /// stopped by the run, in a defined order. Linux sends the direct child
+    /// a catchable `SIGTERM` when the thread that created it exits. The signal
+    /// is best effort and is not inherited by descendants.
     pub fn new(config: CaptureConfig, cancel: CancellationToken) -> Result<Self> {
         let mut command = Command::new(&config.program);
         command
@@ -456,8 +458,9 @@ impl PipeWireCapture {
     /// Stop the capture.
     ///
     /// The capture's process group is asked to stop with `SIGTERM` and killed
-    /// when it does not stop in time. The direct child is reaped, and the
-    /// threads that read it are joined, so nothing is left behind.
+    /// when it does not stop in time. The direct child is reaped and the
+    /// threads that read it are joined. Descendants that leave the group are
+    /// outside this cleanup guarantee.
     pub fn stop(&mut self) {
         self.stop_requested.store(true, Ordering::SeqCst);
         if let Some(mut child) = self.child.take() {
@@ -702,8 +705,7 @@ impl AudioSource for PipeWireCapture {
 
 impl Drop for PipeWireCapture {
     fn drop(&mut self) {
-        // A capture that is dropped before the end of the recording has to
-        // leave no child behind.
+        // Stop the capture group before releasing its pipes and reader threads.
         self.stop();
     }
 }

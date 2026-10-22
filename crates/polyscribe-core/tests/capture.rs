@@ -33,8 +33,12 @@ if [ -n "$FAKE_SLEEP" ]; then
   sleep "$FAKE_SLEEP"
 fi
 if [ -n "$FAKE_DESCENDANT_PID_FILE" ]; then
-  sleep "${FAKE_DESCENDANT_SLEEP:-5}" &
-  echo "$!" > "$FAKE_DESCENDANT_PID_FILE"
+  if [ "${FAKE_DESCENDANT_IGNORE_TERM:-}" = "1" ]; then
+    sh -c 'trap "" TERM; echo "$$" > "$1"; while :; do sleep 1; done' sh "$FAKE_DESCENDANT_PID_FILE" &
+  else
+    sleep "${FAKE_DESCENDANT_SLEEP:-5}" &
+    echo "$!" > "$FAKE_DESCENDANT_PID_FILE"
+  fi
   wait
 fi
 if [ -n "$FAKE_PCM" ] && [ -f "$FAKE_PCM" ]; then
@@ -362,7 +366,7 @@ fn stopping_a_capture_stops_descendants_that_hold_its_pipes() {
             "FAKE_DESCENDANT_PID_FILE",
             &descendant_pid_file.display().to_string(),
         ),
-        ("FAKE_DESCENDANT_SLEEP", "5"),
+        ("FAKE_DESCENDANT_IGNORE_TERM", "1"),
     ]);
     let config = CaptureConfig::new().with_program(fake.program());
     let mut capture = PipeWireCapture::new(config, CancellationToken::new()).unwrap();
@@ -386,6 +390,14 @@ fn stopping_a_capture_stops_descendants_that_hold_its_pipes() {
     assert!(
         elapsed < Duration::from_secs(3),
         "stopping the capture waited for descendant {descendant} to exit: {elapsed:?}"
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    while process_running(descendant) && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        !process_running(descendant),
+        "the process-group descendant {descendant} survived normal shutdown"
     );
 }
 
@@ -422,4 +434,14 @@ fn process_alive(pid: u32) -> bool {
     // The process is gone, or it belongs to somebody else and the call was
     // refused with a permission error.
     std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+fn process_running(pid: u32) -> bool {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    let Some((_, fields)) = stat.rsplit_once(')') else {
+        return true;
+    };
+    !matches!(fields.trim_start().chars().next(), Some('Z' | 'X'))
 }
