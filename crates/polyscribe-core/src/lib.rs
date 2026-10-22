@@ -169,6 +169,7 @@ pub mod models;
 pub mod output;
 pub mod stream;
 pub mod ui;
+pub mod youtube;
 pub use error::Error;
 pub mod prelude;
 
