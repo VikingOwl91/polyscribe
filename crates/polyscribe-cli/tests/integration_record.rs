@@ -552,17 +552,47 @@ fn the_transcript_grows_before_the_capture_ends() {
 
 #[test]
 fn an_unknown_device_is_refused() {
-    let output = Command::new(bin())
+    let dir = tempfile::tempdir().unwrap();
+    let capture_started = dir.path().join("capture-started");
+    let fake = Fake::new(&[("FAKE_PID_FILE", &capture_started.display().to_string())]);
+    let pw_cli = dir.path().join("pw-cli");
+    std::fs::write(
+        &pw_cli,
+        r#"#!/bin/sh
+printf 'id 42, type PipeWire:Interface:Node\n\tnode.name = "test_source"\n\tnode.description = "Test source"\n\tmedia.class = "Audio/Source"\n'
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&pw_cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let mut paths = vec![dir.path().to_path_buf()];
+    if let Some(path) = std::env::var_os("PATH") {
+        paths.extend(std::env::split_paths(&path));
+    }
+    let path = std::env::join_paths(paths).unwrap();
+    let output = command(&fake)
         .arg("record")
         .arg("--device")
         .arg("no_such_node_in_this_session")
+        .env("PATH", path)
         .output()
         .expect("the command runs");
     assert!(!output.status.success(), "the unknown device was accepted");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("no_such_node_in_this_session"),
-        "the error does not name the device: {stderr}"
+        stderr.contains("there is no capture source named 'no_such_node_in_this_session'"),
+        "the command did not report an unknown source: {stderr}"
+    );
+    assert!(
+        stderr.contains("test_source"),
+        "the source list is missing: {stderr}"
+    );
+    assert!(
+        !capture_started.exists(),
+        "the capture program started for an unknown source"
     );
 }
 

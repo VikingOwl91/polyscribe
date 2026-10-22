@@ -17,6 +17,7 @@
 //! like the other end-to-end tests.
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -462,6 +463,8 @@ fn recovery_decodes_are_reported_as_window_submissions() {
     let source = RealtimeSource::new(samples, SAMPLE_RATE as usize / 10, false);
     let mut session = ModelSession::with_model(model);
     let mut submitted = 0;
+    let mut received = 0;
+    let mut samples_reported_at_submission = Vec::new();
     let result = transcribe_stream(
         &mut session,
         test_backend(),
@@ -469,10 +472,13 @@ fn recovery_decodes_are_reported_as_window_submissions() {
         "test",
         Language::Explicit("en".to_string()),
         WindowPolicy::Batch,
-        &mut |event: StreamEvent| {
-            if matches!(event, StreamEvent::WindowSubmitted { .. }) {
+        &mut |event: StreamEvent| match event {
+            StreamEvent::SamplesReceived { total } => received = total,
+            StreamEvent::WindowSubmitted { end_sample, .. } => {
                 submitted += 1;
+                samples_reported_at_submission.push((end_sample, received));
             }
+            _ => {}
         },
         &CancellationToken::new(),
     )
@@ -486,6 +492,107 @@ fn recovery_decodes_are_reported_as_window_submissions() {
     assert_eq!(
         submitted, result.windows,
         "every inference window, including recovery decodes, must be reported"
+    );
+    for (end_sample, received) in samples_reported_at_submission {
+        assert!(
+            received >= end_sample,
+            "window ending at sample {end_sample} was submitted after only {received} received samples were reported"
+        );
+    }
+}
+
+/// The live policy with the smallest supported window does not stall when a
+/// speech hole cannot be recovered.
+///
+/// With a two-second window the minimum advance equals the largest recovery
+/// lookback. Measuring the advance from the recovery window (which starts
+/// earlier) could keep the main window at its original position. The advance
+/// is measured from the main window instead, so progress is bounded.
+#[test]
+fn live_policy_with_minimum_window_makes_bounded_progress() {
+    let Some(model) = e2e_model() else {
+        eprintln!("SKIPPED: POLYSCRIBE_E2E_MODEL is not set; skipping the live tests");
+        return;
+    };
+    let samples = wav_samples(&fixture("recovery/skipped-22s.wav"));
+    let source = RealtimeSource::new(samples, SAMPLE_RATE as usize / 10, false);
+    let mut session = ModelSession::with_model(model);
+    let mut submitted = 0;
+    let result = transcribe_stream(
+        &mut session,
+        test_backend(),
+        Box::new(source),
+        "test",
+        Language::Explicit("en".to_string()),
+        WindowPolicy::Live(LiveWindowPolicy::new(2.0)),
+        &mut |event: StreamEvent| {
+            if matches!(event, StreamEvent::WindowSubmitted { .. }) {
+                submitted += 1;
+            }
+        },
+        &CancellationToken::new(),
+    )
+    .expect("the transcription does not fail");
+
+    // The recording is about 78 seconds long. With two-second windows the
+    // run needs at least a few windows and must not loop forever. An
+    // unbounded re-decode would produce thousands of windows.
+    assert!(
+        result.windows >= 3,
+        "the live run produced too few windows: {}",
+        result.windows
+    );
+    assert!(
+        result.windows <= 200,
+        "the live run did not make bounded progress: {} windows",
+        result.windows
+    );
+    assert_eq!(
+        submitted, result.windows,
+        "every inference window must be reported, including recovery decodes"
+    );
+}
+
+/// A whole-window segment does not trigger repeated re-decoding on the live
+/// path.
+///
+/// The live policy already skips a segment that covers a whole window. This
+/// test verifies that a recording of silence (which makes Whisper hallucinate
+/// a phrase spanning a whole window) does not produce an excessive number of
+/// windows.
+#[test]
+fn live_policy_does_not_decode_silence_over_and_over() {
+    let Some(model) = e2e_model() else {
+        eprintln!("SKIPPED: POLYSCRIBE_E2E_MODEL is not set; skipping the live tests");
+        return;
+    };
+    if Command::new("ffmpeg").arg("-version").output().is_err() {
+        eprintln!("SKIPPED: ffmpeg is not available on PATH; skipping the silence test");
+        return;
+    }
+
+    let samples = vec![0.0f32; 30 * SAMPLE_RATE as usize];
+    let source = RealtimeSource::new(samples, SAMPLE_RATE as usize / 10, false);
+    let mut session = ModelSession::with_model(model);
+    let result = transcribe_stream(
+        &mut session,
+        test_backend(),
+        Box::new(source),
+        "test",
+        Language::Explicit("en".to_string()),
+        WindowPolicy::Live(LiveWindowPolicy::new(5.0)),
+        &mut |_| {},
+        &CancellationToken::new(),
+    )
+    .expect("the transcription does not fail");
+
+    // 30 seconds of silence with 5-second windows needs 6 windows. A
+    // whole-window hallucination must not re-decode the same window over
+    // and over. Before the fix this took dozens of windows.
+    assert!(
+        result.windows <= 12,
+        "silence was decoded over and over: {} windows",
+        result.windows
     );
 }
 

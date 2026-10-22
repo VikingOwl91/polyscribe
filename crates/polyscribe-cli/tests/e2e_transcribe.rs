@@ -23,6 +23,8 @@ use std::process::Command;
 
 use serde::Deserialize;
 
+const SAMPLE_RATE: u32 = 16_000;
+
 #[derive(Deserialize)]
 struct OutputEntry {
     id: u64,
@@ -90,6 +92,63 @@ fn wav_info(path: &Path) -> (u32, f64) {
     let byte_rate = byte_rate.expect("WAV fixture has no byte rate");
     let data = data_len.expect("WAV fixture has no data chunk");
     (rate, data as f64 / byte_rate as f64)
+}
+
+fn wav_samples(path: &Path) -> Vec<i16> {
+    let bytes = fs::read(path).unwrap();
+    let mut pos = 12usize;
+    let (start, len) = loop {
+        let id = &bytes[pos..pos + 4];
+        let size = u32::from_le_bytes(bytes[pos + 4..pos + 8].try_into().unwrap()) as usize;
+        if id == b"data" {
+            break (pos + 8, size);
+        }
+        pos += 8 + size + (size % 2);
+    };
+    assert_eq!(len % 2, 0, "fixture must contain 16-bit PCM samples");
+    bytes[start..start + len]
+        .chunks_exact(2)
+        .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
+        .collect()
+}
+
+fn write_wav(path: &Path, samples: &[i16]) {
+    let data_len = samples.len() * 2;
+    let mut bytes = Vec::with_capacity(44 + data_len);
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&((36 + data_len) as u32).to_le_bytes());
+    bytes.extend_from_slice(b"WAVEfmt ");
+    bytes.extend_from_slice(&16u32.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&SAMPLE_RATE.to_le_bytes());
+    bytes.extend_from_slice(&(SAMPLE_RATE * 2).to_le_bytes());
+    bytes.extend_from_slice(&2u16.to_le_bytes());
+    bytes.extend_from_slice(&16u16.to_le_bytes());
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&(data_len as u32).to_le_bytes());
+    for sample in samples {
+        bytes.extend_from_slice(&sample.to_le_bytes());
+    }
+    fs::write(path, bytes).unwrap();
+}
+
+fn transcribe_json(audio: &Path, model: &Path) -> Vec<OutputEntry> {
+    let output = Command::new(bin())
+        .args(["--no-interaction", "--no-progress", "transcribe"])
+        .arg(audio)
+        .args(["--json", "--language", "en"])
+        .env("WHISPER_MODEL", model)
+        .output()
+        .expect("failed to spawn polyscribe");
+    assert!(
+        output.status.success(),
+        "transcribe failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice::<OutputRoot>(&output.stdout)
+        .expect("stdout must contain transcript JSON")
+        .items
 }
 
 /// Parse an SRT timestamp (`HH:MM:SS,mmm`) into seconds.
@@ -241,6 +300,61 @@ fn e2e_transcribe_speech_fixture_with_real_model() {
         Some(root.items.len()),
         "TOML item count must match JSON"
     );
+}
+
+#[test]
+fn batch_transcription_keeps_short_quiet_speech_near_silence() {
+    let Some(model) = e2e_model() else {
+        eprintln!("SKIPPED: POLYSCRIBE_E2E_MODEL is not set; skipping speech regressions");
+        return;
+    };
+    if !ffmpeg_available() {
+        eprintln!("SKIPPED: ffmpeg is not available on PATH; skipping speech regressions");
+        return;
+    }
+
+    let samples = wav_samples(&fixture("speech.wav"));
+    let quiet: Vec<i16> = samples
+        .iter()
+        .map(|sample| (*sample as f32 * 0.01).round() as i16)
+        .collect();
+    let short = &samples[..(SAMPLE_RATE as usize * 400 / 1_000).min(samples.len())];
+    let mut quiet_after_silence = vec![0; SAMPLE_RATE as usize * 2];
+    quiet_after_silence.extend_from_slice(&quiet);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let cases = [
+        ("quiet-40db", quiet.as_slice(), true),
+        ("short-400ms", short, false),
+        ("quiet-after-silence", quiet_after_silence.as_slice(), true),
+    ];
+    for (name, audio_samples, expect_phrase) in cases {
+        let audio = tmp.path().join(format!("{name}.wav"));
+        write_wav(&audio, audio_samples);
+        let items = transcribe_json(&audio, &model);
+        assert!(!items.is_empty(), "{name}: speech was dropped");
+        assert!(
+            items.iter().all(|item| !item.text.trim().is_empty()),
+            "{name}: transcript contains an empty segment"
+        );
+        if expect_phrase {
+            let text = items
+                .iter()
+                .map(|item| item.text.to_lowercase())
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(
+                text.contains("short test recording"),
+                "{name}: expected quiet speech was not transcribed: {text}"
+            );
+        }
+        assert!(
+            items
+                .iter()
+                .all(|item| item.end <= audio_samples.len() as f64 / SAMPLE_RATE as f64 + 0.5),
+            "{name}: segment timestamp exceeds audio duration"
+        );
+    }
 }
 
 /// Write the committed fixture repeated `times` times, so the recording is
