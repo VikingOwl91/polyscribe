@@ -112,3 +112,12 @@ jobs:
           # still being delivered. They need the same model as the test
           # above and the same one test at a time.
           cargo test --locked -p polyscribe-cli --test integration_stream -- --test-threads=1 --nocapture
+
+      - name: Run record e2e test
+        run: |
+          export POLYSCRIBE_E2E_MODEL="$HOME/.cache/polyscribe-e2e/ggml-tiny.en.bin"
+          # The record tests drive the command with a program that stands
+          # in for pw-record, so they need neither a microphone nor a
+          # PipeWire session. They need the same model and the same one
+          # test at a time.
+          cargo test --locked -p polyscribe-cli --test integration_record -- --test-threads=1 --nocapture

@@ -125,14 +125,25 @@ fn command(fake: &Fake) -> Command {
     cmd
 }
 
+/// A capture that fails is reported with a nonzero status.
+///
+/// The command needs a model, and the model is looked up when the pipeline
+/// starts, so the test names one. Without a model the run would fail with
+/// the model error instead of the error of the capture.
 #[test]
 fn a_failing_capture_is_reported_with_a_nonzero_status() {
+    let Some(model) = e2e_model() else {
+        eprintln!("SKIPPED: POLYSCRIBE_E2E_MODEL is not set; skipping the record tests");
+        return;
+    };
     let fake = Fake::new(&[
         ("FAKE_EXIT", "4"),
         ("FAKE_STDERR", "the microphone is gone"),
     ]);
     let output = command(&fake)
         .arg("record")
+        .arg("--model")
+        .arg(&model)
         .output()
         .expect("the command runs");
     assert!(
