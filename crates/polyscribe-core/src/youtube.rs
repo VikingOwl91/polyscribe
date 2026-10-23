@@ -10,7 +10,7 @@
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 
-pub const YOUTUBE_NORMALIZATION_VERSION: u32 = 2;
+pub const YOUTUBE_NORMALIZATION_VERSION: u32 = 3;
 
 /// A validated YouTube URL.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -389,7 +389,7 @@ fn novel_suffix(text: &str, words: &[(WordSpan, String)], overlap: usize) -> Str
 
 fn temporal_neighbors(previous: &CaptionCue, current: &CaptionCue) -> bool {
     const MAX_GAP_MS: u64 = 250;
-    const MAX_START_DELTA_MS: u64 = 2_000;
+    const MAX_START_DELTA_MS: u64 = 3_000;
     current.start_ms <= previous.start_ms.saturating_add(MAX_START_DELTA_MS)
         && current.start_ms <= previous.end_ms.saturating_add(MAX_GAP_MS)
         && current.end_ms >= previous.start_ms
@@ -400,7 +400,7 @@ fn canonical_spacing(text: &str) -> String {
 }
 
 fn overlap_count(previous: &[String], current: &[String]) -> usize {
-    (2..=previous.len().min(current.len()))
+    (1..=previous.len().min(current.len()))
         .rev()
         .find(|count| previous[previous.len() - count..] == current[..*count])
         .unwrap_or(0)
@@ -422,12 +422,73 @@ pub fn normalize_rolling_cues(cues: &[CaptionCue]) -> NormalizedTranscript {
     let mut previous: Option<&CaptionCue> = None;
     let mut previous_output_index: Option<usize> = None;
 
-    for (_, current) in ordered {
+    for position in 0..ordered.len() {
+        let current = ordered[position].1;
+        let next_cue = if position + 1 < ordered.len() {
+            Some(ordered[position + 1].1)
+        } else {
+            None
+        };
+
         let current_words = words(&current.text);
         if current_words.is_empty() || current.end_ms < current.start_ms {
             previous = Some(current);
             previous_output_index = None;
             continue;
+        }
+
+        // Skip exact rolling-caption duplicates even when their display
+        // windows are not within the tight 250 ms tolerance, as long as
+        // they are adjacent in time. This handles YouTube's commit cues.
+        if let Some(prior) = previous {
+            let prior_words = words(&prior.text);
+            let left: Vec<String> = prior_words.iter().map(|(_, word)| word.clone()).collect();
+            let right: Vec<String> = current_words.iter().map(|(_, word)| word.clone()).collect();
+            if !left.is_empty()
+                && left == right
+                && temporal_neighbors(prior, current)
+                && prior.speaker == current.speaker
+            {
+                stats.removed_duplicate_cues += 1;
+                if let Some(index) = previous_output_index {
+                    output[index].speaker_marker = current.speaker_marker;
+                }
+                previous = Some(current);
+                continue;
+            }
+        }
+
+        // Skip fragment/commit cues whose text is already contained in an
+        // adjacent following cue. These are intermediate rolling displays
+        // that add no new transcript content.
+        if let Some(next) = next_cue
+            && temporal_neighbors(current, next)
+        {
+            let current_normalized = current
+                .text
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_lowercase();
+            let next_normalized = next
+                .text
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_lowercase();
+            let current_words_normalized: Vec<String> =
+                current_words.iter().map(|(_, word)| word.clone()).collect();
+            let next_words = words(&next.text);
+            let next_word_strings: Vec<String> =
+                next_words.iter().map(|(_, word)| word.clone()).collect();
+            let is_prefix_of_next = next_word_strings.starts_with(&current_words_normalized);
+            if !current_normalized.is_empty()
+                && next_normalized.contains(&current_normalized)
+                && next_normalized.len() > current_normalized.len()
+                && !is_prefix_of_next
+            {
+                continue;
+            }
         }
 
         let mut consumed = false;
@@ -439,7 +500,16 @@ pub fn normalize_rolling_cues(cues: &[CaptionCue]) -> NormalizedTranscript {
             let left: Vec<String> = prior_words.iter().map(|(_, word)| word.clone()).collect();
             let right: Vec<String> = current_words.iter().map(|(_, word)| word.clone()).collect();
             if left.len() >= 2 && right.starts_with(&left) {
-                let extra = novel_suffix(&current.text, &current_words, left.len());
+                let extra_candidate_words = &current_words[left.len()..];
+                let prior_word_strings: Vec<String> =
+                    prior_words.iter().map(|(_, word)| word.clone()).collect();
+                let extra_word_strings: Vec<String> = extra_candidate_words
+                    .iter()
+                    .map(|(_, word)| word.clone())
+                    .collect();
+                let boundary_overlap = overlap_count(&prior_word_strings, &extra_word_strings);
+                let extra =
+                    novel_suffix(&current.text, &current_words, left.len() + boundary_overlap);
                 if !extra.is_empty() {
                     if let Some(index) = previous_output_index {
                         let previous_output = &mut output[index];
@@ -450,7 +520,7 @@ pub fn normalize_rolling_cues(cues: &[CaptionCue]) -> NormalizedTranscript {
                         previous_output.end_ms = previous_output.end_ms.max(current.end_ms);
                         previous_output.speaker_marker = current.speaker_marker;
                         stats.merged_updates += 1;
-                        stats.removed_overlap_tokens += left.len();
+                        stats.removed_overlap_tokens += left.len() + boundary_overlap;
                         consumed = true;
                     }
                 } else if prior.start_ms.abs_diff(current.start_ms) <= 250
@@ -466,14 +536,26 @@ pub fn normalize_rolling_cues(cues: &[CaptionCue]) -> NormalizedTranscript {
 
             if !consumed {
                 let overlap = overlap_count(&left, &right);
-                if overlap >= 2 && overlap < right.len() {
-                    let extra = novel_suffix(&current.text, &current_words, overlap);
+                if overlap >= 1 && overlap < right.len() {
+                    // Rolling captions often repeat the boundary word once
+                    // more at the start of the new content; strip that
+                    // repeated boundary word from the novel suffix.
+                    let mut boundary_duplicates = 0usize;
+                    while boundary_duplicates < right.len() - overlap
+                        && boundary_duplicates < overlap
+                        && right[overlap + boundary_duplicates]
+                            == left[left.len() - 1 - boundary_duplicates]
+                    {
+                        boundary_duplicates += 1;
+                    }
+                    let extra =
+                        novel_suffix(&current.text, &current_words, overlap + boundary_duplicates);
                     if !extra.is_empty() {
                         let mut normalized = current.clone();
                         normalized.text = canonical_spacing(&extra);
                         output.push(normalized);
                         previous_output_index = Some(output.len() - 1);
-                        stats.removed_overlap_tokens += overlap;
+                        stats.removed_overlap_tokens += overlap + boundary_duplicates;
                         consumed = true;
                     }
                 } else if overlap >= 2
