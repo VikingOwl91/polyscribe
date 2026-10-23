@@ -165,6 +165,18 @@ pub enum Commands {
         /// Prefer manual captions over automatic ones.
         #[arg(long, default_value_t = true)]
         prefer_manual: bool,
+
+        /// Ignore a cached transcript and acquire it again.
+        #[arg(long)]
+        refresh: bool,
+
+        /// Require captions and never download audio for local transcription.
+        #[arg(long, conflicts_with = "audio_only")]
+        captions_only: bool,
+
+        /// Skip captions and transcribe the downloaded audio with local Whisper.
+        #[arg(long, conflicts_with = "captions_only")]
+        audio_only: bool,
     },
 }
 
@@ -363,6 +375,41 @@ mod tests {
             "out.txt",
         ])
         .unwrap();
+    }
+
+    #[test]
+    fn youtube_modes_parse_and_exclude_each_other() {
+        Cli::try_parse_from([
+            "polyscribe",
+            "youtube",
+            "https://youtu.be/dQw4w9WgXcQ",
+            "--refresh",
+        ])
+        .unwrap();
+        Cli::try_parse_from([
+            "polyscribe",
+            "youtube",
+            "https://youtu.be/dQw4w9WgXcQ",
+            "--captions-only",
+        ])
+        .unwrap();
+        Cli::try_parse_from([
+            "polyscribe",
+            "youtube",
+            "https://youtu.be/dQw4w9WgXcQ",
+            "--audio-only",
+        ])
+        .unwrap();
+        assert!(
+            Cli::try_parse_from([
+                "polyscribe",
+                "youtube",
+                "https://youtu.be/dQw4w9WgXcQ",
+                "--audio-only",
+                "--captions-only",
+            ])
+            .is_err()
+        );
     }
 
     #[test]

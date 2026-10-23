@@ -554,3 +554,117 @@ fn e2e_transcription_on_the_gpu() {
         "the GPU backend must be used, log was: {stderr}"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn youtube_without_captions_falls_back_to_local_whisper() {
+    let Some(model) = e2e_model() else {
+        eprintln!("SKIPPED: POLYSCRIBE_E2E_MODEL is not set; skipping YouTube fallback test");
+        return;
+    };
+    if !ffmpeg_available() {
+        eprintln!("SKIPPED: ffmpeg is not available on PATH; skipping YouTube fallback test");
+        return;
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let fake = tmp.path().join("fake-yt-dlp");
+    let calls = tmp.path().join("youtube-calls.log");
+    let model_file = model.to_string_lossy().replace('\'', "'\\''");
+    let calls_file = calls.to_string_lossy().replace('\'', "'\\''");
+    let audio_fixture = fixture("speech.wav")
+        .to_string_lossy()
+        .replace('\'', "'\\''");
+    let script = format!(
+        "#!/bin/sh
+case \"$*\" in
+  *--dump-single-json*)
+    printf 'metadata\\n' >> '{calls_file}'
+    printf '%s\\n' '{{\"id\":\"dQw4w9WgXcQ\",\"title\":\"Local fallback fixture\",\"subtitles\":{{}},\"automatic_captions\":{{}}}}'
+    ;;
+  *)
+    printf 'audio\\n' >> '{calls_file}'
+    output=''
+    while [ $# -gt 0 ]; do
+      case \"$1\" in
+        --output) output=$2; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    cp '{audio_fixture}' \"${{output%.*}}.wav\"
+    ;;
+esac
+"
+    );
+    fs::write(&fake, script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    let output = Command::new(bin())
+        .args([
+            "--no-interaction",
+            "--no-progress",
+            "youtube",
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            "--language",
+            "en",
+            "--format",
+            "json",
+        ])
+        .env("WHISPER_MODEL", model_file)
+        .env("POLYSCRIBE_YTDLP", &fake)
+        .env("XDG_CACHE_HOME", tmp.path().join("cache"))
+        .env("HOME", tmp.path())
+        .output()
+        .expect("launch YouTube fallback command");
+    assert!(
+        output.status.success(),
+        "YouTube fallback failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let transcript: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("YouTube JSON output parses");
+    assert_eq!(transcript["source"], "local-whisper");
+    assert_eq!(transcript["title"], "Local fallback fixture");
+    let cues = transcript["cues"].as_array().expect("cue list exists");
+    assert!(!cues.is_empty(), "Whisper produced no cues");
+    assert!(cues.iter().any(|cue| {
+        cue["text"]
+            .as_str()
+            .is_some_and(|text| !text.trim().is_empty())
+    }));
+
+    let audio_only = Command::new(bin())
+        .args([
+            "--no-interaction",
+            "--no-progress",
+            "youtube",
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            "--language",
+            "en",
+            "--audio-only",
+            "--format",
+            "json",
+        ])
+        .env("WHISPER_MODEL", &model)
+        .env("POLYSCRIBE_YTDLP", &fake)
+        .env("XDG_CACHE_HOME", tmp.path().join("cache"))
+        .env("HOME", tmp.path())
+        .output()
+        .expect("launch audio-only YouTube command");
+    assert!(
+        audio_only.status.success(),
+        "audio-only YouTube run failed: {}",
+        String::from_utf8_lossy(&audio_only.stderr)
+    );
+    let audio_transcript: serde_json::Value =
+        serde_json::from_slice(&audio_only.stdout).expect("audio-only JSON output parses");
+    assert_eq!(audio_transcript["source"], "local-whisper");
+    assert_eq!(
+        fs::read_to_string(calls).unwrap(),
+        "metadata\naudio\naudio\n"
+    );
+}

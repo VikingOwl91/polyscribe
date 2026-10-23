@@ -10,6 +10,8 @@
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 
+pub const YOUTUBE_NORMALIZATION_VERSION: u32 = 2;
+
 /// A validated YouTube URL.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct YouTubeUrl {
@@ -118,184 +120,394 @@ pub struct CaptionCue {
     pub start_ms: u64,
     pub end_ms: u64,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub speaker_marker: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 /// A parsed WebVTT file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VttDocument {
     pub cues: Vec<CaptionCue>,
+    pub malformed_cues: usize,
+    pub empty_cues: usize,
 }
 
 /// Parse a WebVTT string into cues.
 pub fn parse_vtt(input: &str) -> Result<VttDocument> {
     let mut cues = Vec::new();
-    // Normalize line endings.
-    let input = input.replace("\r\n", "\n").replace('\r', "\n");
-    let lines: Vec<&str> = input.lines().collect();
-    let mut i = 0;
-
-    // Skip header.
-    while i < lines.len() && !lines[i].trim().is_empty() {
-        i += 1;
+    let mut malformed_cues = 0;
+    let mut empty_cues = 0;
+    let normalized = input
+        .trim_start_matches('\u{feff}')
+        .replace("\r\n", "\n")
+        .replace('\r', "\n");
+    let mut blocks = normalized.split("\n\n");
+    let header = blocks.next().unwrap_or_default();
+    let header_line = header.lines().next().unwrap_or_default().trim_start();
+    if !(header_line == "WEBVTT"
+        || header_line.starts_with("WEBVTT ")
+        || header_line.starts_with("WEBVTT\t"))
+    {
+        return Err(anyhow!("missing WebVTT header"));
     }
-    // Skip blank lines after header.
-    while i < lines.len() && lines[i].trim().is_empty() {
-        i += 1;
-    }
 
-    while i < lines.len() {
-        // Skip blank lines between cues.
-        while i < lines.len() && lines[i].trim().is_empty() {
-            i += 1;
+    for block in blocks {
+        let lines: Vec<&str> = block.lines().collect();
+        let Some(first) = lines.iter().position(|line| !line.trim().is_empty()) else {
+            continue;
+        };
+        let first_line = lines[first].trim();
+        if first_line == "STYLE" || first_line == "REGION" || first_line.starts_with("NOTE") {
+            continue;
         }
-        if i >= lines.len() {
-            break;
-        }
-
-        // Optional cue identifier.
-        let mut line = lines[i].trim();
-        if !line.contains("-->") {
-            // This might be a cue ID; skip it.
-            i += 1;
-            if i >= lines.len() {
-                break;
-            }
-            line = lines[i].trim();
-        }
-
-        // Parse timestamp line.
-        if !line.contains("-->") {
-            // Malformed: skip.
-            i += 1;
+        let time_index = if first_line.contains("-->") {
+            first
+        } else {
+            first + 1
+        };
+        let Some(time_line) = lines.get(time_index).map(|line| line.trim()) else {
+            malformed_cues += 1;
+            continue;
+        };
+        let Some((start_raw, end_raw)) = time_line.split_once("-->") else {
+            malformed_cues += 1;
+            continue;
+        };
+        let Some(start_ms) = parse_vtt_timestamp(start_raw.trim()) else {
+            malformed_cues += 1;
+            continue;
+        };
+        let end_raw = end_raw.split_whitespace().next().unwrap_or_default();
+        let Some(end_ms) = parse_vtt_timestamp(end_raw) else {
+            malformed_cues += 1;
+            continue;
+        };
+        if end_ms < start_ms {
+            malformed_cues += 1;
             continue;
         }
 
-        let parts: Vec<&str> = line.split("-->").collect();
-        if parts.len() < 2 {
-            i += 1;
+        let raw_text = lines[time_index + 1..].join("\n");
+        let (text, speaker, speaker_marker) = clean_vtt_text(&raw_text);
+        if text.is_empty() {
+            empty_cues += 1;
             continue;
         }
-
-        let start = parse_vtt_timestamp(parts[0].trim());
-        let end_part = parts[1].trim();
-        // End timestamp may have settings after it.
-        let end_str = end_part.split_whitespace().next().unwrap_or(end_part);
-        let end = parse_vtt_timestamp(end_str);
-
-        if start.is_none() || end.is_none() {
-            i += 1;
-            continue;
-        }
-        let start_ms = start.unwrap();
-        let end_ms = end.unwrap();
-
-        // Collect cue text (until blank line).
-        i += 1;
-        let mut text_lines = Vec::new();
-        while i < lines.len() && !lines[i].trim().is_empty() {
-            text_lines.push(lines[i]);
-            i += 1;
-        }
-
-        let raw_text = text_lines.join("\n");
-        let text = clean_vtt_text(&raw_text);
-
-        if !text.is_empty() {
-            cues.push(CaptionCue {
-                start_ms,
-                end_ms: end_ms.max(start_ms),
-                text,
-            });
-        }
+        cues.push(CaptionCue {
+            start_ms,
+            end_ms,
+            text,
+            speaker,
+            speaker_marker,
+        });
     }
 
-    Ok(VttDocument { cues })
+    Ok(VttDocument {
+        cues,
+        malformed_cues,
+        empty_cues,
+    })
 }
 
 fn parse_vtt_timestamp(s: &str) -> Option<u64> {
-    // Formats: HH:MM:SS.mmm or MM:SS.mmm
     let s = s.trim();
     let parts: Vec<&str> = s.split(':').collect();
-    let (hours, mins, secs) = match parts.len() {
-        3 => {
-            let h: u64 = parts[0].parse().ok()?;
-            let m: u64 = parts[1].parse().ok()?;
-            let s: f64 = parts[2].parse().ok()?;
-            (h, m, s)
-        }
-        2 => {
-            let m: u64 = parts[0].parse().ok()?;
-            let s: f64 = parts[1].parse().ok()?;
-            (0, m, s)
-        }
+    let (hours, minutes, seconds) = match parts.as_slice() {
+        [hours, minutes, seconds] => (
+            hours.parse::<u64>().ok()?,
+            minutes.parse::<u64>().ok()?,
+            *seconds,
+        ),
+        [minutes, seconds] => (0, minutes.parse::<u64>().ok()?, *seconds),
         _ => return None,
     };
-    let total_ms = hours * 3_600_000 + mins * 60_000 + (secs * 1000.0).round() as u64;
-    Some(total_ms)
+    if minutes > 59 {
+        return None;
+    }
+    let (whole_seconds, fraction) = seconds.split_once('.')?;
+    let whole_seconds = whole_seconds.parse::<u64>().ok()?;
+    if whole_seconds > 59
+        || fraction.is_empty()
+        || fraction.len() > 3
+        || !fraction.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    let mut millis = fraction.parse::<u64>().ok()?;
+    for _ in fraction.len()..3 {
+        millis *= 10;
+    }
+    hours
+        .checked_mul(3_600_000)?
+        .checked_add(minutes.checked_mul(60_000)?)?
+        .checked_add(whole_seconds.checked_mul(1000)?)?
+        .checked_add(millis)
 }
 
-fn clean_vtt_text(raw: &str) -> String {
-    // Remove HTML tags, voice tags, and normalize whitespace.
-    let mut result = String::new();
-    let mut in_tag = false;
-    for ch in raw.chars() {
+fn clean_vtt_text(raw: &str) -> (String, Option<String>, bool) {
+    let mut text = String::new();
+    let mut speaker = None;
+    let mut inside_tag = false;
+    let mut tag = String::new();
+    let mut chars = raw.chars().peekable();
+    while let Some(ch) = chars.next() {
         if ch == '<' {
-            in_tag = true;
-        } else if ch == '>' {
-            in_tag = false;
-        } else if !in_tag {
-            result.push(ch);
+            inside_tag = true;
+            tag.clear();
+        } else if ch == '>' && inside_tag {
+            inside_tag = false;
+            if let Some(name) = tag.strip_prefix('v')
+                && let Some(name) = name
+                    .chars()
+                    .next()
+                    .filter(|c| c.is_whitespace())
+                    .map(|_| name.trim())
+                && !name.is_empty()
+            {
+                speaker = Some(name.to_string());
+            }
+        } else if inside_tag {
+            tag.push(ch);
+        } else if ch == '&' {
+            let mut entity = String::new();
+            while let Some(next) = chars.peek().copied() {
+                if next == ';' || entity.len() >= 12 {
+                    break;
+                }
+                if next.is_whitespace() || next == '&' || next == '<' {
+                    break;
+                }
+                entity.push(next);
+                chars.next();
+            }
+            if chars.peek() == Some(&';') {
+                chars.next();
+                if let Some(decoded) = decode_entity(&entity) {
+                    text.push(decoded);
+                } else {
+                    text.push('&');
+                    text.push_str(&entity);
+                    text.push(';');
+                }
+            } else {
+                text.push('&');
+                text.push_str(&entity);
+            }
+        } else {
+            text.push(ch);
         }
     }
-    // Decode common HTML entities.
-    let result = result
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&apos;", "'");
-    // Normalize whitespace: collapse multiple spaces/newlines.
-    result.split_whitespace().collect::<Vec<_>>().join(" ")
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let (text, marker) = if let Some(text) = text.strip_prefix(">>") {
+        (text.trim_start().to_string(), true)
+    } else {
+        (text, false)
+    };
+    (text, speaker, marker)
 }
 
-/// Deduplicate rolling captions.
-///
-/// YouTube automatic captions often progressively extend earlier text:
-/// "The quick" -> "The quick brown" -> "The quick brown fox".
-/// This function keeps only the final version of each rolling sequence.
-pub fn dedup_rolling(cues: &[CaptionCue]) -> Vec<CaptionCue> {
-    if cues.is_empty() {
-        return Vec::new();
+fn decode_entity(entity: &str) -> Option<char> {
+    match entity {
+        "amp" => Some('&'),
+        "lt" => Some('<'),
+        "gt" => Some('>'),
+        "quot" => Some('"'),
+        "apos" | "#39" => Some('\''),
+        "nbsp" => Some('\u{00a0}'),
+        "hellip" => Some('…'),
+        _ if entity.starts_with("#x") || entity.starts_with("#X") => {
+            char::from_u32(u32::from_str_radix(&entity[2..], 16).ok()?)
+        }
+        _ if entity.starts_with('#') => char::from_u32(entity[1..].parse().ok()?),
+        _ => None,
     }
+}
 
-    let mut result: Vec<CaptionCue> = Vec::new();
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NormalizationStats {
+    pub merged_updates: usize,
+    pub removed_duplicate_cues: usize,
+    pub removed_overlap_tokens: usize,
+}
 
-    for cue in cues {
-        if let Some(last) = result.last_mut() {
-            // Check if this cue is a rolling extension of the last one.
-            let last_text = last.text.to_lowercase();
-            let curr_text = cue.text.to_lowercase();
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NormalizedTranscript {
+    pub cues: Vec<CaptionCue>,
+    pub stats: NormalizationStats,
+}
 
-            if curr_text.starts_with(&last_text) && curr_text.len() > last_text.len() {
-                // Rolling extension: replace the last cue's text and end time.
-                last.text = cue.text.clone();
-                last.end_ms = cue.end_ms.max(last.end_ms);
+#[derive(Debug, Clone, Copy)]
+struct WordSpan {
+    start: usize,
+}
+
+fn words(text: &str) -> Vec<(WordSpan, String)> {
+    let mut result = Vec::new();
+    let mut start = None;
+    for (index, ch) in text.char_indices() {
+        if !ch.is_whitespace() {
+            start.get_or_insert(index);
+        } else if let Some(word_start) = start.take() {
+            let raw = &text[word_start..index];
+            let normalized: String = raw
+                .chars()
+                .filter(|ch| ch.is_alphanumeric())
+                .flat_map(char::to_lowercase)
+                .collect();
+            if normalized.is_empty() {
                 continue;
             }
+            result.push((WordSpan { start: word_start }, normalized));
+        }
+    }
+    if let Some(word_start) = start {
+        let raw = &text[word_start..];
+        let normalized: String = raw
+            .chars()
+            .filter(|ch| ch.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect();
+        if !normalized.is_empty() {
+            result.push((WordSpan { start: word_start }, normalized));
+        }
+    }
+    result
+}
 
-            // Check if this cue is an exact duplicate at the same time.
-            // Identical text at different timestamps is legitimate repetition
-            // and must be kept.
-            if curr_text == last_text && cue.start_ms == last.start_ms && cue.end_ms == last.end_ms
-            {
-                continue;
+fn novel_suffix(text: &str, words: &[(WordSpan, String)], overlap: usize) -> String {
+    if overlap >= words.len() {
+        return String::new();
+    }
+    text[words[overlap].0.start..].trim().to_string()
+}
+
+fn temporal_neighbors(previous: &CaptionCue, current: &CaptionCue) -> bool {
+    const MAX_GAP_MS: u64 = 250;
+    const MAX_START_DELTA_MS: u64 = 2_000;
+    current.start_ms <= previous.start_ms.saturating_add(MAX_START_DELTA_MS)
+        && current.start_ms <= previous.end_ms.saturating_add(MAX_GAP_MS)
+        && current.end_ms >= previous.start_ms
+}
+
+fn canonical_spacing(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn overlap_count(previous: &[String], current: &[String]) -> usize {
+    (2..=previous.len().min(current.len()))
+        .rev()
+        .find(|count| previous[previous.len() - count..] == current[..*count])
+        .unwrap_or(0)
+}
+
+/// Normalize only adjacent, temporally related rolling captions.
+///
+/// Complete words are compared case-insensitively after punctuation is
+/// ignored. At least two words and overlapping or near-touching cue times are
+/// required. Ambiguous one-word matches, speaker changes, corrections, and
+/// distant repetitions are retained. Cue order is made chronological for
+/// rendering; original parsed cues remain available to the caller.
+pub fn normalize_rolling_cues(cues: &[CaptionCue]) -> NormalizedTranscript {
+    let mut ordered: Vec<(usize, &CaptionCue)> = cues.iter().enumerate().collect();
+    ordered.sort_by_key(|(index, cue)| (cue.start_ms, cue.end_ms, *index));
+
+    let mut output: Vec<CaptionCue> = Vec::new();
+    let mut stats = NormalizationStats::default();
+    let mut previous: Option<&CaptionCue> = None;
+    let mut previous_output_index: Option<usize> = None;
+
+    for (_, current) in ordered {
+        let current_words = words(&current.text);
+        if current_words.is_empty() || current.end_ms < current.start_ms {
+            previous = Some(current);
+            previous_output_index = None;
+            continue;
+        }
+
+        let mut consumed = false;
+        if let Some(prior) = previous
+            && temporal_neighbors(prior, current)
+            && prior.speaker == current.speaker
+        {
+            let prior_words = words(&prior.text);
+            let left: Vec<String> = prior_words.iter().map(|(_, word)| word.clone()).collect();
+            let right: Vec<String> = current_words.iter().map(|(_, word)| word.clone()).collect();
+            if left.len() >= 2 && right.starts_with(&left) {
+                let extra = novel_suffix(&current.text, &current_words, left.len());
+                if !extra.is_empty() {
+                    if let Some(index) = previous_output_index {
+                        let previous_output = &mut output[index];
+                        if !previous_output.text.is_empty() {
+                            previous_output.text.push(' ');
+                        }
+                        previous_output.text.push_str(&canonical_spacing(&extra));
+                        previous_output.end_ms = previous_output.end_ms.max(current.end_ms);
+                        previous_output.speaker_marker = current.speaker_marker;
+                        stats.merged_updates += 1;
+                        stats.removed_overlap_tokens += left.len();
+                        consumed = true;
+                    }
+                } else if prior.start_ms.abs_diff(current.start_ms) <= 250
+                    && prior.end_ms.abs_diff(current.end_ms) <= 250
+                {
+                    if let Some(index) = previous_output_index {
+                        output[index].speaker_marker = current.speaker_marker;
+                    }
+                    stats.removed_duplicate_cues += 1;
+                    consumed = true;
+                }
+            }
+
+            if !consumed {
+                let overlap = overlap_count(&left, &right);
+                if overlap >= 2 && overlap < right.len() {
+                    let extra = novel_suffix(&current.text, &current_words, overlap);
+                    if !extra.is_empty() {
+                        let mut normalized = current.clone();
+                        normalized.text = canonical_spacing(&extra);
+                        output.push(normalized);
+                        previous_output_index = Some(output.len() - 1);
+                        stats.removed_overlap_tokens += overlap;
+                        consumed = true;
+                    }
+                } else if overlap >= 2
+                    && overlap == right.len()
+                    && prior.start_ms.abs_diff(current.start_ms) <= 250
+                    && prior.end_ms.abs_diff(current.end_ms) <= 250
+                {
+                    if let Some(index) = previous_output_index {
+                        output[index].speaker_marker = current.speaker_marker;
+                    }
+                    stats.removed_duplicate_cues += 1;
+                    consumed = true;
+                }
             }
         }
-        result.push(cue.clone());
+
+        if !consumed {
+            let mut normalized = current.clone();
+            normalized.text = canonical_spacing(&normalized.text);
+            output.push(normalized);
+            previous_output_index = Some(output.len() - 1);
+        }
+        previous = Some(current);
     }
 
-    result
+    NormalizedTranscript {
+        cues: output,
+        stats,
+    }
+}
+
+/// Compatibility helper returning only normalized cues.
+pub fn dedup_rolling(cues: &[CaptionCue]) -> Vec<CaptionCue> {
+    normalize_rolling_cues(cues).cues
 }
 
 /// Metadata retrieved from yt-dlp.
@@ -433,15 +645,36 @@ pub fn select_caption_track(
         return Some((*automatic[0]).clone());
     }
 
+    // A manual track is still usable when automatic captions are absent,
+    // even if the caller prefers automatic captions when both kinds exist.
+    if !manual.is_empty() {
+        for track in &manual {
+            if track.language.to_lowercase().starts_with("en") {
+                return Some((*track).clone());
+            }
+        }
+        return Some((*manual[0]).clone());
+    }
+
     None
 }
 
 /// Render cues as plain text.
 pub fn render_txt(cues: &[CaptionCue]) -> String {
     cues.iter()
-        .map(|c| c.text.as_str())
+        .map(rendered_cue_text)
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn rendered_cue_text(cue: &CaptionCue) -> String {
+    if let Some(speaker) = &cue.speaker {
+        format!("{speaker}: {}", cue.text)
+    } else if cue.speaker_marker {
+        format!(">> {}", cue.text)
+    } else {
+        cue.text.clone()
+    }
 }
 
 /// Render cues as SRT.
@@ -454,7 +687,7 @@ pub fn render_srt(cues: &[CaptionCue]) -> String {
             format_srt_time(cue.start_ms),
             format_srt_time(cue.end_ms)
         ));
-        out.push_str(&cue.text);
+        out.push_str(&rendered_cue_text(cue));
         out.push_str("\n\n");
     }
     out
@@ -498,6 +731,16 @@ pub fn sanitize_filename(input: &str) -> String {
 mod tests {
     use super::*;
 
+    fn cue(start_ms: u64, end_ms: u64, text: &str) -> CaptionCue {
+        CaptionCue {
+            start_ms,
+            end_ms,
+            text: text.to_string(),
+            speaker: None,
+            speaker_marker: false,
+        }
+    }
+
     #[test]
     fn test_validate_youtube_url_watch() {
         let url = validate_youtube_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ").unwrap();
@@ -535,6 +778,8 @@ mod tests {
         assert_eq!(doc.cues[0].text, "Hello world");
         assert_eq!(doc.cues[0].start_ms, 1000);
         assert_eq!(doc.cues[0].end_ms, 3000);
+        assert_eq!(doc.malformed_cues, 0);
+        assert_eq!(doc.empty_cues, 0);
     }
 
     #[test]
@@ -547,17 +792,132 @@ mod tests {
     }
 
     #[test]
+    fn fixture_normalizes_overlap_without_dropping_the_novel_phrase() {
+        let vtt = include_str!("../tests/fixtures/youtube/rolling-overlap.vtt");
+        let parsed = parse_vtt(vtt).unwrap();
+        let normalized = normalize_rolling_cues(&parsed.cues);
+        assert_eq!(parsed.cues.len(), 5);
+        assert_eq!(normalized.cues.len(), 3);
+        assert_eq!(
+            normalized.cues[0].text,
+            "That's supposed to be confidential, but"
+        );
+        assert!(normalized.cues[0].speaker_marker);
+        assert_eq!(
+            normalized.cues[1].text,
+            "yeah, I did report you to HR. I sent"
+        );
+        assert_eq!(normalized.cues[2].text, "the report yesterday.");
+        assert_eq!(normalized.stats.removed_duplicate_cues, 2);
+        assert_eq!(normalized.stats.removed_overlap_tokens, 2);
+        assert_eq!(
+            render_txt(&normalized.cues),
+            ">> That's supposed to be confidential, but yeah, I did report you to HR. I sent the report yesterday."
+        );
+    }
+
+    #[test]
+    fn sliding_overlap_requires_two_complete_words_and_preserves_repeated_lyrics() {
+        let normalized = normalize_rolling_cues(&[
+            cue(0, 2000, "We can try again."),
+            cue(1500, 3500, "can try again, tomorrow."),
+            cue(8000, 9500, "Never gonna give you up."),
+            cue(12_000, 13_500, "Never gonna give you up."),
+        ]);
+        assert_eq!(normalized.cues.len(), 4);
+        assert_eq!(normalized.cues[1].text, "tomorrow.");
+        assert_eq!(normalized.cues[2].text, "Never gonna give you up.");
+        assert_eq!(normalized.cues[3].text, "Never gonna give you up.");
+        assert_eq!(
+            normalize_rolling_cues(&[cue(10_000, 11_000, "We can."), cue(10_100, 11_100, "can."),])
+                .cues
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn punctuation_whitespace_and_sentence_boundary_updates_are_normalized() {
+        let normalized = normalize_rolling_cues(&[
+            cue(1000, 2000, "Well,   this is the first sentence"),
+            cue(1800, 3000, "WELL this is the first sentence. And then"),
+            cue(4000, 5000, "That's a phrase"),
+            cue(4800, 6000, "Thats a phrase, continued"),
+            cue(7000, 20_000, "We will be back again."),
+            cue(15_000, 16_000, "We will be back again."),
+        ]);
+        assert_eq!(normalized.cues.len(), 4);
+        assert_eq!(
+            normalized.cues[0].text,
+            "Well, this is the first sentence And then"
+        );
+        assert_eq!(normalized.cues[0].start_ms, 1000);
+        assert_eq!(normalized.cues[0].end_ms, 3000);
+        assert_eq!(normalized.cues[1].text, "That's a phrase continued");
+        assert_eq!(normalized.cues[2].text, "We will be back again.");
+        assert_eq!(normalized.cues[3].text, "We will be back again.");
+    }
+
+    #[test]
+    fn speaker_changes_are_not_merged_and_voice_markup_is_preserved() {
+        let document = parse_vtt(
+            "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\n<v Alice>Hello there.</v>\n\n00:00:01.500 --> 00:00:02.500\n<v Bob>Hello there.</v>\n",
+        )
+        .unwrap();
+        assert_eq!(document.cues[0].speaker.as_deref(), Some("Alice"));
+        assert_eq!(document.cues[1].speaker.as_deref(), Some("Bob"));
+        assert_eq!(normalize_rolling_cues(&document.cues).cues.len(), 2);
+        assert_eq!(
+            render_txt(&document.cues),
+            "Alice: Hello there. Bob: Hello there."
+        );
+    }
+
+    #[test]
+    fn parser_decodes_entities_handles_crlf_and_reports_bad_or_empty_cues() {
+        let vtt = "WEBVTT\r\n\r\n00:00:01.0 --> 00:00:02.00\r\n< b >Unicode &amp; punctuation &#x1F642; &nbsp;終わり</b>\r\n\r\n00:00:03.000 --> nope\r\nBad time\r\n\r\n00:00:04.000 --> 00:00:05.000\r\n<b></b>\r\n";
+        let document = parse_vtt(vtt).unwrap();
+        assert_eq!(document.cues.len(), 1);
+        assert_eq!(document.cues[0].start_ms, 1000);
+        assert_eq!(document.cues[0].text, "Unicode & punctuation 🙂 終わり");
+        assert_eq!(document.malformed_cues, 1);
+        assert_eq!(document.empty_cues, 1);
+    }
+
+    #[test]
+    fn out_of_order_and_overlapping_cues_render_with_monotonic_starts() {
+        let normalized = normalize_rolling_cues(&[
+            cue(3000, 5000, "A different phrase"),
+            cue(1000, 4000, "First phrase"),
+            cue(2000, 4500, "First phrase repeats"),
+        ]);
+        assert_eq!(normalized.cues[0].start_ms, 1000);
+        assert!(
+            normalized
+                .cues
+                .windows(2)
+                .all(|pair| pair[0].start_ms <= pair[1].start_ms)
+        );
+        assert!(normalized.cues.iter().all(|cue| cue.end_ms >= cue.start_ms));
+        assert_eq!(normalized.cues.len(), 2);
+    }
+
+    #[test]
     fn test_dedup_preserves_repeated() {
         let cues = vec![
             CaptionCue {
                 start_ms: 1000,
                 end_ms: 2000,
                 text: "Hello".to_string(),
+                speaker: None,
+                speaker_marker: false,
             },
             CaptionCue {
                 start_ms: 3000,
                 end_ms: 4000,
                 text: "Hello".to_string(),
+                speaker: None,
+                speaker_marker: false,
             },
         ];
         let deduped = dedup_rolling(&cues);
@@ -570,6 +930,8 @@ mod tests {
             start_ms: 1000,
             end_ms: 3000,
             text: "Hello".to_string(),
+            speaker: None,
+            speaker_marker: false,
         }];
         let srt = render_srt(&cues);
         assert!(srt.contains("1\n"));
@@ -603,6 +965,31 @@ mod tests {
             is_translated: false,
         }];
         let selected = select_caption_track(&manual, &auto, None, true).unwrap();
+        assert!(!selected.is_automatic);
+    }
+
+    #[test]
+    fn selection_falls_back_to_manual_when_automatic_is_preferred_but_absent() {
+        let manual = vec![
+            CaptionTrack {
+                language: "de".to_string(),
+                name: Some("German".to_string()),
+                url: None,
+                ext: Some("vtt".to_string()),
+                is_automatic: false,
+                is_translated: false,
+            },
+            CaptionTrack {
+                language: "en".to_string(),
+                name: Some("English".to_string()),
+                url: None,
+                ext: Some("vtt".to_string()),
+                is_automatic: false,
+                is_translated: false,
+            },
+        ];
+        let selected = select_caption_track(&manual, &[], None, false).unwrap();
+        assert_eq!(selected.language, "en");
         assert!(!selected.is_automatic);
     }
 

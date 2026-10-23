@@ -5,7 +5,8 @@ PolyScribe is a fast, local-first CLI for transcribing audio/video and merging e
 ## Features
 
 - **Live microphone transcription**: `polyscribe record` captures the microphone through PipeWire and transcribes it while the recording runs. The audio is decoded incrementally, the memory does not grow with the length of the recording, and multilingual models detect the language by default.
-- **Local-first**: transcription runs fully offline once a model is present; network access is only used by the `models` subcommands (Hugging Face over HTTPS).
+- **Local-first**: Whisper inference always runs locally. Network access is used for model management and the opt-in YouTube downloader.
+- **YouTube transcripts**: captions are preferred and normalized; when a video has no usable captions, PolyScribe can download audio and use the installed local Whisper model.
 - **Transcription**: audio and common video files are decoded to 16 kHz mono PCM via ffmpeg and transcribed with whisper.cpp.
 - **Transcript merging**: merge multiple JSON transcripts, or merge and also keep per-file outputs.
 - **Model management**: `polyscribe models` subcommands to list, add, remove, verify, update, search, and download models, with a manifest cache, concurrent ranged downloads, and SHA-256 verification.
@@ -29,6 +30,7 @@ PolyScribe is a fast, local-first CLI for transcribing audio/video and merging e
 - Rust 1.88 or newer (MSRV; `rustup` recommended; `rust-toolchain.toml` pins 1.89 for development)
 - A C/C++ toolchain, `cmake`, and `libclang` (needed to build whisper.cpp and its Rust bindings)
 - `ffmpeg` available on `PATH` at runtime
+- `yt-dlp` available on `PATH` for `polyscribe youtube`
 - For `polyscribe record`: a running PipeWire session and `pw-record` on `PATH` (the Arch package `pipewire-audio`)
 - A writable `TMPDIR` with a few GB free for GPU builds and GPU runs: the HIP and CUDA runtimes compile device code at runtime, and a full `/tmp` makes the run fail with an LLVM I/O error
 - Optional for GPU builds at build and run time: CUDA toolkit/driver (NVIDIA) or ROCm (AMD)
@@ -59,6 +61,12 @@ cargo install --path crates/polyscribe-cli
 ```bash
 # Transcribe audio/video (requires --language)
 polyscribe transcribe --language en -o output input.mp4
+
+# Retrieve and normalize captions; local Whisper is used only when captions are absent
+polyscribe youtube 'https://www.youtube.com/watch?v=VIDEO_ID' --language en --format srt
+polyscribe youtube 'https://www.youtube.com/watch?v=VIDEO_ID' --captions-only
+polyscribe youtube 'https://www.youtube.com/watch?v=VIDEO_ID' --audio-only --language en
+polyscribe youtube 'https://www.youtube.com/watch?v=VIDEO_ID' --refresh
 
 # Record the microphone and transcribe it while the recording runs
 polyscribe record                            # the language is detected
@@ -96,6 +104,7 @@ Run `polyscribe -h` or `polyscribe <subcommand> -h` for the full reference; `doc
 - Transcription models: `$XDG_DATA_HOME/polyscribe/models` (or `~/.local/share/polyscribe/models`), the same in debug and release builds; models installed with `models add` in the cache dir are found automatically. Override with `POLYSCRIBE_MODELS_DIR`; force a specific file with `WHISPER_MODEL`.
 - `models` subcommands use a separate cache: `$XDG_CACHE_HOME/polyscribe/models` for model files and `$XDG_CONFIG_HOME/polyscribe/models.json` for the manifest. Override with `POLYSCRIBE_CACHE_DIR` / `POLYSCRIBE_CONFIG_DIR`.
 - The Hugging Face manifest is cached (`$XDG_CACHE_HOME/polyscribe/manifest/`, 24 h TTL); `POLYSCRIBE_NO_CACHE_MANIFEST=1` disables it, `POLYSCRIBE_MANIFEST_TTL_SECONDS` changes the TTL.
+- YouTube transcripts are cached under `$XDG_CACHE_HOME/polyscribe/youtube/v1/` (or `~/.cache/polyscribe/youtube/v1/`). The cache is versioned, private, and shared across TXT/SRT/JSON renders. Use `youtube --refresh` to bypass it.
 - `HF_TOKEN` is used for authenticated Hugging Face API/download requests when set.
 
 ## Notes and limitations
@@ -103,6 +112,7 @@ Run `polyscribe -h` or `polyscribe <subcommand> -h` for the full reference; `doc
 - **No Vulkan backend**: PolyScribe does not wire up whisper.cpp's Vulkan backend; `--gpu-backend vulkan` is rejected.
 - **GPU support is experimental**: the CUDA and HIP backends are wired up at build time, but no GPU runtime is exercised in CI. Availability is a build-time property: build with `--features gpu-cuda` / `--features gpu-hip` and install the matching runtime; `--gpu-backend auto` picks CUDA → HIP → CPU among the backends compiled in.
 - **No automatic speaker diarization**: speaker labels are assigned manually per input file (`--set-speaker-names`); the downloader lists `tinydiarize` models but diarization is not wired into transcription.
+- **YouTube fallback is conservative**: an explicitly requested caption language is never replaced. HTTP 403/429, network failures, and malformed caption files fail instead of starting audio transcription. Audio downloads are size- and time-limited; the ffmpeg decoder has a deadline, but Whisper inference runs in-process and has no hard timeout.
 - **A transcript can be incomplete at a window boundary**: whisper does not always report a segment for the beginning of the audio it is given. PolyScribe decodes such a region again from a slightly different position, and warns on stderr when the region still holds no text. The check that decides whether a region carries speech is a level and a share of frames, not a voice activity detector, so the pipeline cannot promise that every word of a recording is in the transcript.
 
 ## Development

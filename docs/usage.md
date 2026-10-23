@@ -2,7 +2,7 @@
 
 PolyScribe is a command-line tool. Run `polyscribe -h` at any time to see the latest help.
 
-The CLI is organized into subcommands: `transcribe`, `record`, `models`, `plugins`, `completions`, and `man`. Global flags `--json` and `--quiet` are accepted before or after the subcommand; `-v/--verbose`, `--no-interaction`, and `--no-progress` are top-level flags (before the subcommand).
+The CLI is organized into subcommands: `transcribe`, `youtube`, `record`, `models`, `plugins`, `completions`, and `man`. Global flags `--json` and `--quiet` are accepted before or after the subcommand; `-v/--verbose`, `--no-interaction`, and `--no-progress` are top-level flags (before the subcommand).
 
 ## Common patterns
 
@@ -54,6 +54,50 @@ The CLI is organized into subcommands: `transcribe`, `record`, `models`, `plugin
   - The per-window diagnostics are opt-in: set `POLYSCRIBE_WINDOW_TRACE=1` to
     get the sample range of every window and every region that whisper did not
     report on stderr.
+
+## youtube
+
+`polyscribe youtube URL` retrieves and normalizes WebVTT captions. It requires
+`yt-dlp` on `PATH`. Captions are tried first unless `--audio-only` is set.
+When no usable caption track exists, the default mode downloads the audio and
+transcribes it with an installed local Whisper model. That fallback is not used
+for HTTP 403/429 responses, network failures, an unavailable explicitly
+requested caption language, or malformed subtitle data.
+
+```bash
+polyscribe youtube 'https://www.youtube.com/watch?v=VIDEO_ID' --language en
+polyscribe youtube 'https://youtu.be/VIDEO_ID' --language de --format srt -o captions.srt
+polyscribe youtube 'https://www.youtube.com/watch?v=VIDEO_ID' --captions-only
+polyscribe youtube 'https://www.youtube.com/watch?v=VIDEO_ID' --audio-only --language en
+polyscribe youtube 'https://www.youtube.com/watch?v=VIDEO_ID' --refresh
+```
+
+- `--language LANG` — request only that caption language. It is also passed as
+  the language hint for a local audio fallback. If the requested caption track
+  is unavailable, the command fails clearly and does not substitute another
+  track or start a fallback.
+- `--format txt|srt|json` — output format; defaults to `txt`. JSON retains cue
+  timestamps, speaker information, source, selected caption language, and
+  normalization counts.
+- `-o, --output FILE` — write the rendered transcript to a file. Without it,
+  the transcript is written to stdout.
+- `--captions-only` — require captions and never download audio.
+- `--audio-only` — skip caption metadata and download audio for local Whisper.
+  This conflicts with `--captions-only`.
+- `--refresh` — bypass the transcript cache and acquire a fresh result.
+- `--prefer-manual` — prefer manually authored captions (the default).
+
+Transcript data is cached independently of its render format under
+`$XDG_CACHE_HOME/polyscribe/youtube/v1/`, or `~/.cache/polyscribe/youtube/v1/`
+when `XDG_CACHE_HOME` is unset. Cache entries are versioned, written atomically,
+and rejected if their directory or file ownership and permissions are unsafe.
+The `yt-dlp` process receives a temporary home/cache and ignores user config;
+temporary downloads are removed when the command exits.
+
+Audio downloads are limited to 250 MiB and 15 minutes. Caption files are
+limited to 50 MiB. The ffmpeg decoder has a 60-minute process deadline. That
+deadline does not interrupt a Whisper inference call already running in the
+PolyScribe process.
 
 ## record
 
@@ -215,4 +259,4 @@ Model files live in `$XDG_CACHE_HOME/polyscribe/models` (override `POLYSCRIBE_CA
 - Supported platforms: Linux x86_64 is the tested platform (CI builds, tests and transcribes on CPU there). macOS is expected to work but untested. Windows is not supported and does not compile.
 - GPU support is a build-time property: build with `--features gpu-cuda` or `--features gpu-hip` (see development.md). A Vulkan backend is not wired up; `--gpu-backend vulkan` is rejected. GPU support is experimental and no GPU runtime is exercised in CI.
 - English-only models cannot be used with non-English language hints.
-- Network access happens only for the `models` subcommands (Hugging Face over HTTPS). `transcribe`, `plugins`, `completions`, and `man` are fully offline.
+- Network access happens for the `models` subcommands (Hugging Face over HTTPS) and `youtube` (through yt-dlp). `transcribe`, `record`, `plugins`, `completions`, and `man` do not contact remote services.

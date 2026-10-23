@@ -1234,6 +1234,7 @@ version = "0.1.0-alpha.2"
 dependencies = [
  "anyhow",
  "assert_cmd",
+ "chrono",
  "clap",
  "clap_complete",
  "clap_mangen",
@@ -1244,6 +1245,7 @@ dependencies = [
  "polyscribe-protocol",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
  "toml",

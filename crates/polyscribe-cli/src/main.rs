@@ -3,6 +3,8 @@ mod output;
 mod record;
 mod transcribe;
 mod youtube;
+mod youtube_cache;
+mod youtube_process;
 
 use anyhow::{Context, Result, anyhow};
 use clap::{CommandFactory, Parser};
@@ -675,6 +677,18 @@ fn main() -> Result<()> {
             format,
             output,
             prefer_manual,
-        } => youtube::run(url, language, format, output, prefer_manual),
+            refresh,
+            captions_only,
+            audio_only,
+        } => youtube::run(
+            url,
+            language,
+            format,
+            output,
+            prefer_manual,
+            refresh,
+            captions_only,
+            audio_only,
+        ),
     }
 }

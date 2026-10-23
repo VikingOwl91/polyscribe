@@ -9,6 +9,7 @@ use crate::prelude::*;
 use anyhow::{Context, anyhow};
 use std::env;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// Test-only override for the GPU device probe.
 ///
@@ -190,10 +191,43 @@ macro_rules! impl_whisper_backend {
                     speaker,
                     language,
                     progress,
+                    None,
                 )
             }
         }
     };
+}
+
+/// Transcribe one file while bounding the lifetime of its ffmpeg decoder.
+///
+/// The decoder is supervised and terminated when the deadline expires.
+/// Whisper inference runs in-process and cannot be interrupted by this
+/// deadline. Existing transcription callers keep their original behavior.
+#[allow(clippy::too_many_arguments)]
+pub fn transcribe_with_decoder_timeout(
+    session: &mut ModelSession,
+    backend: BackendKind,
+    audio_path: &Path,
+    speaker: &str,
+    language: Option<&str>,
+    progress: Option<&(dyn Fn(i32) + Send + Sync)>,
+    timeout: Duration,
+) -> Result<Vec<OutputEntry>> {
+    if backend == BackendKind::Auto {
+        return Err(anyhow!("decoder-bounded transcription requires a selected backend").into());
+    }
+    if timeout.is_zero() {
+        return Err(anyhow!("decoder timeout must be greater than zero").into());
+    }
+    transcribe_with_whisper_rs(
+        session,
+        backend,
+        audio_path,
+        speaker,
+        language,
+        progress,
+        Some(timeout),
+    )
 }
 
 impl_whisper_backend!(CpuBackend, BackendKind::Cpu);
@@ -419,6 +453,7 @@ fn transcribe_with_whisper_rs(
     speaker: &str,
     language: Option<&str>,
     progress: Option<&(dyn Fn(i32) + Send + Sync)>,
+    decoder_timeout: Option<Duration>,
 ) -> Result<Vec<OutputEntry>> {
     let report = |p: i32| {
         if let Some(cb) = progress {
@@ -431,8 +466,16 @@ fn transcribe_with_whisper_rs(
     // memory at a time. The first window is decoded before the model is
     // touched, which keeps the order of the errors: a broken input file is
     // reported before a missing model.
-    let mut windows =
-        crate::chunked::ChunkedAudio::new(audio_path, crate::chunked::ChunkConfig::default())?;
+    let mut windows = match decoder_timeout {
+        Some(timeout) => crate::chunked::ChunkedAudio::new_with_timeout(
+            audio_path,
+            crate::chunked::ChunkConfig::default(),
+            timeout,
+        )?,
+        None => {
+            crate::chunked::ChunkedAudio::new(audio_path, crate::chunked::ChunkConfig::default())?
+        }
+    };
     let first_window = match windows.next_window()? {
         Some(window) => window,
         None => {

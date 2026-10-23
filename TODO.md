@@ -33,6 +33,7 @@ ideas** (directional, not scheduled).
   of the recording. See `docs/benchmarks/chunked-transcription.md`.
 
 ### D8. A transcript can be incomplete at a window boundary (P2, M)
+- Sprint 12 follow-up: the boundary recovery still decides whether a gap carries speech from signal level and the share of frames, not from a voice activity detector.
 - whisper does not always report a segment for the beginning of the audio it
   is given. The chunked pipeline decodes such a region again from a slightly
   different position, which recovers it in the recorded cases, but it cannot

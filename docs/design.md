@@ -4,7 +4,7 @@
 
 PolyScribe is a Cargo workspace CLI that orchestrates:
 
-- `polyscribe-cli` (`crates/polyscribe-cli`): CLI parsing (`cli.rs`), command orchestration (`main.rs`), the `transcribe` pipeline (`transcribe.rs`), the `record` pipeline (`record.rs`), and stdout modes (`output.rs`).
+- `polyscribe-cli` (`crates/polyscribe-cli`): CLI parsing (`cli.rs`), command orchestration (`main.rs`), the `transcribe` pipeline (`transcribe.rs`), the `youtube` pipeline (`youtube.rs`, `youtube_process.rs`, `youtube_cache.rs`), the `record` pipeline (`record.rs`), and stdout modes (`output.rs`).
 - `polyscribe-core` (`crates/polyscribe-core`): the engine —
   - `backend.rs`: backend selection, the `TranscribeBackend` implementations (CPU/CUDA/HIP via whisper-rs) and the reconciliation of the windows,
   - `capture.rs`: the live capture from PipeWire (`PipeWireCapture`),
@@ -26,6 +26,18 @@ PolyScribe is a Cargo workspace CLI that orchestrates:
 3) A Whisper model is located (`WHISPER_MODEL`, or the largest `*.bin` in the models dir).
 4) The selected backend transcribes via whisper-rs, producing segments.
 5) Segments are sorted, reindexed, and written to JSON + TOML + SRT (or JSON to stdout).
+
+## Data flow (youtube)
+
+1) The CLI validates the HTTPS YouTube URL and request language, then checks the versioned transcript cache unless `--refresh` was given.
+2) The downloader runs with an explicit argv, isolated temporary home/cache, bounded output, a wall-clock timeout, and process-group cleanup. Metadata and supported WebVTT tracks are read from JSON.
+3) A selected WebVTT file is size-checked, parsed, and normalized by the pure `polyscribe-core::youtube` functions. The cache stores source identity, original cues, normalized cues, and normalization counts, independent of TXT/SRT/JSON rendering.
+4) Local audio transcription is allowed only when captions are confirmed absent or a selected caption artifact has disappeared. HTTP errors, network failures, unavailable requested languages, and malformed subtitle content remain errors.
+5) Audio downloads are capped and removed with their private temporary directory. The same Whisper backend and window reconciliation used by file transcription process the downloaded audio; only this YouTube call opts into the supervised ffmpeg decoder deadline.
+
+Cache entries live below `$XDG_CACHE_HOME/polyscribe/youtube/v1/`. Directory-relative opens refuse symlinks, cache directories must be private and user-owned, and each record/index update is fsynced and atomically renamed. The format version is part of the cache identity so a parser/normalizer change cannot reuse stale cues.
+
+The subprocess deadline does not interrupt native Whisper inference. A stuck in-process inference therefore has no hard end-to-end timeout; providing that guarantee would require moving inference to a supervised worker process.
 
 ### Long recordings
 
