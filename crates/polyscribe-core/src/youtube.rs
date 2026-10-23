@@ -10,7 +10,7 @@
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 
-pub const YOUTUBE_NORMALIZATION_VERSION: u32 = 3;
+pub const YOUTUBE_NORMALIZATION_VERSION: u32 = 4;
 
 /// A validated YouTube URL.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -270,7 +270,11 @@ fn clean_vtt_text(raw: &str) -> (String, Option<String>, bool) {
                     .map(|_| name.trim())
                 && !name.is_empty()
             {
-                speaker = Some(name.to_string());
+                let cleaned: String = name.chars().filter(|c| !c.is_control()).collect();
+                let cleaned = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+                if !cleaned.is_empty() {
+                    speaker = Some(cleaned);
+                }
             }
         } else if inside_tag {
             tag.push(ch);
@@ -303,6 +307,7 @@ fn clean_vtt_text(raw: &str) -> (String, Option<String>, bool) {
             text.push(ch);
         }
     }
+    let text: String = text.chars().filter(|c| !c.is_control()).collect();
     let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
     let (text, marker) = if let Some(text) = text.strip_prefix(">>") {
         (text.trim_start().to_string(), true)

@@ -6,7 +6,7 @@ PolyScribe is a fast, local-first CLI for transcribing audio/video and merging e
 
 - **Live microphone transcription**: `polyscribe record` captures the microphone through PipeWire and transcribes it while the recording runs. The audio is decoded incrementally, the memory does not grow with the length of the recording, and multilingual models detect the language by default.
 - **Local-first**: Whisper inference always runs locally. Network access is used for model management and the opt-in YouTube downloader.
-- **YouTube transcripts**: captions are preferred and normalized; when a video has no usable captions, PolyScribe can download audio and use the installed local Whisper model.
+- **YouTube transcripts**: captions are preferred and normalized; when a video has no usable captions, PolyScribe can download audio and use the installed local Whisper model. An explicitly requested caption language is never replaced by another language. HTTP 403/429, network failures, and malformed caption files fail instead of starting audio transcription.
 - **Transcription**: audio and common video files are decoded to 16 kHz mono PCM via ffmpeg and transcribed with whisper.cpp.
 - **Transcript merging**: merge multiple JSON transcripts, or merge and also keep per-file outputs.
 - **Model management**: `polyscribe models` subcommands to list, add, remove, verify, update, search, and download models, with a manifest cache, concurrent ranged downloads, and SHA-256 verification.

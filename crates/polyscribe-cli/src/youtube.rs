@@ -1055,18 +1055,21 @@ fn watch_download_size(
 
 fn ensure_success(output: &ProcessOutput, action: &str) -> Result<()> {
     if output.status.success() {
-        if !output.stderr_tail.is_empty() && polyscribe_core::verbose_level() > 0 {
-            let stderr = String::from_utf8_lossy(&output.stderr_tail);
-            polyscribe_core::dlog!(1, "yt-dlp: {}", stderr.trim());
-        }
         return Ok(());
     }
     let stderr = String::from_utf8_lossy(&output.stderr_tail);
     let kind = classify_downloader_youtube_error(&stderr);
-    Err(youtube_error(
-        kind,
-        format!("{action} failed: {}", stderr.trim()),
-    ))
+    let message = match kind {
+        YouTubeErrorKind::RateLimited => {
+            format!("{action} failed: YouTube rate-limited the request")
+        }
+        YouTubeErrorKind::Forbidden => format!("{action} failed: YouTube denied access"),
+        YouTubeErrorKind::Network => {
+            format!("{action} failed: network error while contacting YouTube")
+        }
+        _ => format!("{action} failed"),
+    };
+    Err(youtube_error(kind, message))
 }
 
 fn classify_downloader_youtube_error(stderr: &str) -> YouTubeErrorKind {

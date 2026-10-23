@@ -390,7 +390,8 @@ impl Directory {
             }
             let stat = unsafe { stat.assume_init() };
             let effective_uid = unsafe { libc::geteuid() };
-            let is_cache_directory = normal_index >= base_count;
+            let is_cache_directory = normal_index > base_count;
+            let is_shared_parent = normal_index == base_count;
             let is_base_directory = normal_index + 1 == base_count;
             let accepted_parent = (stat.st_uid == effective_uid || stat.st_uid == 0)
                 && (stat.st_mode & 0o022 == 0
@@ -399,7 +400,7 @@ impl Directory {
             let accepted_cache = stat.st_uid == effective_uid && stat.st_mode & 0o077 == 0;
             let accepted = if is_cache_directory {
                 accepted_cache
-            } else if is_base_directory {
+            } else if is_shared_parent || is_base_directory {
                 accepted_base
             } else {
                 accepted_parent
