@@ -260,6 +260,7 @@ pub(crate) fn spawn_ffmpeg_decoder(audio_path: &Path) -> anyhow::Result<Child> {
         .arg("-ar")
         .arg(WHISPER_SAMPLE_RATE.to_string())
         .arg("pipe:1")
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -271,7 +272,7 @@ pub(crate) fn spawn_ffmpeg_decoder(audio_path: &Path) -> anyhow::Result<Child> {
             } else {
                 anyhow!(
                     "Failed to execute ffmpeg for {}: {}",
-                    audio_path.display(),
+                    crate::ui::terminal_safe_path(audio_path),
                     e
                 )
             }
@@ -297,6 +298,11 @@ fn spawn_supervised_ffmpeg_decoder(audio_path: &Path) -> anyhow::Result<Child> {
         .arg("-ar")
         .arg(WHISPER_SAMPLE_RATE.to_string())
         .arg("pipe:1")
+        // The decoder is in its own process group. Without a null stdin it
+        // inherits the controlling terminal and can be stopped by SIGTTIN or
+        // SIGTTOU while it is not the foreground process group, which stalls
+        // the first read forever.
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0);
@@ -321,10 +327,40 @@ fn spawn_supervised_ffmpeg_decoder(audio_path: &Path) -> anyhow::Result<Child> {
         } else {
             anyhow!(
                 "Failed to execute ffmpeg for {}: {error}",
-                audio_path.display()
+                crate::ui::terminal_safe_path(audio_path)
             )
         }
     })
+}
+
+/// Probe the duration of a media file with ffprobe.
+///
+/// This is used only for progress hints. A missing ffprobe or an unreadable
+/// duration is not an error; the transcription proceeds without a total.
+pub fn probe_audio_duration_seconds(audio_path: &Path) -> Option<f64> {
+    let output = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+        ])
+        .arg(audio_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
 }
 
 /// Decodes a media file into windows of audio.
@@ -479,7 +515,7 @@ impl ChunkedAudio {
                 Err(e) => {
                     return Err(anyhow!(
                         "Failed to read ffmpeg output for {}: {}",
-                        self.audio_path.display(),
+                        crate::ui::terminal_safe_path(&self.audio_path),
                         e
                     ));
                 }
@@ -506,12 +542,12 @@ impl ChunkedAudio {
             .take()
             .map(|t| t.join().unwrap_or_default())
             .unwrap_or_default();
-        let stderr = String::from_utf8_lossy(&stderr).into_owned();
+        let stderr = crate::ui::escape_terminal_controls(&String::from_utf8_lossy(&stderr));
         if let Some(mut child) = self.child.take() {
             let status = child.wait().with_context(|| {
                 format!(
                     "Failed to wait for ffmpeg for {}",
-                    self.audio_path.display()
+                    crate::ui::terminal_safe_path(&self.audio_path)
                 )
             })?;
             self.stop_watchdog();
@@ -525,7 +561,7 @@ impl ChunkedAudio {
             if !status.success() {
                 return Err(anyhow!(
                     "ffmpeg failed for {}: {}",
-                    self.audio_path.display(),
+                    crate::ui::terminal_safe_path(&self.audio_path),
                     stderr
                 ));
             }
@@ -542,14 +578,7 @@ impl ChunkedAudio {
         }
     }
 
-    /// The next window of audio, or `None` at the end of the recording.
-    pub fn next_window(&mut self) -> anyhow::Result<Option<AudioWindow>> {
-        crate::stream::WindowSource::next_window(self, &crate::stream::CancellationToken::new())
-    }
-}
-
-impl crate::stream::WindowSource for ChunkedAudio {
-    fn next_window(
+    fn next_window_timed(
         &mut self,
         cancel: &crate::stream::CancellationToken,
     ) -> anyhow::Result<Option<AudioWindow>> {
@@ -577,6 +606,28 @@ impl crate::stream::WindowSource for ChunkedAudio {
             .take_window(self.next_start)
             .expect("the window is complete");
         Ok(Some(window))
+    }
+
+    /// The next window of audio, or `None` at the end of the recording.
+    pub fn next_window(&mut self) -> anyhow::Result<Option<AudioWindow>> {
+        crate::stream::WindowSource::next_window(self, &crate::stream::CancellationToken::new())
+    }
+}
+
+impl crate::stream::WindowSource for ChunkedAudio {
+    fn next_window(
+        &mut self,
+        cancel: &crate::stream::CancellationToken,
+    ) -> anyhow::Result<Option<AudioWindow>> {
+        let started = Instant::now();
+        let window = self.next_window_timed(cancel)?;
+        crate::dlog!(
+            2,
+            "ffmpeg next_window finished in {:.1} ms: samples={}",
+            started.elapsed().as_secs_f64() * 1000.0,
+            window.as_ref().map(|w| w.samples.len()).unwrap_or(0),
+        );
+        Ok(window)
     }
 
     fn next_recovery_window(
@@ -692,6 +743,41 @@ mod tests {
             window_samples: window,
             lookback_samples: 0,
         }
+    }
+
+    #[test]
+    fn test_probe_audio_duration_reads_a_wav() {
+        if Command::new("ffprobe").arg("-version").output().is_err() {
+            eprintln!("NOT RUN: ffprobe is not available on PATH");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("probe.wav");
+        let sample_rate = 16_000u32;
+        let seconds = 2u32;
+        let data_len = sample_rate * seconds * 2;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data_len).to_le_bytes());
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&sample_rate.to_le_bytes());
+        bytes.extend_from_slice(&(sample_rate * 2).to_le_bytes());
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&16u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data_len.to_le_bytes());
+        bytes.resize(bytes.len() + data_len as usize, 0);
+        std::fs::write(&path, bytes).unwrap();
+
+        let duration = probe_audio_duration_seconds(&path).expect("duration should be readable");
+        assert!(
+            (duration - 2.0).abs() < 0.01,
+            "unexpected duration: {duration}"
+        );
     }
 
     #[test]

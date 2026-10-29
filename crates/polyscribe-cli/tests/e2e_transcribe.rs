@@ -557,7 +557,7 @@ fn e2e_transcription_on_the_gpu() {
 
 #[cfg(unix)]
 #[test]
-fn youtube_without_captions_falls_back_to_local_whisper() {
+fn youtube_tries_voxtral_then_falls_back_to_local_whisper() {
     let Some(model) = e2e_model() else {
         eprintln!("SKIPPED: POLYSCRIBE_E2E_MODEL is not set; skipping YouTube fallback test");
         return;
@@ -568,39 +568,63 @@ fn youtube_without_captions_falls_back_to_local_whisper() {
     }
 
     let tmp = tempfile::tempdir().unwrap();
+    let temp_dir = tmp.path().join("tmp");
+    fs::create_dir_all(&temp_dir).unwrap();
     let fake = tmp.path().join("fake-yt-dlp");
     let calls = tmp.path().join("youtube-calls.log");
+    let voxtral = tmp.path().join("fake-voxtral");
+    let voxtral_calls = tmp.path().join("voxtral-calls.log");
+    let voxtral_input = tmp.path().join("voxtral-input.log");
     let model_file = model.to_string_lossy().replace('\'', "'\\''");
     let calls_file = calls.to_string_lossy().replace('\'', "'\\''");
+    let voxtral_calls_file = voxtral_calls.to_string_lossy().replace('\'', "'\\''");
+    let voxtral_input_file = voxtral_input.to_string_lossy().replace('\'', "'\\''");
     let audio_fixture = fixture("speech.wav")
         .to_string_lossy()
         .replace('\'', "'\\''");
     let script = format!(
-        "#!/bin/sh
-case \"$*\" in
+        r#"#!/bin/sh
+case "$*" in
   *--dump-single-json*)
-    printf 'metadata\\n' >> '{calls_file}'
-    printf '%s\\n' '{{\"id\":\"dQw4w9WgXcQ\",\"title\":\"Local fallback fixture\",\"subtitles\":{{}},\"automatic_captions\":{{}}}}'
+    printf 'metadata\n' >> '{calls_file}'
+    printf '%s\n' '{{"id":"dQw4w9WgXcQ","title":"Local fallback fixture","uploader":"Offline test","duration":3,"subtitles":{{"en":[{{"ext":"vtt","url":"https://example.test/subtitle.vtt"}}]}},"automatic_captions":{{}}}}'
     ;;
   *)
-    printf 'audio\\n' >> '{calls_file}'
+    printf 'audio\n' >> '{calls_file}'
     output=''
     while [ $# -gt 0 ]; do
-      case \"$1\" in
+      case "$1" in
         --output) output=$2; shift 2 ;;
         *) shift ;;
       esac
     done
-    cp '{audio_fixture}' \"${{output%.*}}.wav\"
+    cp '{audio_fixture}' "${{output%.*}}.wav"
     ;;
 esac
-"
+"#
+    );
+    let voxtral_script = format!(
+        r#"#!/bin/sh
+printf 'invoke\n' >> '{voxtral_calls_file}'
+input=''
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --input) input=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf '%s\n' "$input" >> '{voxtral_input_file}'
+[ -n "$input" ] && [ -s "$input" ] || exit 64
+printf '%s\n' 'expected Voxtral failure for fallback test' >&2
+exit 23
+"#
     );
     fs::write(&fake, script).unwrap();
-    #[cfg(unix)]
+    fs::write(&voxtral, voxtral_script).unwrap();
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&voxtral, fs::Permissions::from_mode(0o700)).unwrap();
     }
 
     let output = Command::new(bin())
@@ -614,9 +638,13 @@ esac
             "--format",
             "json",
         ])
-        .env("WHISPER_MODEL", model_file)
+        .env("WHISPER_MODEL", &model_file)
         .env("POLYSCRIBE_YTDLP", &fake)
+        .env("POLYSCRIBE_VOXTRAL", &voxtral)
         .env("XDG_CACHE_HOME", tmp.path().join("cache"))
+        .env("XDG_CONFIG_HOME", tmp.path().join("config"))
+        .env("XDG_DATA_HOME", tmp.path().join("data"))
+        .env("TMPDIR", &temp_dir)
         .env("HOME", tmp.path())
         .output()
         .expect("launch YouTube fallback command");
@@ -628,7 +656,21 @@ esac
     let transcript: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("YouTube JSON output parses");
     assert_eq!(transcript["source"], "local-whisper");
+    assert_eq!(
+        transcript["source_url"],
+        "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    );
+    assert_eq!(transcript["video_id"], "dQw4w9WgXcQ");
     assert_eq!(transcript["title"], "Local fallback fixture");
+    assert_eq!(transcript["uploader"], "Offline test");
+    assert_eq!(transcript["duration_seconds"], 3.0);
+    assert_eq!(transcript["requested_language"], "en");
+    assert_eq!(transcript["language"], "en");
+    assert_eq!(transcript["engine"], "whisper");
+    assert_eq!(
+        transcript["model"],
+        model.file_name().unwrap().to_string_lossy().as_ref()
+    );
     let cues = transcript["cues"].as_array().expect("cue list exists");
     assert!(!cues.is_empty(), "Whisper produced no cues");
     assert!(cues.iter().any(|cue| {
@@ -636,6 +678,22 @@ esac
             .as_str()
             .is_some_and(|text| !text.trim().is_empty())
     }));
+    let fallback_stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        fallback_stderr.contains("Voxtral failed"),
+        "stderr: {fallback_stderr}"
+    );
+    assert!(
+        fallback_stderr.contains("local Whisper"),
+        "stderr: {fallback_stderr}"
+    );
+    assert_eq!(fs::read_to_string(&voxtral_calls).unwrap(), "invoke\n");
+    let downloaded_audio = PathBuf::from(fs::read_to_string(&voxtral_input).unwrap().trim());
+    assert!(downloaded_audio.is_absolute());
+    assert!(
+        !downloaded_audio.exists(),
+        "temporary audio must be cleaned up"
+    );
 
     let audio_only = Command::new(bin())
         .args([
@@ -651,7 +709,11 @@ esac
         ])
         .env("WHISPER_MODEL", &model)
         .env("POLYSCRIBE_YTDLP", &fake)
+        .env("POLYSCRIBE_VOXTRAL", &voxtral)
         .env("XDG_CACHE_HOME", tmp.path().join("cache"))
+        .env("XDG_CONFIG_HOME", tmp.path().join("config"))
+        .env("XDG_DATA_HOME", tmp.path().join("data"))
+        .env("TMPDIR", &temp_dir)
         .env("HOME", tmp.path())
         .output()
         .expect("launch audio-only YouTube command");
@@ -663,8 +725,6 @@ esac
     let audio_transcript: serde_json::Value =
         serde_json::from_slice(&audio_only.stdout).expect("audio-only JSON output parses");
     assert_eq!(audio_transcript["source"], "local-whisper");
-    assert_eq!(
-        fs::read_to_string(calls).unwrap(),
-        "metadata\naudio\naudio\n"
-    );
+    assert_eq!(fs::read_to_string(calls).unwrap(), "metadata\naudio\n");
+    assert_eq!(fs::read_to_string(&voxtral_calls).unwrap(), "invoke\n");
 }

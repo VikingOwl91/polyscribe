@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 
-//! YouTube caption retrieval and local-audio fallback.
+//! Cache-first YouTube audio acquisition and local transcription.
 
 use std::ffi::OsString;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
@@ -15,17 +15,17 @@ use polyscribe_core::backend::{
     BackendKind, ModelSession, select_backend, transcribe_with_decoder_timeout,
 };
 use polyscribe_core::find_model_file;
+use polyscribe_core::ui::progress::TranscriptProgress;
 use polyscribe_core::youtube::{
-    CaptionCue, CaptionTrack, NormalizationStats, NormalizedTranscript, VideoMetadata,
-    YOUTUBE_NORMALIZATION_VERSION, normalize_rolling_cues, parse_vtt, render_srt, render_txt,
-    select_caption_track, validate_youtube_url,
+    CaptionCue, NormalizationStats, VideoMetadata, YOUTUBE_NORMALIZATION_VERSION, render_srt,
+    render_txt, validate_youtube_url,
 };
 use serde::Serialize;
 use tempfile::TempDir;
 
 use crate::youtube_cache::{
-    CACHE_SCHEMA_VERSION, CacheIdentity, CacheRecord, Lookup, RequestKey, RequestMode,
-    SourceIdentity, VideoSummary, YoutubeCache, model_sha256, model_stat,
+    CACHE_SCHEMA_VERSION, CacheIdentity, CacheRecord, ExecutableIdentity, Lookup, RequestKey,
+    SourceIdentity, VideoSummary, YoutubeCache, model_stat,
 };
 use crate::youtube_process::{self, ProcessFailure, ProcessOutput, ProcessPolicy};
 
@@ -33,16 +33,49 @@ const YTDLP_TIMEOUT: Duration = Duration::from_secs(120);
 const AUDIO_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const AUDIO_DECODER_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 const MAX_METADATA_BYTES: usize = 50 * 1024 * 1024;
-const MAX_CAPTION_BYTES: usize = 50 * 1024 * 1024;
 const MAX_AUDIO_BYTES: u64 = 250 * 1024 * 1024;
 const MAX_STDERR_BYTES: usize = 32 * 1024;
-const SELECTION_POLICY_VERSION: u32 = 1;
+const AUDIO_POLICY_VERSION: u32 = 2;
 
 struct DownloadContext<'a> {
     ytdlp: &'a Path,
     environment: &'a [(OsString, OsString)],
     directory: &'a Path,
     cache: Option<&'a YoutubeCache>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct VoxtralConfigSnapshot {
+    executable: Option<OsString>,
+    path_bytes: Option<Vec<u8>>,
+    executable_stat: Option<ExecutableIdentity>,
+    cache_eligible: bool,
+}
+
+impl VoxtralConfigSnapshot {
+    fn from_environment() -> Self {
+        let executable = std::env::var_os("POLYSCRIBE_VOXTRAL");
+        let path_bytes = executable
+            .as_deref()
+            .map(|value| value.as_encoded_bytes().to_vec());
+        let executable_stat = executable.as_deref().and_then(|value| {
+            let path = Path::new(value);
+            path.is_absolute()
+                .then(|| crate::youtube_cache::executable_identity(path).ok())
+                .flatten()
+        });
+        let cache_eligible = executable.is_none() || executable_stat.is_some();
+        Self {
+            executable,
+            path_bytes,
+            executable_stat,
+            cache_eligible,
+        }
+    }
+
+    fn is_current(&self) -> bool {
+        self == &Self::from_environment()
+    }
 }
 
 struct FileLimitPolicy<'a> {
@@ -58,6 +91,7 @@ enum YouTubeErrorKind {
     InvalidUrl,
     InvalidLanguage,
     UnsupportedFormat,
+    UnsupportedMode,
     ToolUnavailable,
     RateLimited,
     Forbidden,
@@ -66,12 +100,6 @@ enum YouTubeErrorKind {
     DownloaderTimeout,
     DownloaderOutputTooLarge,
     MalformedMetadata,
-    NoCaptions,
-    NoUsableCaptionTrack,
-    UnsupportedCaptionFormat,
-    RequestedLanguageUnavailable,
-    MissingCaptionArtifact,
-    MalformedSubtitle,
     AudioDownload,
     AudioDecode,
     Whisper,
@@ -95,6 +123,7 @@ impl std::fmt::Display for YouTubeErrorKind {
             Self::InvalidUrl => "invalid_url",
             Self::InvalidLanguage => "invalid_language",
             Self::UnsupportedFormat => "unsupported_format",
+            Self::UnsupportedMode => "unsupported_mode",
             Self::ToolUnavailable => "tool_unavailable",
             Self::RateLimited => "rate_limited",
             Self::Forbidden => "forbidden",
@@ -103,12 +132,6 @@ impl std::fmt::Display for YouTubeErrorKind {
             Self::DownloaderTimeout => "downloader_timeout",
             Self::DownloaderOutputTooLarge => "downloader_output_too_large",
             Self::MalformedMetadata => "malformed_metadata",
-            Self::NoCaptions => "no_captions",
-            Self::NoUsableCaptionTrack => "no_usable_caption_track",
-            Self::UnsupportedCaptionFormat => "unsupported_caption_format",
-            Self::RequestedLanguageUnavailable => "requested_language_unavailable",
-            Self::MissingCaptionArtifact => "missing_caption_artifact",
-            Self::MalformedSubtitle => "malformed_subtitle",
             Self::AudioDownload => "audio_download",
             Self::AudioDecode => "audio_decode",
             Self::Whisper => "whisper",
@@ -134,9 +157,15 @@ fn failure_kind(error: &anyhow::Error) -> Option<YouTubeErrorKind> {
 #[derive(Serialize)]
 struct JsonTranscript<'a> {
     source: &'a str,
+    source_url: &'a str,
     video_id: &'a str,
     title: &'a Option<String>,
     uploader: &'a Option<String>,
+    duration_seconds: Option<f64>,
+    requested_language: Option<&'a str>,
+    language: Option<&'a str>,
+    engine: &'a str,
+    model: &'a str,
     caption_language: Option<&'a str>,
     is_automatic: Option<bool>,
     is_translated: Option<bool>,
@@ -152,52 +181,60 @@ pub fn run(
     language: Option<String>,
     format: String,
     output: Option<PathBuf>,
-    prefer_manual: bool,
+    _prefer_manual: bool,
     refresh: bool,
     captions_only: bool,
-    audio_only: bool,
+    _audio_only: bool,
 ) -> Result<()> {
     let yt_url = validate_youtube_url(&url)
         .map_err(|error| youtube_error(YouTubeErrorKind::InvalidUrl, error.to_string()))?;
+    let source_url = url.trim().to_string();
     if !matches!(format.as_str(), "txt" | "srt" | "json") {
         return Err(youtube_error(
             YouTubeErrorKind::UnsupportedFormat,
-            format!("unsupported format: {format}"),
+            "unsupported YouTube output format",
         ));
     }
     if let Some(path) = &output {
         validate_output_path(path)?;
     }
     let language = validate_language(language)?;
-    let mode = if captions_only {
-        RequestMode::CaptionsOnly
-    } else if audio_only {
-        RequestMode::AudioOnly
-    } else {
-        RequestMode::Default
-    };
+    if captions_only {
+        return Err(youtube_error(
+            YouTubeErrorKind::UnsupportedMode,
+            "--captions-only is unsupported; YouTube transcription uses audio only",
+        ));
+    }
+    let voxtral_config = VoxtralConfigSnapshot::from_environment();
     let request = RequestKey {
         cache_schema_version: CACHE_SCHEMA_VERSION,
         normalization_version: YOUTUBE_NORMALIZATION_VERSION,
-        selection_policy_version: SELECTION_POLICY_VERSION,
+        selection_policy_version: AUDIO_POLICY_VERSION,
         video_id: yt_url.video_id.clone(),
         requested_language: language.clone(),
-        prefer_manual,
-        mode,
+        voxtral_executable: voxtral_config.path_bytes.clone(),
+        voxtral_executable_identity: voxtral_config.executable_stat.clone(),
     };
 
     let cache = open_cache();
+    let cache = if voxtral_config.cache_eligible {
+        cache
+    } else {
+        polyscribe_core::dlog!(
+            1,
+            "Voxtral executable identity could not be inspected; bypassing the transcript cache."
+        );
+        None
+    };
     if !refresh && let Some(cache) = &cache {
         match cache.lookup(&request) {
             Ok(Lookup::Hit(record)) if cache_record_is_current(&record) => {
                 return write_transcript(
+                    &source_url,
                     &yt_url.video_id,
                     &format,
                     output.as_deref(),
-                    &record.metadata,
-                    &record.identity.source,
-                    &record.cues,
-                    &record.normalization,
+                    &record,
                 );
             }
             Ok(Lookup::Hit(_)) | Ok(Lookup::Invalid) => {
@@ -219,164 +256,27 @@ pub fn run(
         directory: scratch.path(),
         cache: cache.as_ref(),
     };
-
-    if audio_only {
-        let record = transcribe_audio(
-            &download_context,
-            &yt_url.canonical_url,
-            VideoSummary::default(),
-            language.as_deref(),
-            &request,
-        )?;
-        return write_transcript(
-            &yt_url.video_id,
-            &format,
-            output.as_deref(),
-            &record.metadata,
-            &record.identity.source,
-            &record.cues,
-            &record.normalization,
-        );
-    }
-
-    let (metadata, manual_inventory, auto_inventory) = fetch_metadata(
+    polyscribe_core::ilog!("Fetching YouTube metadata...");
+    let metadata = fetch_metadata(
         &ytdlp,
         &environment,
         &yt_url.video_id,
         &yt_url.canonical_url,
     )?;
-    let has_caption_formats = manual_inventory.has_formats || auto_inventory.has_formats;
-    let manual_tracks = manual_inventory.tracks;
-    let auto_tracks = auto_inventory.tracks;
-    if has_caption_formats && manual_tracks.is_empty() && auto_tracks.is_empty() {
-        return Err(youtube_error(
-            YouTubeErrorKind::UnsupportedCaptionFormat,
-            "yt-dlp reports captions, but no WebVTT caption formats are available",
-        ));
-    }
-    let track = select_caption_track(
-        &manual_tracks,
-        &auto_tracks,
-        language.as_deref(),
-        prefer_manual,
-    );
-
-    let caption_result = match track {
-        Some(track) => match download_captions(
-            &ytdlp,
-            &environment,
-            scratch.path(),
-            &track,
-            &yt_url.canonical_url,
-        ) {
-            Ok(vtt) => Some((track, vtt)),
-            Err(error)
-                if failure_kind(&error) == Some(YouTubeErrorKind::MissingCaptionArtifact) =>
-            {
-                if captions_only {
-                    return Err(error);
-                }
-                polyscribe_core::dlog!(
-                    1,
-                    "The selected caption artifact disappeared; trying local audio transcription."
-                );
-                None
-            }
-            Err(error) => return Err(error),
-        },
-        None if has_caption_formats && language.is_some() => {
-            return Err(youtube_error(
-                YouTubeErrorKind::RequestedLanguageUnavailable,
-                format!(
-                    "no caption track is available for the requested language '{}'",
-                    language.as_deref().unwrap_or_default()
-                ),
-            ));
-        }
-        None if has_caption_formats => {
-            return Err(youtube_error(
-                YouTubeErrorKind::NoUsableCaptionTrack,
-                "caption tracks are present, but none can be selected under the current preferences",
-            ));
-        }
-        None if captions_only => {
-            return Err(youtube_error(
-                YouTubeErrorKind::NoCaptions,
-                "no usable caption tracks are available for this video",
-            ));
-        }
-        None => None,
-    };
-
-    if let Some((track, vtt)) = caption_result {
-        let parsed = parse_vtt(&vtt).map_err(|error| {
-            youtube_error(
-                YouTubeErrorKind::MalformedSubtitle,
-                format!("failed to parse WebVTT captions: {error}"),
-            )
-        })?;
-        if parsed.cues.is_empty() || parsed.malformed_cues > 0 {
-            return Err(youtube_error(
-                YouTubeErrorKind::MalformedSubtitle,
-                format!(
-                    "caption data contained {} valid cues, {} malformed cues, and {} empty cues",
-                    parsed.cues.len(),
-                    parsed.malformed_cues,
-                    parsed.empty_cues
-                ),
-            ));
-        }
-        let NormalizedTranscript { cues, stats } = normalize_rolling_cues(&parsed.cues);
-        if cues.is_empty() {
-            return Err(youtube_error(
-                YouTubeErrorKind::MalformedSubtitle,
-                "caption normalization produced no transcript cues",
-            ));
-        }
-        let record = CacheRecord {
-            schema_version: CACHE_SCHEMA_VERSION,
-            normalization_version: YOUTUBE_NORMALIZATION_VERSION,
-            identity: CacheIdentity {
-                request,
-                source: SourceIdentity::YoutubeCaptions {
-                    selected_language: track.language,
-                    automatic: track.is_automatic,
-                    translated: track.is_translated,
-                },
-            },
-            acquired_at: chrono::Utc::now().to_rfc3339(),
-            metadata: summarize_metadata(&metadata),
-            original_cues: parsed.cues,
-            cues,
-            normalization: stats,
-        };
-        store_cache(cache.as_ref(), &record);
-        return write_transcript(
-            &yt_url.video_id,
-            &format,
-            output.as_deref(),
-            &record.metadata,
-            &record.identity.source,
-            &record.cues,
-            &record.normalization,
-        );
-    }
-
     let record = transcribe_audio(
         &download_context,
         &yt_url.canonical_url,
         summarize_metadata(&metadata),
         language.as_deref(),
         &request,
+        &voxtral_config,
     )?;
     write_transcript(
+        &source_url,
         &yt_url.video_id,
         &format,
         output.as_deref(),
-        &record.metadata,
-        &record.identity.source,
-        &record.cues,
-        &record.normalization,
+        &record,
     )
 }
 
@@ -418,9 +318,16 @@ fn cache_record_is_current(record: &CacheRecord) -> bool {
         return true;
     };
     match find_model_file() {
-        Ok(path) => model_stat(&path).is_ok_and(|current| &current == cached),
+        Ok(path) => cache_model_stat_matches(cached, model_stat(&path)),
         Err(_) => true,
     }
+}
+
+fn cache_model_stat_matches(
+    cached: &crate::youtube_cache::ModelStat,
+    current: Result<crate::youtube_cache::ModelStat>,
+) -> bool {
+    current.is_ok_and(|current| &current == cached)
 }
 
 fn store_cache(cache: Option<&YoutubeCache>, record: &CacheRecord) {
@@ -447,7 +354,10 @@ fn find_ytdlp() -> Result<PathBuf> {
         }
         return Err(youtube_error(
             YouTubeErrorKind::ToolUnavailable,
-            format!("POLYSCRIBE_YTDLP does not name a file: {}", path.display()),
+            format!(
+                "POLYSCRIBE_YTDLP does not name a file: {}",
+                polyscribe_core::ui::terminal_safe_path(&path)
+            ),
         ));
     }
     if let Ok(path) = which::which("yt-dlp") {
@@ -460,10 +370,22 @@ fn find_ytdlp() -> Result<PathBuf> {
 }
 
 fn common_args() -> Vec<OsString> {
-    ["--ignore-config", "--no-cache-dir", "--no-playlist"]
-        .into_iter()
-        .map(OsString::from)
-        .collect()
+    [
+        "--ignore-config",
+        "--no-cache-dir",
+        "--no-playlist",
+        "--no-write-subs",
+        "--no-write-auto-subs",
+        "--retries",
+        "0",
+        "--fragment-retries",
+        "0",
+        "--extractor-retries",
+        "0",
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect()
 }
 
 fn fetch_metadata(
@@ -471,7 +393,7 @@ fn fetch_metadata(
     environment: &[(OsString, OsString)],
     expected_video_id: &str,
     url: &str,
-) -> Result<(VideoMetadata, CaptionInventory, CaptionInventory)> {
+) -> Result<VideoMetadata> {
     let mut args = common_args();
     args.push("--skip-download".into());
     args.push("--dump-single-json".into());
@@ -509,26 +431,17 @@ fn fetch_metadata(
     if id != expected_video_id {
         return Err(youtube_error(
             YouTubeErrorKind::Downloader,
-            format!("yt-dlp returned video id '{id}' for requested video '{expected_video_id}'"),
+            format!(
+                "yt-dlp returned a different video id for requested video '{expected_video_id}'"
+            ),
         ));
     }
-    let manual_inventory = parse_tracks(value.get("subtitles"), false, "subtitles")?;
-    let auto_inventory = parse_tracks(value.get("automatic_captions"), true, "automatic_captions")?;
-    let metadata = VideoMetadata {
+    Ok(VideoMetadata {
         id: id.to_string(),
         title: non_empty_string(value.get("title")),
         uploader: non_empty_string(value.get("uploader")),
         duration: value.get("duration").and_then(serde_json::Value::as_f64),
-        subtitles: value
-            .get("subtitles")
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!({})),
-        automatic_captions: value
-            .get("automatic_captions")
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!({})),
-    };
-    Ok((metadata, manual_inventory, auto_inventory))
+    })
 }
 
 fn non_empty_string(value: Option<&serde_json::Value>) -> Option<String> {
@@ -538,188 +451,8 @@ fn non_empty_string(value: Option<&serde_json::Value>) -> Option<String> {
         .map(ToString::to_string)
 }
 
-struct CaptionInventory {
-    tracks: Vec<CaptionTrack>,
-    has_formats: bool,
-}
-
-fn parse_tracks(
-    json: Option<&serde_json::Value>,
-    is_automatic: bool,
-    field: &str,
-) -> Result<CaptionInventory> {
-    let Some(json) = json else {
-        return Ok(CaptionInventory {
-            tracks: Vec::new(),
-            has_formats: false,
-        });
-    };
-    let Some(object) = json.as_object() else {
-        return Err(youtube_error(
-            YouTubeErrorKind::MalformedMetadata,
-            format!("yt-dlp metadata field '{field}' must be an object"),
-        ));
-    };
-    let mut inventory = CaptionInventory {
-        tracks: Vec::new(),
-        has_formats: false,
-    };
-    for (language, formats) in object {
-        let Some(formats) = formats.as_array() else {
-            return Err(youtube_error(
-                YouTubeErrorKind::MalformedMetadata,
-                format!("caption track '{language}' in metadata field '{field}' must be an array"),
-            ));
-        };
-        for format in formats {
-            let Some(format_object) = format.as_object() else {
-                return Err(youtube_error(
-                    YouTubeErrorKind::MalformedMetadata,
-                    format!(
-                        "caption format for '{language}' in metadata field '{field}' must be an object"
-                    ),
-                ));
-            };
-            inventory.has_formats = true;
-            let Some(ext) = format_object.get("ext").and_then(serde_json::Value::as_str) else {
-                return Err(youtube_error(
-                    YouTubeErrorKind::MalformedMetadata,
-                    format!(
-                        "caption format for '{language}' in metadata field '{field}' has no string extension"
-                    ),
-                ));
-            };
-            if !ext.eq_ignore_ascii_case("vtt") {
-                continue;
-            }
-            let url = format_object
-                .get("url")
-                .and_then(serde_json::Value::as_str)
-                .map(ToString::to_string);
-            let translated = url
-                .as_ref()
-                .is_some_and(|url| url.split(['?', '&']).any(|part| part.starts_with("tlang=")));
-            inventory.tracks.push(CaptionTrack {
-                language: language.clone(),
-                name: format_object
-                    .get("name")
-                    .and_then(serde_json::Value::as_str)
-                    .map(ToString::to_string),
-                url,
-                ext: Some(ext.to_string()),
-                is_automatic,
-                is_translated: translated,
-            });
-        }
-    }
-    Ok(inventory)
-}
-
-fn download_captions(
-    ytdlp: &Path,
-    environment: &[(OsString, OsString)],
-    directory: &Path,
-    track: &CaptionTrack,
-    url: &str,
-) -> Result<String> {
-    let template = directory.join("caption");
-    let mut args = common_args();
-    args.extend([
-        "--skip-download".into(),
-        "--sub-format".into(),
-        "vtt".into(),
-        "--sub-langs".into(),
-        track.language.clone().into(),
-        "--output".into(),
-        template.as_os_str().to_os_string(),
-    ]);
-    args.push(if track.is_automatic {
-        "--write-auto-subs".into()
-    } else {
-        "--write-subs".into()
-    });
-    args.push(url.into());
-    let output = run_ytdlp_with_file_limit(
-        ytdlp,
-        &args,
-        environment,
-        FileLimitPolicy {
-            directory,
-            prefix: "caption",
-            max_bytes: MAX_CAPTION_BYTES as u64,
-            overflow_kind: YouTubeErrorKind::DownloaderOutputTooLarge,
-        },
-        ProcessPolicy {
-            timeout: YTDLP_TIMEOUT,
-            stdout_limit: 1024 * 1024,
-            stderr_limit: MAX_STDERR_BYTES,
-        },
-    )?;
-    ensure_success(&output, "yt-dlp caption download")?;
-    let path = find_single_artifact(directory, "caption", "vtt", MAX_CAPTION_BYTES as u64)?
-        .ok_or_else(|| {
-            youtube_error(
-                YouTubeErrorKind::MissingCaptionArtifact,
-                "yt-dlp did not produce the selected WebVTT caption file",
-            )
-        })?;
-    std::fs::read_to_string(&path)
-        .with_context(|| format!("read downloaded WebVTT file {}", path.display()))
-        .map_err(|error| {
-            if error
-                .downcast_ref::<std::io::Error>()
-                .is_some_and(|error| error.kind() == std::io::ErrorKind::InvalidData)
-            {
-                youtube_error(
-                    YouTubeErrorKind::MalformedSubtitle,
-                    "downloaded WebVTT captions are not valid UTF-8",
-                )
-            } else if error
-                .downcast_ref::<std::io::Error>()
-                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
-            {
-                youtube_error(
-                    YouTubeErrorKind::MissingCaptionArtifact,
-                    "the selected caption artifact disappeared before it could be read",
-                )
-            } else {
-                youtube_error(
-                    YouTubeErrorKind::Downloader,
-                    format!("failed to read downloaded WebVTT file: {error:#}"),
-                )
-            }
-        })
-}
-
-fn transcribe_audio(
-    context: &DownloadContext<'_>,
-    url: &str,
-    metadata: VideoSummary,
-    language: Option<&str>,
-    request: &RequestKey,
-) -> Result<CacheRecord> {
-    let model_path = find_model_file().map_err(|error| {
-        youtube_error(
-            YouTubeErrorKind::Whisper,
-            format!("no local Whisper model is available: {error:#}"),
-        )
-    })?;
-    let stat = model_stat(&model_path).map_err(|error| {
-        youtube_error(
-            YouTubeErrorKind::Whisper,
-            format!("could not inspect the local Whisper model: {error:#}"),
-        )
-    })?;
-    let selection = select_backend(BackendKind::Auto, polyscribe_core::verbose_level() > 0)
-        .map_err(|error| {
-            youtube_error(
-                YouTubeErrorKind::Whisper,
-                format!("select local Whisper backend: {error:#}"),
-            )
-        })?;
-    let backend = selection.chosen;
-    drop(selection);
-
+fn download_audio(context: &DownloadContext<'_>, url: &str) -> Result<PathBuf> {
+    polyscribe_core::ilog!("Downloading YouTube audio...");
     let template = context.directory.join("audio.%(ext)s");
     let mut args = common_args();
     args.extend([
@@ -748,71 +481,192 @@ fn transcribe_audio(
             stderr_limit: MAX_STDERR_BYTES,
         },
     )
-    .map_err(|error| {
-        if failure_kind(&error) == Some(YouTubeErrorKind::Network)
-            || failure_kind(&error) == Some(YouTubeErrorKind::RateLimited)
-            || failure_kind(&error) == Some(YouTubeErrorKind::Forbidden)
-        {
-            error
-        } else {
-            youtube_error(
-                YouTubeErrorKind::AudioDownload,
-                format!("could not download YouTube audio: {error:#}"),
+    .map_err(wrap_audio_download_error)?;
+    ensure_success(&output, "yt-dlp audio download").map_err(wrap_audio_download_error)?;
+    find_single_audio_artifact(context.directory, MAX_AUDIO_BYTES)?.ok_or_else(|| {
+        youtube_error(
+            YouTubeErrorKind::AudioDownload,
+            "yt-dlp produced no audio file",
+        )
+    })
+}
+
+fn wrap_audio_download_error(error: anyhow::Error) -> anyhow::Error {
+    if failure_kind(&error).is_some_and(|kind| {
+        matches!(
+            kind,
+            YouTubeErrorKind::RateLimited
+                | YouTubeErrorKind::Forbidden
+                | YouTubeErrorKind::Network
+                | YouTubeErrorKind::ToolUnavailable
+                | YouTubeErrorKind::DownloaderTimeout
+                | YouTubeErrorKind::DownloaderOutputTooLarge
+                | YouTubeErrorKind::AudioDownload
+        )
+    }) {
+        error
+    } else {
+        youtube_error(
+            YouTubeErrorKind::AudioDownload,
+            format!("could not download YouTube audio: {error:#}"),
+        )
+    }
+}
+
+fn transcribe_audio(
+    context: &DownloadContext<'_>,
+    url: &str,
+    metadata: VideoSummary,
+    language: Option<&str>,
+    request: &RequestKey,
+    voxtral_config: &VoxtralConfigSnapshot,
+) -> Result<CacheRecord> {
+    let audio_path = download_audio(context, url)?;
+    polyscribe_core::ilog!("YouTube audio downloaded; starting transcription...");
+    let (source, cues) = transcribe_with_whisper_fallback(
+        language,
+        || {
+            crate::youtube_voxtral::transcribe(
+                voxtral_config.executable.clone(),
+                &audio_path,
+                language,
+                context.directory,
+                &polyscribe_core::stream::CancellationToken::new(),
             )
+        },
+        || transcribe_whisper(&audio_path, language),
+    )?;
+    let record = CacheRecord {
+        schema_version: CACHE_SCHEMA_VERSION,
+        normalization_version: YOUTUBE_NORMALIZATION_VERSION,
+        identity: CacheIdentity {
+            request: request.clone(),
+            source,
+        },
+        acquired_at: chrono::Utc::now().to_rfc3339(),
+        metadata,
+        original_cues: cues.clone(),
+        cues,
+        normalization: NormalizationStats::default(),
+    };
+    if context.cache.is_some() && !voxtral_config.is_current() {
+        polyscribe_core::dlog!(
+            1,
+            "Voxtral configuration changed during transcription; skipping the cache write."
+        );
+    } else {
+        store_cache(context.cache, &record);
+    }
+    Ok(record)
+}
+
+fn transcribe_with_whisper_fallback(
+    language: Option<&str>,
+    voxtral: impl FnOnce() -> Result<
+        crate::youtube_voxtral::VoxtralTranscript,
+        crate::youtube_voxtral::VoxtralError,
+    >,
+    whisper: impl FnOnce() -> Result<(SourceIdentity, Vec<CaptionCue>)>,
+) -> Result<(SourceIdentity, Vec<CaptionCue>)> {
+    match voxtral() {
+        Ok(transcript) => Ok((
+            SourceIdentity::LocalVoxtral {
+                model: transcript.model,
+                language: transcript.language,
+                language_hint: language.map(ToString::to_string),
+                protocol_version: 1,
+            },
+            transcript.cues,
+        )),
+        Err(voxtral_error) => {
+            let reason = if matches!(
+                voxtral_error,
+                crate::youtube_voxtral::VoxtralError::NotConfigured
+            ) {
+                "Voxtral is not configured".to_string()
+            } else {
+                format!("Voxtral failed ({voxtral_error})")
+            };
+            polyscribe_core::ilog!("{reason}; trying local Whisper once.");
+            whisper().map_err(|whisper_error| {
+                let kind = failure_kind(&whisper_error).unwrap_or(YouTubeErrorKind::Whisper);
+                youtube_error(
+                    kind,
+                    format!(
+                        "Voxtral failed ({voxtral_error}); local Whisper fallback failed: {whisper_error:#}"
+                    ),
+                )
+            })
         }
+    }
+}
+
+fn transcribe_whisper(
+    audio_path: &Path,
+    language: Option<&str>,
+) -> Result<(SourceIdentity, Vec<CaptionCue>)> {
+    polyscribe_core::ilog!("Locating Whisper model...");
+    let model_path = find_model_file().map_err(|error| {
+        youtube_error(
+            YouTubeErrorKind::Whisper,
+            format!("no local Whisper model is available: {error:#}"),
+        )
     })?;
-    ensure_success(&output, "yt-dlp audio download").map_err(|error| {
-        if failure_kind(&error).is_some_and(|kind| {
-            matches!(
-                kind,
-                YouTubeErrorKind::RateLimited
-                    | YouTubeErrorKind::Forbidden
-                    | YouTubeErrorKind::Network
-            )
-        }) {
-            error
-        } else {
-            youtube_error(
-                YouTubeErrorKind::AudioDownload,
-                format!("could not download YouTube audio: {error:#}"),
-            )
-        }
+    let stat = model_stat(&model_path).map_err(|error| {
+        youtube_error(
+            YouTubeErrorKind::Whisper,
+            format!("could not inspect the local Whisper model: {error:#}"),
+        )
     })?;
-    let audio_path =
-        find_single_audio_artifact(context.directory, MAX_AUDIO_BYTES)?.ok_or_else(|| {
+    let selection = select_backend(BackendKind::Auto, polyscribe_core::verbose_level() > 0)
+        .map_err(|error| {
             youtube_error(
-                YouTubeErrorKind::AudioDownload,
-                "yt-dlp produced no audio file",
+                YouTubeErrorKind::Whisper,
+                format!("select local Whisper backend: {error:#}"),
             )
         })?;
+    let backend = selection.chosen;
+    polyscribe_core::ilog!("Using {:?} backend.", backend);
+    if backend == BackendKind::Cpu && selection.compiled.is_empty() {
+        polyscribe_core::ilog!(
+            "No GPU backend is compiled into this binary; using the CPU backend. Build with --features gpu-hip for AMD ROCm or --features gpu-cuda for NVIDIA."
+        );
+    }
+    drop(selection);
 
-    let model_hash = if context.cache.is_some() {
-        match model_sha256(&model_path) {
-            Ok(hash) => Some(hash),
-            Err(error) => {
-                polyscribe_core::dlog!(
-                    1,
-                    "Could not fingerprint local Whisper model for caching: {error:#}"
-                );
-                None
-            }
-        }
-    } else {
-        None
-    };
+    let model_name = model_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("whisper-model")
+        .to_string();
     let speaker = "speaker1";
-    let progress = |percent| polyscribe_core::dlog!(1, "local YouTube transcription: {percent}%");
+    let transcript_progress = TranscriptProgress::start("Transcribing YouTube audio");
+    let progress = |percent| {
+        transcript_progress.update(percent);
+        if !transcript_progress.is_enabled() {
+            polyscribe_core::dlog!(1, "local YouTube transcription: {percent}%");
+        }
+    };
     let mut session = ModelSession::with_model(model_path);
-    let entries = transcribe_with_decoder_timeout(
+    polyscribe_core::ilog!(
+        "Loading Whisper model and transcribing audio (this may take a while)..."
+    );
+    let result = transcribe_with_decoder_timeout(
         &mut session,
         backend,
-        &audio_path,
+        audio_path,
         speaker,
         language_for_whisper(language).as_deref(),
         Some(&progress),
         AUDIO_DECODER_TIMEOUT,
-    )
-    .map_err(|error| {
+    );
+    transcript_progress.finish(if result.is_ok() {
+        "Transcript ready"
+    } else {
+        "Transcription failed"
+    });
+    let entries = result.map_err(|error| {
         let text = format!("{error:#}");
         let kind = if text.contains("exceeded its timeout") {
             YouTubeErrorKind::AudioDecode
@@ -838,27 +692,21 @@ fn transcribe_audio(
         })
         .collect();
     cues.sort_by_key(|cue| cue.start_ms);
-    let model_hash = model_hash.unwrap_or_default();
-    let record = CacheRecord {
-        schema_version: CACHE_SCHEMA_VERSION,
-        normalization_version: YOUTUBE_NORMALIZATION_VERSION,
-        identity: CacheIdentity {
-            request: request.clone(),
-            source: SourceIdentity::LocalWhisper {
-                model_sha256: model_hash,
-                model_stat: stat,
-                backend: format!("{backend:?}").to_ascii_lowercase(),
-                language_hint: language.map(ToString::to_string),
-            },
+    crate::youtube_transcript::normalize_and_validate_cues(&mut cues).map_err(|reason| {
+        youtube_error(
+            YouTubeErrorKind::Whisper,
+            format!("local Whisper produced invalid transcript cues: {reason}"),
+        )
+    })?;
+    Ok((
+        SourceIdentity::LocalWhisper {
+            model_name,
+            model_stat: stat,
+            backend: format!("{backend:?}").to_ascii_lowercase(),
+            language_hint: language.map(ToString::to_string),
         },
-        acquired_at: chrono::Utc::now().to_rfc3339(),
-        metadata,
-        original_cues: cues.clone(),
         cues,
-        normalization: NormalizationStats::default(),
-    };
-    store_cache(context.cache, &record);
-    Ok(record)
+    ))
 }
 
 fn language_for_whisper(language: Option<&str>) -> Option<String> {
@@ -900,41 +748,6 @@ fn find_single_audio_artifact(directory: &Path, max_bytes: u64) -> Result<Option
             return Err(youtube_error(
                 YouTubeErrorKind::AudioDownload,
                 "yt-dlp produced more than one audio file for a single video",
-            ));
-        }
-    }
-    Ok(result)
-}
-
-fn find_single_artifact(
-    directory: &Path,
-    prefix: &str,
-    extension: &str,
-    max_bytes: u64,
-) -> Result<Option<PathBuf>> {
-    let mut result = None;
-    for entry in
-        std::fs::read_dir(directory).context("list temporary YouTube download directory")?
-    {
-        let entry = entry.context("read temporary YouTube download directory entry")?;
-        let path = entry.path();
-        let name = entry.file_name();
-        if !name.to_string_lossy().starts_with(prefix)
-            || path.extension().and_then(|value| value.to_str()) != Some(extension)
-        {
-            continue;
-        }
-        let metadata = std::fs::symlink_metadata(&path).context("inspect downloaded artifact")?;
-        if !metadata.file_type().is_file() || metadata.len() == 0 || metadata.len() > max_bytes {
-            return Err(youtube_error(
-                YouTubeErrorKind::Downloader,
-                "downloaded subtitle artifact is not a regular file within the configured size limit",
-            ));
-        }
-        if result.replace(path).is_some() {
-            return Err(youtube_error(
-                YouTubeErrorKind::Downloader,
-                "yt-dlp produced multiple subtitle files for one selected track",
             ));
         }
     }
@@ -1106,35 +919,58 @@ fn classify_downloader_youtube_error(stderr: &str) -> YouTubeErrorKind {
 }
 
 fn write_transcript(
+    source_url: &str,
     video_id: &str,
     format: &str,
     output_path: Option<&Path>,
-    metadata: &VideoSummary,
-    source: &SourceIdentity,
-    cues: &[CaptionCue],
-    normalization: &NormalizationStats,
+    record: &CacheRecord,
 ) -> Result<()> {
-    let (source_name, caption_language, is_automatic, is_translated) = match source {
-        SourceIdentity::YoutubeCaptions {
-            selected_language,
-            automatic,
-            translated,
-        } => (
-            "youtube-captions",
-            Some(selected_language.as_str()),
-            Some(*automatic),
-            Some(*translated),
-        ),
-        SourceIdentity::LocalWhisper { .. } => ("local-whisper", None, None, None),
-    };
+    let request = &record.identity.request;
+    let metadata = &record.metadata;
+    let source = &record.identity.source;
+    let cues = &record.cues;
+    let normalization = &record.normalization;
+    let (source_name, engine, model, language, caption_language, is_automatic, is_translated) =
+        match source {
+            SourceIdentity::LocalVoxtral {
+                model, language, ..
+            } => (
+                "local-voxtral",
+                "voxtral",
+                model.as_str(),
+                language.as_deref(),
+                None,
+                None,
+                None,
+            ),
+            SourceIdentity::LocalWhisper {
+                model_name,
+                language_hint,
+                ..
+            } => (
+                "local-whisper",
+                "whisper",
+                model_name.as_str(),
+                language_hint.as_deref(),
+                None,
+                None,
+                None,
+            ),
+        };
     let rendered = match format {
         "txt" => render_txt(cues),
         "srt" => render_srt(cues),
         "json" => serde_json::to_string_pretty(&JsonTranscript {
             source: source_name,
+            source_url,
             video_id,
             title: &metadata.title,
             uploader: &metadata.uploader,
+            duration_seconds: metadata.duration_seconds,
+            requested_language: request.requested_language.as_deref(),
+            language,
+            engine,
+            model,
             caption_language,
             is_automatic,
             is_translated,
@@ -1151,9 +987,17 @@ fn write_transcript(
         }
     };
     if let Some(path) = output_path {
-        std::fs::write(path, &rendered)
-            .with_context(|| format!("failed to write transcript to {}", path.display()))?;
-        eprintln!("Wrote {} cues to {}", cues.len(), path.display());
+        std::fs::write(path, &rendered).with_context(|| {
+            format!(
+                "failed to write transcript to {}",
+                polyscribe_core::ui::terminal_safe_path(path)
+            )
+        })?;
+        eprintln!(
+            "Wrote {} cues to {}",
+            cues.len(),
+            polyscribe_core::ui::terminal_safe_path(path)
+        );
     } else {
         let mut stdout = std::io::stdout();
         stdout.write_all(rendered.as_bytes())?;
@@ -1163,13 +1007,11 @@ fn write_transcript(
         stdout.flush()?;
     }
     match source {
-        SourceIdentity::YoutubeCaptions {
-            selected_language,
-            automatic,
-            ..
+        SourceIdentity::LocalVoxtral {
+            model, language, ..
         } => eprintln!(
-            "source: youtube-captions, video: {video_id}, language: {selected_language}, track: {}, cues: {}",
-            if *automatic { "automatic" } else { "manual" },
+            "source: local-voxtral, video: {video_id}, model: {model}, language: {}, cues: {}",
+            language.as_deref().unwrap_or("unknown"),
             cues.len()
         ),
         SourceIdentity::LocalWhisper { backend, .. } => eprintln!(
@@ -1182,7 +1024,10 @@ fn write_transcript(
 
 fn validate_output_path(path: &Path) -> Result<()> {
     let path_text = path.to_string_lossy();
-    if path_text.contains("..") {
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
         return Err(anyhow!("output path must not contain '..'"));
     }
     if path_text.chars().any(char::is_control) {
@@ -1194,6 +1039,48 @@ fn validate_output_path(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn voxtral_timeout_invokes_the_whisper_fallback_once() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("slow-voxtral");
+        std::fs::write(&executable, "#!/bin/sh\nsleep 10\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let audio = directory.path().join("audio.wav");
+        std::fs::write(&audio, b"offline audio fixture").unwrap();
+        let mut whisper_attempts = 0;
+
+        let error = transcribe_with_whisper_fallback(
+            None,
+            || {
+                crate::youtube_voxtral::transcribe_with_timeout(
+                    Some(executable.as_os_str().to_os_string()),
+                    &audio,
+                    None,
+                    directory.path(),
+                    &polyscribe_core::stream::CancellationToken::new(),
+                    Duration::from_millis(80),
+                )
+            },
+            || {
+                whisper_attempts += 1;
+                Err(youtube_error(
+                    YouTubeErrorKind::Whisper,
+                    "controlled offline fallback failure",
+                ))
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(whisper_attempts, 1);
+        let diagnostic = error.to_string();
+        assert!(diagnostic.contains("local Voxtral transcription exceeded its process deadline"));
+        assert!(diagnostic.contains("local Whisper fallback failed"));
+        assert!(diagnostic.contains("controlled offline fallback failure"));
+    }
 
     #[test]
     fn downloader_statuses_are_classified_without_fallback_aliasing() {
@@ -1226,68 +1113,85 @@ mod tests {
     }
 
     #[test]
-    fn metadata_track_parsing_only_keeps_vtt_and_marks_translation() {
-        let inventory = parse_tracks(
-            Some(&serde_json::json!({
-                "en": [
-                    {"ext":"vtt", "url":"https://example.test/sub.vtt"},
-                    {"ext":"srv3", "url":"https://example.test/sub.xml"}
-                ],
-                "de": [{"ext":"vtt", "url":"https://example.test/sub.vtt?tlang=de"}]
-            })),
-            true,
-            "automatic_captions",
-        )
-        .unwrap();
-        assert!(inventory.has_formats);
-        assert_eq!(inventory.tracks.len(), 2);
-        assert!(
-            inventory
-                .tracks
-                .iter()
-                .find(|track| track.language == "en")
-                .is_some_and(|track| !track.is_translated)
-        );
-        assert!(
-            inventory
-                .tracks
-                .iter()
-                .find(|track| track.language == "de")
-                .is_some_and(|track| track.is_translated)
-        );
-        assert!(inventory.tracks.iter().all(|track| track.is_automatic));
-    }
-
-    #[test]
-    fn malformed_caption_inventory_is_not_treated_as_empty() {
-        assert!(parse_tracks(Some(&serde_json::Value::Null), false, "subtitles").is_err());
-        assert!(parse_tracks(Some(&serde_json::json!({"en": null})), false, "subtitles").is_err());
-        assert!(
-            parse_tracks(
-                Some(&serde_json::json!({"en": [{"url": "https://example.test/sub"}]})),
-                false,
-                "subtitles"
+    fn downloader_disables_caption_writes_and_retries() {
+        let args: Vec<String> = common_args()
+            .into_iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.contains(&"--no-write-subs".to_string()));
+        assert!(args.contains(&"--no-write-auto-subs".to_string()));
+        assert!(args.contains(&"--retries".to_string()));
+        assert!(args.contains(&"--fragment-retries".to_string()));
+        assert!(args.contains(&"--extractor-retries".to_string()));
+        assert!(!args.iter().any(|arg| {
+            matches!(
+                arg.as_str(),
+                "--write-subs" | "--write-auto-subs" | "--sub-langs"
             )
-            .is_err()
-        );
-        assert!(
-            parse_tracks(None, false, "subtitles")
-                .unwrap()
-                .tracks
-                .is_empty()
-        );
+        }));
     }
 
     #[test]
-    fn unsupported_formats_are_distinguishable_from_no_captions() {
-        let inventory = parse_tracks(
-            Some(&serde_json::json!({"en": [{"ext": "srv3"}]})),
+    fn cached_whisper_model_is_current_only_when_its_stat_matches() {
+        let cached = crate::youtube_cache::ModelStat {
+            device: 1,
+            inode: 2,
+            size: 3,
+            modified_seconds: 4,
+            modified_nanoseconds: 5,
+            changed_seconds: 6,
+            changed_nanoseconds: 7,
+        };
+        assert!(cache_model_stat_matches(&cached, Ok(cached.clone())));
+        let mut changed = cached.clone();
+        changed.inode += 1;
+        assert!(!cache_model_stat_matches(&cached, Ok(changed)));
+        assert!(!cache_model_stat_matches(
+            &cached,
+            Err(anyhow!("stat failed"))
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn moving_a_voxtral_file_away_and_back_changes_its_cache_stat() {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("voxtral");
+        let saved = directory.path().join("voxtral.saved");
+        std::fs::write(&executable, b"executable").unwrap();
+        let initial = crate::youtube_cache::executable_identity(&executable).unwrap();
+        std::fs::rename(&executable, &saved).unwrap();
+        std::fs::rename(&saved, &executable).unwrap();
+        let restored = crate::youtube_cache::executable_identity(&executable).unwrap();
+        assert_ne!(initial, restored);
+    }
+
+    #[test]
+    fn output_path_rejects_parent_components_not_dot_substrings() {
+        for path in ["notes..txt", "...", "dir/notes..txt"] {
+            assert!(validate_output_path(Path::new(path)).is_ok(), "{path}");
+        }
+        for path in ["../notes.txt", "dir/../notes.txt", "dir/.."] {
+            assert!(validate_output_path(Path::new(path)).is_err(), "{path}");
+        }
+    }
+
+    #[test]
+    fn unsupported_format_diagnostic_does_not_echo_control_characters() {
+        let error = run(
+            "https://youtu.be/dQw4w9WgXcQ".to_string(),
+            None,
+            "\u{1b}]52;c;aGVsbG8=\u{7}".to_string(),
+            None,
+            true,
             false,
-            "subtitles",
+            false,
+            false,
         )
-        .unwrap();
-        assert!(inventory.has_formats);
-        assert!(inventory.tracks.is_empty());
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("unsupported_format"));
+        assert!(!error.chars().any(char::is_control));
     }
 
     #[test]

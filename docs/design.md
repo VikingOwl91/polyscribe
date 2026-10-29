@@ -4,7 +4,7 @@
 
 PolyScribe is a Cargo workspace CLI that orchestrates:
 
-- `polyscribe-cli` (`crates/polyscribe-cli`): CLI parsing (`cli.rs`), command orchestration (`main.rs`), the `transcribe` pipeline (`transcribe.rs`), the `youtube` pipeline (`youtube.rs`, `youtube_process.rs`, `youtube_cache.rs`), the `record` pipeline (`record.rs`), and stdout modes (`output.rs`).
+- `polyscribe-cli` (`crates/polyscribe-cli`): the `polyscribe` binary. `cli.rs` defines the Clap interface and `main.rs` dispatches commands. `transcribe.rs` handles local file transcription and JSON transcript merging; `record.rs` handles live capture; `youtube.rs`, `youtube_voxtral.rs`, `youtube_transcript.rs`, `youtube_process.rs`, and `youtube_cache.rs` implement audio-only YouTube acquisition, validation, process supervision, and caching. `output.rs` handles CLI output modes.
 - `polyscribe-core` (`crates/polyscribe-core`): the engine —
   - `backend.rs`: backend selection, the `TranscribeBackend` implementations (CPU/CUDA/HIP via whisper-rs) and the reconciliation of the windows,
   - `capture.rs`: the live capture from PipeWire (`PipeWireCapture`),
@@ -19,25 +19,41 @@ PolyScribe is a Cargo workspace CLI that orchestrates:
 - `polyscribe-host` / `polyscribe-protocol` (`crates/`): plugin discovery/process management and the PSP/1 protocol types.
 - `plugins/polyscribe-plugin-tubescribe`: reference plugin.
 
+The executable entry point is `crates/polyscribe-cli/src/main.rs`; the command and option definitions are in `cli.rs`. Network orchestration for YouTube and model management lives at the CLI boundary. Core owns transcription, model discovery, stream handling, and serialization helpers.
+
 ## Data flow (transcribe)
 
 1) CLI collects inputs (media or JSON), options (merge, speaker names, language, backend), and output path.
 2) For media, audio is streamed from ffmpeg and decoded to 16 kHz mono PCM f32 in memory.
-3) A Whisper model is located (`WHISPER_MODEL`, or the largest `*.bin` in the models dir).
+3) A Whisper model is located from `WHISPER_MODEL`, the configured/default transcription models directory, or the model-download cache fallback. If selecting from a directory, the largest `*.bin` is chosen.
 4) The selected backend transcribes via whisper-rs, producing segments.
 5) Segments are sorted, reindexed, and written to JSON + TOML + SRT (or JSON to stdout).
 
 ## Data flow (youtube)
 
-1) The CLI validates the HTTPS YouTube URL and request language, then checks the versioned transcript cache unless `--refresh` was given.
-2) The downloader runs with an explicit argv, isolated temporary home/cache, bounded output, a wall-clock timeout, and process-group cleanup. Metadata and supported WebVTT tracks are read from JSON.
-3) A selected WebVTT file is size-checked, parsed, and normalized by the pure `polyscribe-core::youtube` functions. The cache stores source identity, original cues, normalized cues, and normalization counts, independent of TXT/SRT/JSON rendering.
-4) Local audio transcription is allowed only when captions are confirmed absent or a selected caption artifact has disappeared. HTTP errors, network failures, unavailable requested languages, and malformed subtitle content remain errors.
-5) Audio downloads are capped and removed with their private temporary directory. The same Whisper backend and window reconciliation used by file transcription process the downloaded audio; only this YouTube call opts into the supervised ffmpeg decoder deadline.
+1) `youtube.rs` validates the HTTPS URL and optional language, rejects `--captions-only`, snapshots the Voxtral configuration, and checks the cache unless `--refresh` was supplied. A usable cache hit is rendered without starting `yt-dlp`.
+2) On a miss, `yt-dlp` runs once for bounded JSON metadata and once to download `bestaudio/best`. Its config is ignored, subtitle-writing options are disabled, and downloader retries are set to zero. The returned video ID must match the requested ID.
+3) The downloaded audio is passed to the configured local Voxtral executable if present. Voxtral is an external protocol-v1 wrapper, not a backend compiled into PolyScribe. An unavailable, failed, timed-out, oversized, or invalid Voxtral result enters the single local Whisper fallback with the same audio.
+4) `youtube_transcript.rs` applies the same cue validation to both engines. Whisper's cues are sorted before validation; line endings are normalized, timestamps and text are bounded, and control characters are rejected. Cache validation repeats these checks before data is read or written.
+5) A successful cue set and source identity are cached independently of TXT/SRT/JSON rendering. JSON output includes the source URL, video ID, available metadata, requested/reported language, engine, model, and cues. Captions are never fetched or represented as an alternate source.
 
-Cache entries live below `$XDG_CACHE_HOME/polyscribe/youtube/v1/`. Directory-relative opens refuse symlinks, cache directories must be private and user-owned, and each record/index update is fsynced and atomically renamed. The format version is part of the cache identity so a parser/normalizer change cannot reuse stale cues.
+The cache is schema v3 under `$XDG_CACHE_HOME/polyscribe/youtube/v3/` (or `~/.cache/polyscribe/youtube/v3/`). Its request key includes schema, normalization and audio-policy versions, video ID, requested language, and the configured Voxtral path and resolved file/symlink identity. A successful Whisper result additionally records the selected model's file identity; a changed model stat makes that entry stale. Old caption-era cache data cannot satisfy the audio request key. Cache directories must be private and user-owned; relative opens refuse symlinks, and record/index updates are fsynced and atomically renamed. Cache problems are treated as misses, not as a reason to skip transcription.
 
-The subprocess deadline does not interrupt native Whisper inference. A stuck in-process inference therefore has no hard end-to-end timeout; providing that guarantee would require moving inference to a supervised worker process.
+### YouTube subprocess limits and cleanup
+
+The downloader's metadata request has a 120-second deadline, 50 MiB stdout limit, and 32 KiB retained stderr tail. Audio download has a 15-minute deadline, a 250 MiB file limit, a 1 MiB stdout limit, and a 32 KiB retained stderr tail. Voxtral has a 60-minute deadline, an 8 MiB stdout limit, and a 32 KiB retained stderr tail. The ffmpeg decoder used for YouTube fallback has a 60-minute deadline. The decoder deadline cannot interrupt an in-process Whisper inference call.
+
+The process supervisor uses argument arrays rather than a shell, closes child stdin, bounds captured output, and reaps the direct child. On Unix its pipe readers use nonblocking reads and stop after cancellation, timeout, or output overflow. After the direct child exits, they get 200 ms to drain output; an open stderr pipe does not replace the child's exit status, but stdout that did not reach EOF is reported as incomplete. A descendant that keeps a pipe open past the drain grace may remain alive, whether or not it escaped the process group. While the direct child is running, the supervisor terminates its process group on cancellation, timeout, or output overflow; Linux also sets a catchable parent-death signal on the direct child. This does not guarantee cleanup of descendants that leave the process group or survive an abrupt parent termination.
+
+The YouTube command does not install `SIGINT` or `SIGTERM` handlers. Default signal termination can bypass Rust cleanup, so a `TempDir` removes downloaded audio on normal completion and handled errors, but abrupt termination may leave temporary files. The Linux parent-death signal covers only the direct child; descendants that leave its process group may survive.
+
+## Trust boundaries
+
+- The YouTube URL is treated as untrusted input. PolyScribe validates the host and identifier before passing a canonical HTTPS URL as a single `yt-dlp` argument; it does not interpolate it into a shell command.
+- Video metadata and downloaded audio come from remote services. Metadata output is size-bounded, parsed as JSON, and checked against the requested video ID. Audio is passed to ffmpeg and whichever local transcription engine is selected.
+- `yt-dlp` and the Voxtral wrapper are local executables selected through `PATH` or configuration. They run with the caller's privileges and are not sandboxed. `yt-dlp` receives a restricted environment with private temporary/cache/config paths; Voxtral receives an allowlisted environment and the local audio path. Arbitrary Voxtral stderr is not forwarded to the user.
+- The transcript cache is local state with an explicit owner/permission and symlink policy. Records are size-limited, validated, and atomically replaced. The cache is not a trust boundary for transcript correctness; loaded cue data is validated again.
+- Plugins are also caller-selected local executables. The host forwards their protocol output and stderr, but does not sandbox them or constrain their network access.
 
 ### Long recordings
 
@@ -377,7 +393,7 @@ ggml reported and the backend whisper.cpp selected.
 
 ## Key decisions
 
-- Local-first: network access only for the `models` subcommands (Hugging Face over HTTPS, rustls). Everything else runs fully offline.
+- Local-first: `transcribe` and `record` run local inference; model management uses Hugging Face over HTTPS, and `youtube` uses `yt-dlp` to acquire remote metadata/audio before local inference. Plugins may perform their own network access.
 - GPU selection is a build-time property: a binary built with `gpu-cuda`/`gpu-hip` links the corresponding runtime and can use it; without the feature the backend is unavailable and requesting it produces an actionable error. Runtime dlopen probing was tried and removed (unstable, never detected anything). A Vulkan backend is not wired up.
 - Speaker labels are manual (per-input prompts). There is no automatic speaker diarization.
 - Logging: `elog!`/`ilog!`/`dlog!` macros plus `ui::*` helpers; quiet mode suppresses info/success/progress, errors and warnings remain. stderr is used for diagnostics, stdout for results.
@@ -394,5 +410,5 @@ ggml reported and the backend whisper.cpp selected.
 
 ## Binary naming and CLI surface
 
-- Binary is `polyscribe`; subcommands are `transcribe`, `record`, `models`, `plugins`, `completions`, `man`.
+- Binary is `polyscribe`; subcommands are `transcribe`, `youtube`, `record`, `models`, `plugins`, `completions`, and `man`.
 - Keep CLI flags stable and documented; add new flags conservatively.

@@ -452,7 +452,7 @@ impl PipeWireCapture {
 
     /// The diagnostics of the capture.
     pub fn diagnostics(&self) -> String {
-        self.stderr.lock().unwrap().text()
+        crate::ui::escape_terminal_controls(&self.stderr.lock().unwrap().text())
     }
 
     /// Stop the capture.
@@ -520,10 +520,11 @@ impl PipeWireCapture {
             reported.channels,
             self.config.channels
         );
+        let reported_format = crate::ui::escape_terminal_controls(&reported.format);
         ensure!(
             reported.format == self.config.format.pw_record_name(),
             "the audio capture delivers the format '{}', the pipeline expects '{}'",
-            reported.format,
+            reported_format,
             self.config.format.pw_record_name()
         );
         ensure!(

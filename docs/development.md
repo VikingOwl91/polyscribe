@@ -32,7 +32,7 @@ This document describes how to build, test, and run PolyScribe locally, and how 
 
 ## Run locally
 
-- The model directory is the same in debug and release builds: `$XDG_DATA_HOME/polyscribe/models` or `~/.local/share/polyscribe/models` (models installed with `models add` in the cache dir are found automatically).
+- The model directory is the same in debug and release builds: `$XDG_DATA_HOME/polyscribe/models` or `~/.local/share/polyscribe/models`. Model downloads and local discovery use that same directory by default.
 - You can override:
   - `POLYSCRIBE_MODELS_DIR=/path/to/models`
   - `WHISPER_MODEL=/path/to/model.bin` (forces a specific file)
@@ -46,7 +46,7 @@ This document describes how to build, test, and run PolyScribe locally, and how 
 - Non-interactive add/update (verifies sizes/hashes, downloads if missing):
   - `cargo run -p polyscribe-cli -- models add ggerganov/whisper.cpp ggml-tiny.en.bin`
   - `cargo run -p polyscribe-cli -- models update`
-- The `models` subcommands use `$XDG_CACHE_HOME/polyscribe/models` for files and `$XDG_CONFIG_HOME/polyscribe/models.json` for the manifest; override with `POLYSCRIBE_CACHE_DIR` / `POLYSCRIBE_CONFIG_DIR`.
+- The `models` subcommands use the model directory for files by default and `$XDG_CONFIG_HOME/polyscribe/models.json` for the manifest. `POLYSCRIBE_CACHE_DIR` and `POLYSCRIBE_CONFIG_DIR` override them for isolated runs.
 
 ## Tests
 

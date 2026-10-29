@@ -9,11 +9,13 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
 
-use polyscribe_core::backend::{BackendKind, collect_entries_for_input, select_backend};
+use polyscribe_core::backend::{
+    BackendKind, TranscribeBackend, collect_entries_for_input, select_backend,
+};
 use polyscribe_core::output::{
     OutputRoot, is_audio_file, sort_and_reindex, write_json_stdout, write_output_files,
 };
-use polyscribe_core::ui::progress::ProgressReporter;
+use polyscribe_core::ui::progress::{ProgressReporter, TranscriptProgress};
 use polyscribe_core::{date_prefix, normalize_lang_code};
 
 use crate::cli::GpuBackend;
@@ -74,15 +76,19 @@ pub fn run(args: TranscribeArgs) -> Result<()> {
     };
     let mut sel = select_backend(requested, polyscribe_core::verbose_level() > 0)?;
     polyscribe_core::dlog!(1, "Using backend: {:?}", sel.chosen);
+    if matches!(args.gpu_backend, GpuBackend::Auto)
+        && sel.chosen == BackendKind::Cpu
+        && sel.compiled.is_empty()
+    {
+        polyscribe_core::ilog!(
+            "No GPU backend is compiled into this binary; using the CPU backend. Build with --features gpu-hip for AMD ROCm or --features gpu-cuda for NVIDIA."
+        );
+    }
     let gpu_layers = if args.gpu_layers > 0 {
         Some(args.gpu_layers as u32)
     } else {
         None
     };
-    let progress_cb = |p: i32| {
-        polyscribe_core::dlog!(1, "transcription progress: {p}%");
-    };
-
     if args.merge_and_separate {
         polyscribe_core::dlog!(1, "Mode: merge-and-separate; output_dir={:?}", output_path);
         // Combined mode: write separate outputs per input and also a merged output set.
@@ -93,20 +99,22 @@ pub fn run(args: TranscribeArgs) -> Result<()> {
         };
         if !out_dir.as_os_str().is_empty() {
             create_dir_all(&out_dir).with_context(|| {
-                format!("Failed to create output directory: {}", out_dir.display())
+                format!(
+                    "Failed to create output directory: {}",
+                    polyscribe_core::ui::terminal_safe_path(&out_dir)
+                )
             })?;
         }
 
         let mut merged_entries = Vec::new();
         for input_path in &inputs {
             let speaker = resolve_speaker_name(input_path, args.set_speaker_names);
-            let mut entries = collect_entries_for_input(
+            let mut entries = collect_entries_with_progress(
                 sel.backend.as_mut(),
                 input_path,
                 &speaker,
                 lang_hint.as_deref(),
                 gpu_layers,
-                Some(&progress_cb),
             )?;
             sort_and_reindex(&mut entries);
 
@@ -140,13 +148,12 @@ pub fn run(args: TranscribeArgs) -> Result<()> {
         let mut entries = Vec::new();
         for input_path in &inputs {
             let speaker = resolve_speaker_name(input_path, args.set_speaker_names);
-            entries.extend(collect_entries_for_input(
+            entries.extend(collect_entries_with_progress(
                 sel.backend.as_mut(),
                 input_path,
                 &speaker,
                 lang_hint.as_deref(),
                 gpu_layers,
-                Some(&progress_cb),
             )?);
         }
         sort_and_reindex(&mut entries);
@@ -161,7 +168,7 @@ pub fn run(args: TranscribeArgs) -> Result<()> {
                 create_dir_all(parent).with_context(|| {
                     format!(
                         "Failed to create parent directory for output: {}",
-                        parent.display()
+                        polyscribe_core::ui::terminal_safe_path(parent)
                     )
                 })?;
             }
@@ -190,19 +197,22 @@ pub fn run(args: TranscribeArgs) -> Result<()> {
         if let Some(dir) = &out_dir
             && !dir.as_os_str().is_empty()
         {
-            create_dir_all(dir)
-                .with_context(|| format!("Failed to create output directory: {}", dir.display()))?;
+            create_dir_all(dir).with_context(|| {
+                format!(
+                    "Failed to create output directory: {}",
+                    polyscribe_core::ui::terminal_safe_path(dir)
+                )
+            })?;
         }
 
         for input_path in &inputs {
             let speaker = resolve_speaker_name(input_path, args.set_speaker_names);
-            let mut entries = collect_entries_for_input(
+            let mut entries = collect_entries_with_progress(
                 sel.backend.as_mut(),
                 input_path,
                 &speaker,
                 lang_hint.as_deref(),
                 gpu_layers,
-                Some(&progress_cb),
             )?;
             sort_and_reindex(&mut entries);
             let out = OutputRoot { items: entries };
@@ -220,6 +230,47 @@ pub fn run(args: TranscribeArgs) -> Result<()> {
 
     progress.finish_with_message("Transcription completed");
     Ok(())
+}
+
+fn collect_entries_with_progress(
+    backend: &mut (dyn TranscribeBackend + Send + Sync),
+    input_path: &Path,
+    speaker: &str,
+    lang_hint: Option<&str>,
+    gpu_layers: Option<u32>,
+) -> Result<Vec<polyscribe_core::OutputEntry>> {
+    if !is_audio_file(input_path) {
+        return collect_entries_for_input(
+            backend, input_path, speaker, lang_hint, gpu_layers, None,
+        )
+        .map_err(anyhow::Error::from);
+    }
+    let name = input_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("input");
+    let progress = TranscriptProgress::start(format!("Transcribing {name}"));
+    let progress_cb = |percent: i32| {
+        progress.update(percent);
+        if !progress.is_enabled() {
+            polyscribe_core::dlog!(1, "transcription progress: {percent}%");
+        }
+    };
+    let result = collect_entries_for_input(
+        backend,
+        input_path,
+        speaker,
+        lang_hint,
+        gpu_layers,
+        Some(&progress_cb),
+    )
+    .map_err(anyhow::Error::from);
+    progress.finish(if result.is_ok() {
+        "Transcript ready"
+    } else {
+        "Transcription failed"
+    });
+    result
 }
 
 fn sanitize_speaker_name(raw: &str) -> String {
@@ -243,8 +294,8 @@ fn prompt_speaker_name_for_path(path: &Path, default_name: &str, enabled: bool) 
     let display_owned: String = path
         .file_name()
         .and_then(|s| s.to_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| path.to_string_lossy().to_string());
+        .map(polyscribe_core::ui::escape_terminal_controls)
+        .unwrap_or_else(|| polyscribe_core::ui::terminal_safe_path(path));
     eprint!("Enter speaker name for {display_owned} [default: {default_name}]: ");
     io::stderr().flush().ok();
     let mut buf = String::new();

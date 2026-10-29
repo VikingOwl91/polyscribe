@@ -11,19 +11,9 @@ use polyscribe_core::youtube::{CaptionCue, NormalizationStats, YOUTUBE_NORMALIZA
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub const CACHE_SCHEMA_VERSION: u32 = 1;
+pub const CACHE_SCHEMA_VERSION: u32 = 3;
 const MAX_CACHE_ENTRY_BYTES: usize = 32 * 1024 * 1024;
-const MAX_CUES: usize = 200_000;
-const MAX_CUE_TEXT_BYTES: usize = 64 * 1024;
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RequestMode {
-    Default,
-    CaptionsOnly,
-    AudioOnly,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequestKey {
@@ -32,20 +22,21 @@ pub struct RequestKey {
     pub selection_policy_version: u32,
     pub video_id: String,
     pub requested_language: Option<String>,
-    pub prefer_manual: bool,
-    pub mode: RequestMode,
+    pub voxtral_executable: Option<Vec<u8>>,
+    pub voxtral_executable_identity: Option<ExecutableIdentity>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "source", rename_all = "snake_case")]
 pub enum SourceIdentity {
-    YoutubeCaptions {
-        selected_language: String,
-        automatic: bool,
-        translated: bool,
+    LocalVoxtral {
+        model: String,
+        language: Option<String>,
+        language_hint: Option<String>,
+        protocol_version: u32,
     },
     LocalWhisper {
-        model_sha256: String,
+        model_name: String,
         model_stat: ModelStat,
         backend: String,
         language_hint: Option<String>,
@@ -61,6 +52,19 @@ pub struct ModelStat {
     pub modified_nanoseconds: i64,
     pub changed_seconds: i64,
     pub changed_nanoseconds: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutableIdentity {
+    pub file: ModelStat,
+    pub symlinks: Vec<SymlinkIdentity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SymlinkIdentity {
+    pub path: Vec<u8>,
+    pub target: Vec<u8>,
+    pub stat: ModelStat,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -191,20 +195,11 @@ pub(crate) fn cache_base_directory() -> Option<PathBuf> {
 
 #[cfg(unix)]
 pub(crate) fn model_stat(path: &Path) -> Result<ModelStat> {
-    use std::os::unix::fs::MetadataExt;
     let metadata = std::fs::metadata(path).context("read local model metadata")?;
     if !metadata.is_file() {
         bail!("local model path is not a regular file");
     }
-    Ok(ModelStat {
-        device: metadata.dev(),
-        inode: metadata.ino(),
-        size: metadata.len(),
-        modified_seconds: metadata.mtime(),
-        modified_nanoseconds: metadata.mtime_nsec(),
-        changed_seconds: metadata.ctime(),
-        changed_nanoseconds: metadata.ctime_nsec(),
-    })
+    Ok(model_stat_from_metadata(&metadata))
 }
 
 #[cfg(not(unix))]
@@ -213,13 +208,33 @@ pub(crate) fn model_stat(path: &Path) -> Result<ModelStat> {
     if !metadata.is_file() {
         bail!("local model path is not a regular file");
     }
+    Ok(model_stat_from_metadata(&metadata))
+}
+
+#[cfg(unix)]
+fn model_stat_from_metadata(metadata: &std::fs::Metadata) -> ModelStat {
+    use std::os::unix::fs::MetadataExt;
+
+    ModelStat {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        size: metadata.len(),
+        modified_seconds: metadata.mtime(),
+        modified_nanoseconds: metadata.mtime_nsec(),
+        changed_seconds: metadata.ctime(),
+        changed_nanoseconds: metadata.ctime_nsec(),
+    }
+}
+
+#[cfg(not(unix))]
+fn model_stat_from_metadata(metadata: &std::fs::Metadata) -> ModelStat {
     let modified = metadata
         .modified()
         .ok()
         .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|duration| duration.as_secs() as i64)
         .unwrap_or_default();
-    Ok(ModelStat {
+    ModelStat {
         device: 0,
         inode: 0,
         size: metadata.len(),
@@ -227,27 +242,102 @@ pub(crate) fn model_stat(path: &Path) -> Result<ModelStat> {
         modified_nanoseconds: 0,
         changed_seconds: 0,
         changed_nanoseconds: 0,
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn executable_identity(path: &Path) -> Result<ExecutableIdentity> {
+    use std::collections::VecDeque;
+    use std::os::unix::ffi::OsStrExt;
+
+    enum ComponentValue {
+        Parent,
+        Normal(std::ffi::OsString),
+    }
+
+    fn components(path: &Path) -> VecDeque<ComponentValue> {
+        path.components()
+            .filter_map(|component| match component {
+                Component::ParentDir => Some(ComponentValue::Parent),
+                Component::Normal(name) => Some(ComponentValue::Normal(name.to_os_string())),
+                Component::RootDir | Component::CurDir => None,
+                Component::Prefix(_) => None,
+            })
+            .collect()
+    }
+
+    let absolute_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .context("resolve configured Voxtral executable path")?
+            .join(path)
+    };
+    let mut pending = components(&absolute_path);
+    let mut resolved = PathBuf::from("/");
+    let mut symlinks = Vec::new();
+    let mut link_count = 0usize;
+
+    while let Some(component) = pending.pop_front() {
+        match component {
+            ComponentValue::Parent => {
+                resolved.pop();
+            }
+            ComponentValue::Normal(name) => {
+                let candidate = resolved.join(&name);
+                let metadata = std::fs::symlink_metadata(&candidate).with_context(|| {
+                    format!(
+                        "inspect executable path {}",
+                        polyscribe_core::ui::terminal_safe_path(&candidate)
+                    )
+                })?;
+                if metadata.file_type().is_symlink() {
+                    link_count += 1;
+                    if link_count > 40 {
+                        bail!("configured Voxtral executable exceeds the symlink limit");
+                    }
+                    let target = std::fs::read_link(&candidate).with_context(|| {
+                        format!(
+                            "read executable symlink {}",
+                            polyscribe_core::ui::terminal_safe_path(&candidate)
+                        )
+                    })?;
+                    let target_components = components(&target);
+                    symlinks.push(SymlinkIdentity {
+                        path: candidate.as_os_str().as_bytes().to_vec(),
+                        target: target.as_os_str().as_bytes().to_vec(),
+                        stat: model_stat_from_metadata(&metadata),
+                    });
+                    if target.is_absolute() {
+                        resolved = PathBuf::from("/");
+                    }
+                    let mut expanded = target_components;
+                    expanded.append(&mut pending);
+                    pending = expanded;
+                } else {
+                    resolved = candidate;
+                }
+            }
+        }
+    }
+
+    let metadata =
+        std::fs::metadata(&absolute_path).context("read configured Voxtral executable metadata")?;
+    if !metadata.is_file() {
+        bail!("configured Voxtral executable is not a regular file");
+    }
+    Ok(ExecutableIdentity {
+        file: model_stat_from_metadata(&metadata),
+        symlinks,
     })
 }
 
-pub(crate) fn model_sha256(path: &Path) -> Result<String> {
-    let mut file = File::open(path).context("open local Whisper model")?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 1024 * 1024];
-    loop {
-        let read = file.read(&mut buffer).context("read local Whisper model")?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(format!("{:x}", hasher.finalize()))
+#[cfg(not(unix))]
+pub(crate) fn executable_identity(_path: &Path) -> Result<ExecutableIdentity> {
+    bail!("configured Voxtral executable identity requires Unix path metadata")
 }
 
 fn validate_record(record: &CacheRecord) -> Result<()> {
-    if record.original_cues.len() > MAX_CUES || record.cues.len() > MAX_CUES {
-        bail!("cache cue count exceeds limit");
-    }
     if record
         .metadata
         .title
@@ -265,33 +355,62 @@ fn validate_record(record: &CacheRecord) -> Result<()> {
     {
         bail!("cache metadata is invalid");
     }
-    let mut text_bytes = 0usize;
-    for cue in record.original_cues.iter().chain(&record.cues) {
-        if cue.end_ms < cue.start_ms
-            || cue.text.len() > MAX_CUE_TEXT_BYTES
-            || cue
-                .speaker
-                .as_ref()
-                .is_some_and(|speaker| speaker.len() > 1024)
-        {
-            bail!("cache cue is invalid");
-        }
-        text_bytes = text_bytes.saturating_add(cue.text.len());
-        if text_bytes > MAX_CACHE_ENTRY_BYTES / 2 {
-            bail!("cache transcript text exceeds limit");
-        }
+    validate_source_identity(&record.identity.source)?;
+    validate_cached_cues(&record.original_cues)?;
+    validate_cached_cues(&record.cues)?;
+    Ok(())
+}
+
+fn validate_cached_cues(cues: &[CaptionCue]) -> Result<()> {
+    let mut normalized = cues.to_vec();
+    crate::youtube_transcript::normalize_and_validate_cues(&mut normalized)
+        .map_err(|reason| anyhow::anyhow!("cache cues are invalid: {reason}"))?;
+    if normalized != cues {
+        bail!("cache cues are not normalized");
     }
-    if record
-        .cues
-        .windows(2)
-        .any(|pair| pair[0].start_ms > pair[1].start_ms)
-    {
-        bail!("normalized cache cue timestamps are not monotonic");
-    }
-    if let SourceIdentity::LocalWhisper { model_sha256, .. } = &record.identity.source
-        && !is_sha256(model_sha256)
-    {
-        bail!("cached model fingerprint is invalid");
+    Ok(())
+}
+
+fn validate_source_identity(source: &SourceIdentity) -> Result<()> {
+    let valid_text = |value: &str, max_bytes: usize| {
+        !value.trim().is_empty() && value.len() <= max_bytes && !value.chars().any(char::is_control)
+    };
+    let valid_language = |language: &Option<String>| {
+        language
+            .as_deref()
+            .is_none_or(crate::youtube_transcript::valid_language_code)
+    };
+    match source {
+        SourceIdentity::LocalVoxtral {
+            model,
+            language,
+            language_hint,
+            protocol_version,
+        } => {
+            if *protocol_version != 1
+                || !valid_text(model, 256)
+                || !valid_language(language)
+                || !valid_language(language_hint)
+            {
+                bail!("cache Voxtral identity is invalid");
+            }
+        }
+        SourceIdentity::LocalWhisper {
+            model_name,
+            backend,
+            language_hint,
+            ..
+        } => {
+            if !valid_text(model_name, 4096)
+                || !valid_text(backend, 32)
+                || !backend
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+                || !valid_language(language_hint)
+            {
+                bail!("cache Whisper identity is invalid");
+            }
+        }
     }
     Ok(())
 }
@@ -343,7 +462,7 @@ impl Directory {
         for component in base.components().chain([
             Component::Normal(OsStr::new("polyscribe")),
             Component::Normal(OsStr::new("youtube")),
-            Component::Normal(OsStr::new("v1")),
+            Component::Normal(OsStr::new("v3")),
         ]) {
             let Component::Normal(name) = component else {
                 continue;
@@ -572,8 +691,8 @@ mod tests {
             selection_policy_version: 1,
             video_id: video_id.to_string(),
             requested_language: Some("de".to_string()),
-            prefer_manual: true,
-            mode: RequestMode::Default,
+            voxtral_executable: None,
+            voxtral_executable_identity: None,
         }
     }
 
@@ -583,10 +702,19 @@ mod tests {
             normalization_version: YOUTUBE_NORMALIZATION_VERSION,
             identity: CacheIdentity {
                 request: request(video_id),
-                source: SourceIdentity::YoutubeCaptions {
-                    selected_language: "de-DE".to_string(),
-                    automatic: false,
-                    translated: false,
+                source: SourceIdentity::LocalWhisper {
+                    model_name: "ggml-base.bin".to_string(),
+                    model_stat: ModelStat {
+                        device: 0,
+                        inode: 0,
+                        size: 1,
+                        modified_seconds: 0,
+                        modified_nanoseconds: 0,
+                        changed_seconds: 0,
+                        changed_nanoseconds: 0,
+                    },
+                    backend: "cpu".to_string(),
+                    language_hint: Some("de".to_string()),
                 },
             },
             acquired_at: "2026-10-23T00:00:00Z".to_string(),
@@ -609,6 +737,43 @@ mod tests {
         }
     }
 
+    fn stat(size: u64) -> ModelStat {
+        ModelStat {
+            device: 1,
+            inode: 2,
+            size,
+            modified_seconds: 3,
+            modified_nanoseconds: 4,
+            changed_seconds: 5,
+            changed_nanoseconds: 6,
+        }
+    }
+
+    fn write_unvalidated_record(cache: &YoutubeCache, record: &CacheRecord) {
+        let identity_hash = digest_json(&record.identity).unwrap();
+        cache
+            .directory
+            .write_atomic(
+                &format!("{identity_hash}.json"),
+                &serde_json::to_vec(record).unwrap(),
+            )
+            .unwrap();
+        let pointer = CachePointer {
+            schema_version: CACHE_SCHEMA_VERSION,
+            identity_hash,
+        };
+        cache
+            .directory
+            .write_atomic(
+                &format!(
+                    "request-{}.json",
+                    digest_json(&record.identity.request).unwrap()
+                ),
+                &serde_json::to_vec(&pointer).unwrap(),
+            )
+            .unwrap();
+    }
+
     #[test]
     fn cache_roundtrips_and_separates_video_identity() {
         let temp = tempfile::tempdir().unwrap();
@@ -621,6 +786,290 @@ mod tests {
         assert!(matches!(
             cache.lookup(&request("video-two")).unwrap(),
             Lookup::Miss
+        ));
+    }
+
+    #[test]
+    fn cache_request_distinguishes_raw_voxtral_path_and_file_stat() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = YoutubeCache::open_at(temp.path(), true).unwrap();
+        let mut cached_request = request("voxtral-identity");
+        cached_request.voxtral_executable = Some(vec![b'/', b't', b'm', b'p', b'/', 0xff]);
+        cached_request.voxtral_executable_identity = Some(ExecutableIdentity {
+            file: stat(10),
+            symlinks: Vec::new(),
+        });
+        let mut cached_record = record("voxtral-identity");
+        cached_record.identity.request = cached_request.clone();
+        cache.store(&cached_record).unwrap();
+        assert!(matches!(
+            cache.lookup(&cached_request).unwrap(),
+            Lookup::Hit(_)
+        ));
+
+        let mut replaced_request = cached_request.clone();
+        replaced_request
+            .voxtral_executable_identity
+            .as_mut()
+            .unwrap()
+            .file = stat(11);
+        assert!(matches!(
+            cache.lookup(&replaced_request).unwrap(),
+            Lookup::Miss
+        ));
+
+        let mut unconfigured_request = cached_request;
+        unconfigured_request.voxtral_executable = None;
+        unconfigured_request.voxtral_executable_identity = None;
+        assert!(matches!(
+            cache.lookup(&unconfigured_request).unwrap(),
+            Lookup::Miss
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn executable_identity_captures_regular_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let executable = temp.path().join("voxtral");
+        std::fs::write(&executable, b"binary").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let identity = executable_identity(&executable).unwrap();
+
+        assert_eq!(identity.file, model_stat(&executable).unwrap());
+        assert!(identity.symlinks.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn executable_identity_is_stable_without_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let executable = temp.path().join("voxtral");
+        std::fs::write(&executable, b"binary").unwrap();
+
+        assert_eq!(
+            executable_identity(&executable).unwrap(),
+            executable_identity(&executable).unwrap()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn executable_identity_tracks_final_symlink_retarget_and_restore() {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::{MetadataExt, symlink};
+
+        let temp = tempfile::tempdir().unwrap();
+        let real_file = temp.path().join("voxtral");
+        std::fs::write(&real_file, b"binary").unwrap();
+        let target_a = temp.path().join("target-a");
+        let target_b = temp.path().join("target-b");
+        std::fs::hard_link(&real_file, &target_a).unwrap();
+        std::fs::hard_link(&real_file, &target_b).unwrap();
+
+        let executable = temp.path().join("configured-voxtral");
+        let replacement = temp.path().join("replacement-link");
+        let original_hold = temp.path().join("original-link-hold");
+        let retarget_hold = temp.path().join("retarget-link-hold");
+        let restore = temp.path().join("restore-link");
+        symlink(&target_a, &executable).unwrap();
+        symlink(&target_b, &replacement).unwrap();
+
+        let initial = executable_identity(&executable).unwrap();
+        std::fs::rename(&executable, &original_hold).unwrap();
+        std::fs::rename(&replacement, &executable).unwrap();
+        let retargeted = executable_identity(&executable).unwrap();
+        symlink(&target_a, &restore).unwrap();
+        std::fs::rename(&executable, &retarget_hold).unwrap();
+        std::fs::rename(&restore, &executable).unwrap();
+        let restored = executable_identity(&executable).unwrap();
+
+        assert_eq!(initial.file, retargeted.file);
+        assert_eq!(initial.file, restored.file);
+        assert_eq!(initial.file, model_stat(&real_file).unwrap());
+        assert_ne!(initial.symlinks, retargeted.symlinks);
+        assert_ne!(initial.symlinks, restored.symlinks);
+        assert_ne!(retargeted.symlinks, restored.symlinks);
+        assert_eq!(initial.symlinks[0].target, target_a.as_os_str().as_bytes());
+        assert_eq!(
+            retargeted.symlinks[0].target,
+            target_b.as_os_str().as_bytes()
+        );
+        assert_eq!(restored.symlinks[0].target, target_a.as_os_str().as_bytes());
+
+        let original_inode = std::fs::symlink_metadata(&original_hold).unwrap().ino();
+        let retarget_inode = std::fs::symlink_metadata(&retarget_hold).unwrap().ino();
+        let restored_inode = std::fs::symlink_metadata(&executable).unwrap().ino();
+        assert_ne!(original_inode, retarget_inode);
+        assert_ne!(original_inode, restored_inode);
+        assert_ne!(retarget_inode, restored_inode);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn executable_identity_tracks_parent_symlink_with_regular_final_component() {
+        use std::os::unix::fs::{MetadataExt, symlink};
+
+        let temp = tempfile::tempdir().unwrap();
+        let first_dir = temp.path().join("first-dir");
+        let second_dir = temp.path().join("second-dir");
+        std::fs::create_dir(&first_dir).unwrap();
+        std::fs::create_dir(&second_dir).unwrap();
+        let first_file = first_dir.join("voxtral");
+        let second_file = second_dir.join("voxtral");
+        std::fs::write(&first_file, b"binary").unwrap();
+        std::fs::hard_link(&first_file, &second_file).unwrap();
+
+        let parent_link = temp.path().join("configured-dir");
+        let replacement = temp.path().join("replacement-dir-link");
+        let original_hold = temp.path().join("original-dir-link-hold");
+        let retarget_hold = temp.path().join("retarget-dir-link-hold");
+        let restore = temp.path().join("restore-dir-link");
+        symlink(&first_dir, &parent_link).unwrap();
+        symlink(&second_dir, &replacement).unwrap();
+
+        let executable = parent_link.join("voxtral");
+        let initial = executable_identity(&executable).unwrap();
+        assert!(std::fs::symlink_metadata(&executable).unwrap().is_file());
+        std::fs::rename(&parent_link, &original_hold).unwrap();
+        std::fs::rename(&replacement, &parent_link).unwrap();
+        let retargeted = executable_identity(&executable).unwrap();
+        symlink(&first_dir, &restore).unwrap();
+        std::fs::rename(&parent_link, &retarget_hold).unwrap();
+        std::fs::rename(&restore, &parent_link).unwrap();
+        let restored = executable_identity(&executable).unwrap();
+
+        assert_eq!(initial.file, retargeted.file);
+        assert_eq!(initial.file, restored.file);
+        assert_eq!(initial.file, model_stat(&first_file).unwrap());
+        assert_eq!(initial.symlinks.len(), 1);
+        assert_eq!(retargeted.symlinks.len(), 1);
+        assert_eq!(restored.symlinks.len(), 1);
+        assert_ne!(initial.symlinks, retargeted.symlinks);
+        assert_ne!(initial.symlinks, restored.symlinks);
+        assert_ne!(retargeted.symlinks, restored.symlinks);
+
+        let original_inode = std::fs::symlink_metadata(&original_hold).unwrap().ino();
+        let retarget_inode = std::fs::symlink_metadata(&retarget_hold).unwrap().ino();
+        let restored_inode = std::fs::symlink_metadata(&parent_link).unwrap().ino();
+        assert_ne!(original_inode, retarget_inode);
+        assert_ne!(original_inode, restored_inode);
+        assert_ne!(retarget_inode, restored_inode);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn executable_identity_resolves_relative_nested_links_and_parent_segments() {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let real_dir = temp.path().join("real");
+        let links_dir = temp.path().join("links");
+        std::fs::create_dir(&real_dir).unwrap();
+        std::fs::create_dir(&links_dir).unwrap();
+        let real_file = real_dir.join("voxtral");
+        std::fs::write(&real_file, b"binary").unwrap();
+        let configured = temp.path().join("configured-voxtral");
+        let nested = links_dir.join("next");
+        symlink(Path::new("links/next"), &configured).unwrap();
+        symlink(Path::new("../real/voxtral"), &nested).unwrap();
+
+        let identity = executable_identity(&configured).unwrap();
+
+        assert_eq!(identity.file, model_stat(&real_file).unwrap());
+        assert_eq!(identity.symlinks.len(), 2);
+        assert_eq!(identity.symlinks[0].path, configured.as_os_str().as_bytes());
+        assert_eq!(identity.symlinks[0].target, b"links/next");
+        assert_eq!(identity.symlinks[1].path, nested.as_os_str().as_bytes());
+        assert_eq!(identity.symlinks[1].target, b"../real/voxtral");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn executable_identity_resolves_absolute_symlink_destination() {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let real_file = temp.path().join("voxtral");
+        std::fs::write(&real_file, b"binary").unwrap();
+        let configured = temp.path().join("configured-voxtral");
+        symlink(&real_file, &configured).unwrap();
+
+        let identity = executable_identity(&configured).unwrap();
+
+        assert_eq!(identity.file, model_stat(&real_file).unwrap());
+        assert_eq!(identity.symlinks.len(), 1);
+        assert_eq!(
+            identity.symlinks[0].target,
+            real_file.as_os_str().as_bytes()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn executable_identity_rejects_symlink_loops_and_dangling_links() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let first = temp.path().join("first");
+        let second = temp.path().join("second");
+        symlink(&second, &first).unwrap();
+        symlink(&first, &second).unwrap();
+        assert!(executable_identity(&first).is_err());
+
+        let dangling = temp.path().join("dangling");
+        symlink(temp.path().join("missing"), &dangling).unwrap();
+        assert!(executable_identity(&dangling).is_err());
+    }
+
+    #[test]
+    fn cache_rejects_unsafe_cues_and_source_identity_on_read_and_write() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = YoutubeCache::open_at(temp.path(), true).unwrap();
+
+        let mut blank_line = record("unsafe-blank-line");
+        blank_line.cues[0].text = "safe\n\nforged".to_string();
+        assert!(cache.store(&blank_line).is_err());
+        write_unvalidated_record(&cache, &blank_line);
+        assert!(matches!(
+            cache.lookup(&request("unsafe-blank-line")).unwrap(),
+            Lookup::Invalid
+        ));
+
+        let mut terminal_control = record("unsafe-terminal-control");
+        terminal_control.original_cues[0].text = "safe\u{1b}[31m".to_string();
+        assert!(cache.store(&terminal_control).is_err());
+        write_unvalidated_record(&cache, &terminal_control);
+        assert!(matches!(
+            cache.lookup(&request("unsafe-terminal-control")).unwrap(),
+            Lookup::Invalid
+        ));
+
+        let mut unsafe_speaker = record("unsafe-speaker");
+        unsafe_speaker.cues[0].speaker = Some("speaker\nforged".to_string());
+        assert!(cache.store(&unsafe_speaker).is_err());
+        write_unvalidated_record(&cache, &unsafe_speaker);
+        assert!(matches!(
+            cache.lookup(&request("unsafe-speaker")).unwrap(),
+            Lookup::Invalid
+        ));
+
+        let mut unsafe_model = record("unsafe-model");
+        let SourceIdentity::LocalWhisper { model_name, .. } = &mut unsafe_model.identity.source
+        else {
+            unreachable!();
+        };
+        *model_name = "model\u{1b}[31m".to_string();
+        assert!(cache.store(&unsafe_model).is_err());
+        write_unvalidated_record(&cache, &unsafe_model);
+        assert!(matches!(
+            cache.lookup(&request("unsafe-model")).unwrap(),
+            Lookup::Invalid
         ));
     }
 
@@ -639,7 +1088,7 @@ mod tests {
             "{}.json",
             digest_json(&record("video-corrupt").identity).unwrap()
         );
-        let directory = temp.path().join("polyscribe/youtube/v1");
+        let directory = temp.path().join("polyscribe/youtube/v3");
         std::fs::write(directory.join(&pointer_name), "not json").unwrap();
         assert!(matches!(cache.lookup(&request).unwrap(), Lookup::Invalid));
         std::fs::remove_file(directory.join(&pointer_name)).unwrap();

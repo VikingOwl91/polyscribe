@@ -1,7 +1,7 @@
 # FAQ
 
 Models are missing — what do I do?
-- For transcription: put a `ggml-*.bin` model in the models dir (`$XDG_DATA_HOME/polyscribe/models`, same in debug and release builds), set `WHISPER_MODEL=/path/to/model.bin`, or override the dir with `POLYSCRIBE_MODELS_DIR`.
+- For transcription: put a `ggml-*.bin` model in the models dir (`$XDG_DATA_HOME/polyscribe/models`, same in debug and release builds), set `WHISPER_MODEL=/path/to/model.bin` (or a bare file name that exists there), or override the dir with `POLYSCRIBE_MODELS_DIR`.
 - For the `models` subcommands: `polyscribe models add ggerganov/whisper.cpp ggml-tiny.en.bin`, or `polyscribe models download` for the interactive downloader.
 - For CI: `polyscribe models add ggerganov/whisper.cpp ggml-tiny.en.bin` (non-interactive, verified download).
 
@@ -25,7 +25,7 @@ Is there automatic speaker diarization?
 
 Which directories are used?
 - Transcription models: `$XDG_DATA_HOME/polyscribe/models` (or `~/.local/share/polyscribe/models`), same in debug and release builds; override `POLYSCRIBE_MODELS_DIR`.
-- `models` subcommands: files in `$XDG_CACHE_HOME/polyscribe/models`, manifest at `$XDG_CONFIG_HOME/polyscribe/models.json`; override `POLYSCRIBE_CACHE_DIR` / `POLYSCRIBE_CONFIG_DIR`.
+- `models` subcommands: files in the model directory by default, manifest at `$XDG_CONFIG_HOME/polyscribe/models.json`; override `POLYSCRIBE_CACHE_DIR` / `POLYSCRIBE_CONFIG_DIR`.
 - Manifest cache: `$XDG_CACHE_HOME/polyscribe/manifest/` (24 h TTL).
 
 The transcription warns that it may be incomplete

@@ -1,4 +1,5 @@
 use assert_cmd::cargo::cargo_bin;
+use std::fs;
 use std::process::Command;
 
 fn bin() -> std::path::PathBuf {
@@ -92,4 +93,128 @@ fn models_download_no_interaction_skips_prompt() {
         out.status,
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+#[test]
+fn models_ls_discovers_and_persists_a_local_model() {
+    let tmp = tempfile::tempdir().unwrap();
+    let models_dir = tmp.path().join("models");
+    let config_dir = tmp.path().join("config");
+    let data_dir = tmp.path().join("data");
+    fs::create_dir_all(&models_dir).unwrap();
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::create_dir_all(&data_dir).unwrap();
+    fs::write(models_dir.join("ggml-tiny.bin"), b"fake model bytes").unwrap();
+
+    let run_ls = || {
+        Command::new(bin())
+            .args(["models", "ls"])
+            .env("POLYSCRIBE_MODELS_DIR", &models_dir)
+            .env("XDG_CONFIG_HOME", &config_dir)
+            .env("XDG_DATA_HOME", &data_dir)
+            .env_remove("POLYSCRIBE_CACHE_DIR")
+            .output()
+            .expect("failed to run polyscribe models ls")
+    };
+
+    let out = run_ls();
+    assert!(
+        out.status.success(),
+        "models ls exited non-zero: {:?}: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("ggml-tiny.bin"),
+        "models ls did not discover the local model: {stdout}"
+    );
+    assert!(
+        config_dir.join("polyscribe").join("models.json").is_file(),
+        "models ls did not persist the discovered model"
+    );
+
+    // A fresh process reads the same manifest (restart persistence).
+    let out = run_ls();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("ggml-tiny.bin"),
+        "the discovered model was not persisted: {stdout}"
+    );
+}
+#[test]
+fn models_update_skips_local_models_without_network() {
+    let tmp = tempfile::tempdir().unwrap();
+    let models_dir = tmp.path().join("models");
+    let config_dir = tmp.path().join("config");
+    let data_dir = tmp.path().join("data");
+    fs::create_dir_all(&models_dir).unwrap();
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::create_dir_all(&data_dir).unwrap();
+    fs::write(models_dir.join("ggml-tiny.bin"), b"fake model bytes").unwrap();
+
+    let env = |cmd: &mut Command| {
+        cmd.env("POLYSCRIBE_MODELS_DIR", &models_dir)
+            .env("XDG_CONFIG_HOME", &config_dir)
+            .env("XDG_DATA_HOME", &data_dir)
+            .env_remove("POLYSCRIBE_CACHE_DIR");
+    };
+
+    let mut ls = Command::new(bin());
+    ls.args(["models", "ls"]);
+    env(&mut ls);
+    assert!(ls.output().unwrap().status.success(), "models ls failed");
+
+    let mut update = Command::new(bin());
+    update.args(["models", "update"]);
+    env(&mut update);
+    let out = update.output().expect("failed to run models update");
+    assert!(
+        out.status.success(),
+        "models update exited non-zero: {:?}: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("skip ggml-tiny: local model"),
+        "expected local skip message, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("HTTP 401"),
+        "local update must not contact Hugging Face: {stdout}"
+    );
+}
+
+#[test]
+fn models_rm_accepts_a_file_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    let models_dir = tmp.path().join("models");
+    let config_dir = tmp.path().join("config");
+    let data_dir = tmp.path().join("data");
+    fs::create_dir_all(&models_dir).unwrap();
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::create_dir_all(&data_dir).unwrap();
+    let model = models_dir.join("ggml-tiny.bin");
+    fs::write(&model, b"fake model bytes").unwrap();
+
+    let env = |cmd: &mut Command| {
+        cmd.env("POLYSCRIBE_MODELS_DIR", &models_dir)
+            .env("XDG_CONFIG_HOME", &config_dir)
+            .env("XDG_DATA_HOME", &data_dir)
+            .env_remove("POLYSCRIBE_CACHE_DIR");
+    };
+
+    let mut rm = Command::new(bin());
+    rm.args(["models", "rm", "ggml-tiny.bin"]);
+    env(&mut rm);
+    let out = rm.output().expect("failed to run models rm");
+    assert!(
+        out.status.success(),
+        "models rm exited non-zero: {:?}: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!model.exists(), "models rm did not remove the file");
 }

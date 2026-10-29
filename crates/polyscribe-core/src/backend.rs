@@ -6,10 +6,11 @@ use crate::find_model_file;
 use crate::gpu::{GpuBackend, GpuDevice, gpu_devices};
 use crate::output::{is_audio_file, is_json_file, load_json_transcript};
 use crate::prelude::*;
+use crate::stream::WindowSource;
 use anyhow::{Context, anyhow};
 use std::env;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Test-only override for the GPU device probe.
 ///
@@ -130,7 +131,10 @@ impl ModelSession {
             // build a "cpu" request would still run on the GPU.
             params.use_gpu(matches!(backend, BackendKind::Cuda | BackendKind::Hip));
             whisper_rs::WhisperContext::new_with_params(&model_path, params).with_context(|| {
-                format!("Failed to load Whisper model at {}", model_path.display())
+                format!(
+                    "Failed to load Whisper model at {}",
+                    crate::ui::terminal_safe_path(&model_path)
+                )
             })
         })?;
         self.context = Some(context);
@@ -237,6 +241,8 @@ impl_whisper_backend!(HipBackend, BackendKind::Hip);
 pub struct BackendSelection {
     pub backend: Box<dyn TranscribeBackend + Send + Sync>,
     pub chosen: BackendKind,
+    /// The backends compiled into this binary, whether or not a device was found.
+    pub compiled: Vec<BackendKind>,
     /// The backends that are usable right now: compiled into this binary and
     /// backed by a device that ggml reports.
     pub detected: Vec<BackendKind>,
@@ -365,6 +371,7 @@ pub fn select_backend(requested: BackendKind, verbose: bool) -> Result<BackendSe
     Ok(BackendSelection {
         backend: instantiate_backend(chosen),
         chosen,
+        compiled,
         detected,
     })
 }
@@ -385,7 +392,10 @@ pub fn collect_entries_for_input(
     progress: Option<&(dyn Fn(i32) + Send + Sync)>,
 ) -> Result<Vec<OutputEntry>> {
     if is_audio_file(path) {
-        crate::ilog!("Processing file: {} ...", path.display());
+        crate::ilog!(
+            "Processing file: {} ...",
+            crate::ui::terminal_safe_path(path)
+        );
         match backend.transcribe(path, speaker, lang_opt, gpu_layers, progress) {
             Ok(items) => {
                 crate::ilog!("done");
@@ -407,7 +417,7 @@ pub fn collect_entries_for_input(
     } else {
         Err(anyhow!(
             "Unsupported input type (expected .json or audio media): {}",
-            path.display()
+            crate::ui::terminal_safe_path(path)
         )
         .into())
     }
@@ -466,6 +476,17 @@ fn transcribe_with_whisper_rs(
     // memory at a time. The first window is decoded before the model is
     // touched, which keeps the order of the errors: a broken input file is
     // reported before a missing model.
+    let total_samples = crate::chunked::probe_audio_duration_seconds(audio_path)
+        .map(|seconds| (seconds * crate::chunked::WHISPER_SAMPLE_RATE as f64).round() as u64);
+    if let Some(total) = total_samples {
+        crate::dlog!(
+            2,
+            "Audio duration hint: {:.3}s ({} samples)",
+            total as f64 / crate::chunked::WHISPER_SAMPLE_RATE as f64,
+            total
+        );
+    }
+    let decoder_started = Instant::now();
     let mut windows = match decoder_timeout {
         Some(timeout) => crate::chunked::ChunkedAudio::new_with_timeout(
             audio_path,
@@ -476,16 +497,32 @@ fn transcribe_with_whisper_rs(
             crate::chunked::ChunkedAudio::new(audio_path, crate::chunked::ChunkConfig::default())?
         }
     };
+    crate::dlog!(
+        2,
+        "ffmpeg decoder started in {:.1} ms",
+        decoder_started.elapsed().as_secs_f64() * 1000.0
+    );
+    let first_window_started = Instant::now();
     let first_window = match windows.next_window()? {
         Some(window) => window,
         None => {
             return Err(anyhow!(
                 "The input contains no audio samples: {}",
-                audio_path.display()
+                crate::ui::terminal_safe_path(audio_path)
             )
             .into());
         }
     };
+    crate::dlog!(
+        2,
+        "First audio window decoded in {:.1} ms: samples={} duration={:.3}s decoder_timeout={}",
+        first_window_started.elapsed().as_secs_f64() * 1000.0,
+        first_window.samples.len(),
+        first_window.samples.len() as f64 / crate::chunked::WHISPER_SAMPLE_RATE as f64,
+        decoder_timeout
+            .map(|t| t.as_secs_f64().to_string())
+            .unwrap_or_else(|| "none".into()),
+    );
     report(5);
 
     // The model is located and loaded once per invocation; every input file
@@ -495,22 +532,33 @@ fn transcribe_with_whisper_rs(
         .model_path
         .clone()
         .expect("the model path was just resolved");
+    crate::dlog!(
+        2,
+        "Selected Whisper model: {}",
+        crate::ui::terminal_safe_path(&model_path)
+    );
     if let Some(lang) = language
         && session.english_only
         && lang != "en"
     {
         return Err(anyhow!(
             "Selected model is English-only ({}), but a non-English language hint '{}' was provided. Please use a multilingual model or set WHISPER_MODEL.",
-            model_path.display(),
+            crate::ui::terminal_safe_path(&model_path),
             lang
         ).into());
     }
 
-    // Try to reduce native library logging via environment variables when not super-verbose.
+    // At -vv expose the native whisper/ggml diagnostics and keep progress
+    // quiet; otherwise both stay silent to keep the terminal readable.
     if crate::verbose_level() < 2 {
         // These env vars are recognized by ggml/whisper in many builds; harmless if unknown.
         unsafe {
             std::env::set_var("GGML_LOG_LEVEL", "0");
+            std::env::set_var("WHISPER_PRINT_PROGRESS", "0");
+        }
+    } else {
+        unsafe {
+            std::env::set_var("GGML_LOG_LEVEL", "1");
             std::env::set_var("WHISPER_PRINT_PROGRESS", "0");
         }
     }
@@ -518,7 +566,15 @@ fn transcribe_with_whisper_rs(
     // The model is loaded once per invocation; every input file gets its own
     // inference state. The state is created with the native libraries quiet,
     // the same way the model load is.
+    crate::dlog!(2, "Loading Whisper context...");
+    let context_started = Instant::now();
     session.ensure_context(backend)?;
+    crate::dlog!(
+        2,
+        "Whisper context loaded in {:.1} ms",
+        context_started.elapsed().as_secs_f64() * 1000.0
+    );
+    let state_started = Instant::now();
     let mut state = crate::with_suppressed_stderr(|| {
         session
             .context
@@ -527,6 +583,11 @@ fn transcribe_with_whisper_rs(
             .create_state()
             .map_err(|e| anyhow!("Failed to create Whisper state: {:?}", e))
     })?;
+    crate::dlog!(
+        2,
+        "Whisper state created in {:.1} ms",
+        state_started.elapsed().as_secs_f64() * 1000.0
+    );
     report(20);
 
     let mut full_params =
@@ -557,15 +618,24 @@ fn transcribe_with_whisper_rs(
         &mut windows,
         speaker,
         language,
-        &audio_path.display().to_string(),
+        &crate::ui::terminal_safe_path(audio_path),
         progress,
         crate::stream::WindowPolicy::Batch,
+        total_samples,
         &mut observer,
         &cancel,
     )?;
     let entries = result.entries;
+    let audio_samples = windows.received_samples();
 
     crate::dlog!(1, "Transcribed {} window(s) of audio", result.windows);
+    crate::dlog!(
+        2,
+        "Whisper inference finished: windows={} audio_samples={} audio_duration_seconds={:.3}",
+        result.windows,
+        audio_samples,
+        audio_samples as f64 / crate::chunked::WHISPER_SAMPLE_RATE as f64
+    );
     report(90);
     report(100);
     Ok(entries)
@@ -619,7 +689,7 @@ pub fn transcribe_stream(
     {
         return Err(anyhow!(
             "Selected model is English-only ({}), but a non-English language hint '{}' was provided. Please use a multilingual model or set WHISPER_MODEL.",
-            model_path.display(),
+            crate::ui::terminal_safe_path(&model_path),
             lang
         )
         .into());
@@ -670,6 +740,7 @@ pub fn transcribe_stream(
         "the audio stream",
         None,
         policy,
+        None,
         observer,
         cancel,
     )
@@ -692,6 +763,7 @@ fn transcribe_windows(
     input_name: &str,
     progress: Option<&(dyn Fn(i32) + Send + Sync)>,
     policy: crate::stream::WindowPolicy,
+    total_samples: Option<u64>,
     observer: &mut dyn FnMut(crate::stream::StreamEvent),
     cancel: &crate::stream::CancellationToken,
 ) -> Result<TranscriptionResult> {
@@ -775,6 +847,14 @@ fn transcribe_windows(
             end_sample: current.start_sample + current.samples.len() as u64,
         });
         let mut segments = decode_window(state, &full_params, &current, &policy)?;
+        if let Some(total) = total_samples {
+            let processed = current
+                .start_sample
+                .saturating_add(current.samples.len() as u64)
+                .min(total);
+            let percent = 40.0 + 50.0 * processed as f64 / total as f64;
+            report(percent.round().clamp(40.0, 90.0) as i32);
+        }
         if matches!(&policy, crate::stream::WindowPolicy::Live(_)) {
             filter_live_silent_segments(&current, &mut segments);
         }
@@ -1341,7 +1421,7 @@ impl UnresolvedRegions {
         }
         Some(format!(
             "{}: the transcript may be incomplete. whisper did not report the audio {}, and it could not be decoded again. Speech may be missing there.",
-            path.display(),
+            crate::ui::terminal_safe_path(path),
             text
         ))
     }
@@ -1455,11 +1535,25 @@ fn decode_window(
     window: &AudioWindow,
     policy: &crate::stream::WindowPolicy,
 ) -> Result<Vec<RawSegment>> {
-    crate::with_suppressed_stderr(|| {
+    let full_started = Instant::now();
+    crate::dlog!(
+        2,
+        "Whisper full() starting: start_sample={} samples={} duration={:.3}s",
+        window.start_sample,
+        window.samples.len(),
+        window.samples.len() as f64 / crate::chunked::WHISPER_SAMPLE_RATE as f64,
+    );
+    let full_result = crate::with_suppressed_stderr(|| {
         state
             .full(full_params.clone(), &window.samples)
             .map_err(|e| anyhow!("Whisper full() failed: {:?}", e))
-    })?;
+    });
+    crate::dlog!(
+        2,
+        "Whisper full() finished in {:.1} ms",
+        full_started.elapsed().as_secs_f64() * 1000.0
+    );
+    full_result?;
 
     let rate = crate::chunked::WHISPER_SAMPLE_RATE as u64;
     let window_end = window.start_sample + window.samples.len() as u64;

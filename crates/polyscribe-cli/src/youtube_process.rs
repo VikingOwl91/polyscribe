@@ -11,6 +11,11 @@ use std::time::{Duration, Instant};
 
 use polyscribe_core::stream::CancellationToken;
 
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
+
+const POST_EXIT_DRAIN_GRACE: Duration = Duration::from_millis(200);
+
 #[derive(Clone, Copy)]
 pub(crate) struct ProcessPolicy {
     pub timeout: Duration,
@@ -84,52 +89,110 @@ pub(crate) fn run(
         .stderr
         .take()
         .expect("stderr was configured as piped");
+
+    #[cfg(unix)]
+    {
+        set_nonblocking(&stdout).map_err(ProcessFailure::Read)?;
+        set_nonblocking(&stderr).map_err(ProcessFailure::Read)?;
+    }
+
+    let readers_stopped = Arc::new(AtomicBool::new(false));
     let stdout_overflow = Arc::new(AtomicBool::new(false));
     let stdout_overflow_reader = Arc::clone(&stdout_overflow);
+    let stdout_stop = Arc::clone(&readers_stopped);
     let stdout_limit = policy.stdout_limit;
     let stdout_reader = thread::spawn(move || {
-        read_capture(stdout, stdout_limit, false, Some(stdout_overflow_reader))
+        read_capture(
+            stdout,
+            stdout_limit,
+            false,
+            Some(stdout_overflow_reader),
+            stdout_stop,
+        )
     });
     let stderr_limit = policy.stderr_limit;
-    let stderr_reader = thread::spawn(move || read_capture(stderr, stderr_limit, true, None));
+    let stderr_stop = Arc::clone(&readers_stopped);
+    let stderr_reader =
+        thread::spawn(move || read_capture(stderr, stderr_limit, true, None, stderr_stop));
+    let _reader_stop_guard = ReaderStopGuard(Arc::clone(&readers_stopped));
 
     let deadline = Instant::now() + policy.timeout;
-    let status = loop {
+    let mut child_status = None;
+    let mut drain_deadline = None;
+    let (status, drain_expired) = loop {
         if cancellation.is_cancelled() {
+            readers_stopped.store(true, Ordering::Relaxed);
             child.terminate();
-            join_reader(stdout_reader)?;
-            join_reader(stderr_reader)?;
+            join_readers(stdout_reader, stderr_reader)?;
             return Err(ProcessFailure::Cancelled);
         }
         if stdout_overflow.load(Ordering::Relaxed) {
+            readers_stopped.store(true, Ordering::Relaxed);
             child.terminate();
-            join_reader(stdout_reader)?;
-            join_reader(stderr_reader)?;
+            join_readers(stdout_reader, stderr_reader)?;
             return Err(ProcessFailure::StdoutLimit);
         }
-        if stdout_reader.is_finished()
-            && stderr_reader.is_finished()
-            && let Some(status) = child.child_mut().try_wait().map_err(ProcessFailure::Wait)?
-        {
-            break status;
+
+        if child_status.is_none() {
+            match child.child_mut().try_wait() {
+                Ok(Some(exit_status)) => {
+                    child.disarm();
+                    child_status = Some(exit_status);
+                    drain_deadline = Some(Instant::now() + POST_EXIT_DRAIN_GRACE);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    readers_stopped.store(true, Ordering::Relaxed);
+                    child.terminate();
+                    join_readers(stdout_reader, stderr_reader)?;
+                    return Err(ProcessFailure::Wait(error));
+                }
+            }
         }
-        if Instant::now() >= deadline {
+
+        if child_status.is_some() {
+            if stdout_reader.is_finished() && stderr_reader.is_finished() {
+                break (child_status.take().unwrap(), false);
+            }
+            if drain_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                break (child_status.take().unwrap(), true);
+            }
+        } else if Instant::now() >= deadline {
+            readers_stopped.store(true, Ordering::Relaxed);
             child.terminate();
-            join_reader(stdout_reader)?;
-            join_reader(stderr_reader)?;
+            join_readers(stdout_reader, stderr_reader)?;
             return Err(ProcessFailure::Timeout);
         }
         thread::sleep(Duration::from_millis(10));
     };
 
-    let stdout = join_reader(stdout_reader)?;
-    let stderr_tail = join_reader(stderr_reader)?;
+    if drain_expired {
+        readers_stopped.store(true, Ordering::Relaxed);
+    }
+    let (stdout, stderr) = join_readers(stdout_reader, stderr_reader)?;
+    if cancellation.is_cancelled() {
+        return Err(ProcessFailure::Cancelled);
+    }
+    if stdout_overflow.load(Ordering::Relaxed) {
+        return Err(ProcessFailure::StdoutLimit);
+    }
+    if !stdout.reached_eof {
+        return Err(ProcessFailure::Read(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "stdout remained open after the child exited",
+        )));
+    }
     child.disarm();
     Ok(ProcessOutput {
         status,
-        stdout,
-        stderr_tail,
+        stdout: stdout.bytes,
+        stderr_tail: stderr.bytes,
     })
+}
+
+struct CapturedOutput {
+    bytes: Vec<u8>,
+    reached_eof: bool,
 }
 
 fn read_capture<R: Read>(
@@ -137,14 +200,30 @@ fn read_capture<R: Read>(
     limit: usize,
     retain_tail: bool,
     overflow: Option<Arc<AtomicBool>>,
-) -> io::Result<Vec<u8>> {
+    stopped: Arc<AtomicBool>,
+) -> io::Result<CapturedOutput> {
     let mut retained = Vec::with_capacity(limit.min(64 * 1024));
     let mut buffer = [0u8; 8192];
     loop {
         let count = match reader.read(&mut buffer) {
-            Ok(0) => return Ok(retained),
+            Ok(0) => {
+                return Ok(CapturedOutput {
+                    bytes: retained,
+                    reached_eof: true,
+                });
+            }
             Ok(count) => count,
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                if stopped.load(Ordering::Relaxed) {
+                    return Ok(CapturedOutput {
+                        bytes: retained,
+                        reached_eof: false,
+                    });
+                }
+                thread::sleep(Duration::from_millis(10));
+                continue;
+            }
             Err(error) => return Err(error),
         };
         if retain_tail {
@@ -162,14 +241,47 @@ fn read_capture<R: Read>(
                 overflow.store(true, Ordering::Relaxed);
             }
         }
+        if stopped.load(Ordering::Relaxed) {
+            return Ok(CapturedOutput {
+                bytes: retained,
+                reached_eof: false,
+            });
+        }
     }
 }
 
-fn join_reader(reader: JoinHandle<io::Result<Vec<u8>>>) -> Result<Vec<u8>, ProcessFailure> {
+#[cfg(unix)]
+fn set_nonblocking<T: AsRawFd>(pipe: &T) -> io::Result<()> {
+    let fd = pipe.as_raw_fd();
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn join_reader(
+    reader: JoinHandle<io::Result<CapturedOutput>>,
+) -> Result<CapturedOutput, ProcessFailure> {
     reader
         .join()
         .map_err(|_| ProcessFailure::ReaderPanicked)?
         .map_err(ProcessFailure::Read)
+}
+
+fn join_readers(
+    stdout_reader: JoinHandle<io::Result<CapturedOutput>>,
+    stderr_reader: JoinHandle<io::Result<CapturedOutput>>,
+) -> Result<(CapturedOutput, CapturedOutput), ProcessFailure> {
+    let stdout = join_reader(stdout_reader);
+    let stderr = join_reader(stderr_reader);
+    match (stdout, stderr) {
+        (Ok(stdout), Ok(stderr)) => Ok((stdout, stderr)),
+        (Err(error), _) | (_, Err(error)) => Err(error),
+    }
 }
 
 struct ChildGuard {
@@ -190,12 +302,12 @@ impl ChildGuard {
     }
 
     fn terminate(&mut self) {
-        terminate_group(self.process_group);
         if let Some(child) = self.child.as_mut() {
+            terminate_group(self.process_group);
             let _ = child.kill();
             let _ = child.wait();
+            self.child = None;
         }
-        self.child = None;
     }
 
     fn disarm(&mut self) {
@@ -208,6 +320,14 @@ impl Drop for ChildGuard {
         if self.child.is_some() {
             self.terminate();
         }
+    }
+}
+
+struct ReaderStopGuard(Arc<AtomicBool>);
+
+impl Drop for ReaderStopGuard {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
     }
 }
 
@@ -285,6 +405,36 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    struct EscapedGroup(libc::pid_t);
+
+    #[cfg(target_os = "linux")]
+    impl Drop for EscapedGroup {
+        fn drop(&mut self) {
+            unsafe {
+                libc::kill(-self.0, libc::SIGKILL);
+                libc::kill(self.0, libc::SIGKILL);
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn escaped_group(marker: &Path) -> EscapedGroup {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            if let Ok(pid) = std::fs::read_to_string(marker)
+                && let Ok(pid) = pid.trim().parse()
+            {
+                return EscapedGroup(pid);
+            }
+            assert!(
+                Instant::now() < deadline,
+                "escaped descendant did not start"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     #[test]
     fn captures_stdout_and_only_the_stderr_tail() {
         let directory = tempfile::tempdir().unwrap();
@@ -306,6 +456,7 @@ mod tests {
     fn stdout_limit_terminates_the_process_group() {
         let directory = tempfile::tempdir().unwrap();
         let executable = script(directory.path(), "printf '0123456789'; sleep 10");
+        let started = Instant::now();
         let result = run(
             &executable,
             &[],
@@ -314,6 +465,7 @@ mod tests {
             &CancellationToken::new(),
         );
         assert!(matches!(result, Err(ProcessFailure::StdoutLimit)));
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[test]
@@ -337,5 +489,261 @@ mod tests {
         assert!(matches!(result, Err(ProcessFailure::Timeout)));
         std::thread::sleep(Duration::from_millis(600));
         assert!(!marker.exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn timeout_does_not_wait_for_a_descendant_that_left_the_process_group() {
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("escaped-descendant");
+        let marker = marker.to_string_lossy();
+        let child = format!("printf '%s\\n' \"$$\" > {}; sleep 3", shell_quote(&marker));
+        let executable = script(
+            directory.path(),
+            &format!("setsid sh -c {} & sleep 10", shell_quote(&child)),
+        );
+        let started = Instant::now();
+        let result = run(
+            &executable,
+            &[],
+            &safe_environment(directory.path()),
+            policy(Duration::from_millis(100), 32, 32),
+            &CancellationToken::new(),
+        );
+        let elapsed = started.elapsed();
+        let _escaped_group = escaped_group(&directory.path().join("escaped-descendant"));
+
+        assert!(matches!(result, Err(ProcessFailure::Timeout)));
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "reader join waited for the escaped descendant: {elapsed:?}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stop_is_observed_even_while_a_reader_keeps_returning_data() {
+        use std::sync::mpsc;
+
+        struct ContinuousReader {
+            stopped: Arc<AtomicBool>,
+            release: Arc<AtomicBool>,
+            stop_sent: Option<mpsc::Sender<()>>,
+            reads: usize,
+        }
+
+        impl Read for ContinuousReader {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                if self.release.load(Ordering::Relaxed) {
+                    return Err(io::ErrorKind::WouldBlock.into());
+                }
+                buffer[0] = b'x';
+                self.reads += 1;
+                if self.reads == 2 {
+                    self.stopped.store(true, Ordering::Relaxed);
+                    self.stop_sent.take().unwrap().send(()).unwrap();
+                }
+                Ok(1)
+            }
+        }
+
+        let stopped = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let (stop_sent, stop_received) = mpsc::channel();
+        let (done_sent, done_received) = mpsc::channel();
+        let reader = ContinuousReader {
+            stopped: Arc::clone(&stopped),
+            release: Arc::clone(&release),
+            stop_sent: Some(stop_sent),
+            reads: 0,
+        };
+        let worker = thread::spawn(move || {
+            let result = read_capture(reader, 32, true, None, stopped);
+            done_sent.send(()).unwrap();
+            result
+        });
+
+        stop_received
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the reader did not request stop");
+        let completed_before_release = done_received
+            .recv_timeout(Duration::from_millis(100))
+            .is_ok();
+        release.store(true, Ordering::Relaxed);
+        let result = worker.join().unwrap().unwrap();
+
+        assert!(
+            completed_before_release,
+            "reader ignored stop while reads kept returning data"
+        );
+        assert!(!result.bytes.is_empty());
+        assert!(!result.reached_eof);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn successful_child_exit_with_an_escaped_stderr_writer_preserves_status() {
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("escaped-descendant");
+        let child = format!(
+            "exec 1>/dev/null; printf '%s\\n' \"$$\" > {}; (sleep 2; kill -KILL \"$$\") & while :; do printf x >&2; done",
+            shell_quote(&marker.to_string_lossy())
+        );
+        let executable = script(
+            directory.path(),
+            &format!("setsid sh -c {} & exit 0", shell_quote(&child)),
+        );
+        let started = Instant::now();
+        let result = run(
+            &executable,
+            &[],
+            &safe_environment(directory.path()),
+            policy(Duration::from_millis(100), 32, 32),
+            &CancellationToken::new(),
+        );
+        let elapsed = started.elapsed();
+        let _escaped_group = escaped_group(&marker);
+
+        assert!(
+            matches!(result, Ok(output) if output.status.success()),
+            "successful child status was not preserved"
+        );
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "reader drain exceeded the post-exit grace: {elapsed:?}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn successful_child_exit_with_an_escaped_stdout_writer_is_incomplete_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("escaped-descendant");
+        let child = format!(
+            "printf '%s\\n' \"$$\" > {}; sleep 3",
+            shell_quote(&marker.to_string_lossy())
+        );
+        let executable = script(
+            directory.path(),
+            &format!("setsid sh -c {} & exit 0", shell_quote(&child)),
+        );
+        let result = run(
+            &executable,
+            &[],
+            &safe_environment(directory.path()),
+            policy(Duration::from_millis(100), 32, 32),
+            &CancellationToken::new(),
+        );
+        let _escaped_group = escaped_group(&marker);
+
+        assert!(matches!(
+            result,
+            Err(ProcessFailure::Read(error))
+                if error.kind() == io::ErrorKind::UnexpectedEof
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn timeout_is_bounded_while_an_escaped_descendant_floods_stderr() {
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("escaped-descendant");
+        let child = format!(
+            "printf '%s\\n' \"$$\" > {}; (sleep 2; kill -KILL \"$$\") & while :; do printf x >&2; done",
+            shell_quote(&marker.to_string_lossy())
+        );
+        let executable = script(
+            directory.path(),
+            &format!("setsid sh -c {} & sleep 10", shell_quote(&child)),
+        );
+        let started = Instant::now();
+        let result = run(
+            &executable,
+            &[],
+            &safe_environment(directory.path()),
+            policy(Duration::from_millis(100), 32, 32),
+            &CancellationToken::new(),
+        );
+        let elapsed = started.elapsed();
+        let _escaped_group = escaped_group(&marker);
+
+        assert!(matches!(result, Err(ProcessFailure::Timeout)));
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "timeout waited for the escaped writer: {elapsed:?}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stdout_limit_is_bounded_while_an_escaped_descendant_floods_stdout() {
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("escaped-descendant");
+        let child = format!(
+            "printf '%s\\n' \"$$\" > {}; (sleep 2; kill -KILL \"$$\") & while :; do printf x; done",
+            shell_quote(&marker.to_string_lossy())
+        );
+        let executable = script(
+            directory.path(),
+            &format!("setsid sh -c {} & sleep 10", shell_quote(&child)),
+        );
+        let started = Instant::now();
+        let result = run(
+            &executable,
+            &[],
+            &safe_environment(directory.path()),
+            policy(Duration::from_secs(3), 32, 32),
+            &CancellationToken::new(),
+        );
+        let elapsed = started.elapsed();
+        let _escaped_group = escaped_group(&marker);
+
+        assert!(matches!(result, Err(ProcessFailure::StdoutLimit)));
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "output overflow waited for the escaped writer: {elapsed:?}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cancellation_is_bounded_while_an_escaped_descendant_floods_stderr() {
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("escaped-descendant");
+        let child = format!(
+            "printf '%s\\n' \"$$\" > {}; (sleep 2; kill -KILL \"$$\") & while :; do printf x >&2; done",
+            shell_quote(&marker.to_string_lossy())
+        );
+        let executable = script(
+            directory.path(),
+            &format!("setsid sh -c {} & sleep 10", shell_quote(&child)),
+        );
+        let cancellation = CancellationToken::new();
+        let cancel = cancellation.clone();
+        let canceller = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(100));
+            cancel.cancel();
+        });
+        let started = Instant::now();
+        let result = run(
+            &executable,
+            &[],
+            &safe_environment(directory.path()),
+            policy(Duration::from_secs(3), 32, 32),
+            &cancellation,
+        );
+        let elapsed = started.elapsed();
+        canceller.join().unwrap();
+        let _escaped_group = escaped_group(&marker);
+
+        assert!(matches!(result, Err(ProcessFailure::Cancelled)));
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "cancellation waited for the escaped writer: {elapsed:?}"
+        );
+    }
+
+    fn shell_quote(value: &str) -> String {
+        format!("'{}'", value.replace('\'', "'\\''"))
     }
 }

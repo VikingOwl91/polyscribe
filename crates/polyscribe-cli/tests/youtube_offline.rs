@@ -1,372 +1,924 @@
 // SPDX-License-Identifier: MIT
 
-//! Offline end-to-end checks for the YouTube command with a fake yt-dlp.
+//! Offline end-to-end checks for the YouTube audio transcription flow.
 
+#![cfg(unix)]
+
+use std::ffi::OsStr;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 const URL: &str = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+const METADATA_WITH_CAPTIONS: &str = r#"{"id":"dQw4w9WgXcQ","title":"Fixture video","uploader":"Offline","duration":3,"subtitles":{"en":[{"ext":"vtt","url":"https://example.test/en.vtt","name":"English"}]},"automatic_captions":{"de":[{"ext":"vtt","url":"https://example.test/de.vtt"} ]}}"#;
+const VOXTRAL_RESPONSE: &str = r#"{"protocol_version":1,"engine":"voxtral","model":"fake-model","language":"en","cues":[{"start_ms":0,"end_ms":1200,"text":"hello"}]}"#;
 
 fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_polyscribe")
 }
 
-fn quote(path: &Path) -> String {
-    format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-fn fake_downloader(root: &Path, metadata: &str, captions: &str, extra: &str) -> (PathBuf, PathBuf) {
+fn quote(path: &Path) -> String {
+    shell_quote(&path.to_string_lossy())
+}
+
+fn write_executable(path: &Path, contents: &str) {
+    std::fs::write(path, contents).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+fn fake_downloader(root: &Path, metadata: &str, audio_failure: Option<&str>) -> (PathBuf, PathBuf) {
     let executable = root.join("fake-yt-dlp");
-    let calls = root.join("calls.log");
-    let script = format!(
-        "#!/bin/sh
-case \"$*\" in
-  *--dump-single-json*)
-    printf 'metadata\\n' >> {calls}
-    printf '%s\\n' '{metadata}'
-    ;;
-  *--write-subs*|*--write-auto-subs*)
-    printf 'captions\\n' >> {calls}
-    output=''
-    language='en'
-    while [ $# -gt 0 ]; do
-      case \"$1\" in
-        --output) output=$2; shift 2 ;;
-        --sub-langs) language=$2; shift 2 ;;
-        *) shift ;;
-      esac
-    done
-    cat > \"$output.$language.vtt\" <<'VTT'
-{captions}VTT
-    ;;
-  *)
-    {extra}
-    ;;
+    let calls = root.join("yt-dlp-calls.log");
+    let audio_action = if let Some(message) = audio_failure {
+        format!("printf '%s\\n' {} >&2\nexit 1\n", shell_quote(message))
+    } else {
+        r#"
+output=''
+want_output=0
+for arg do
+  if [ "$want_output" -eq 1 ]; then
+    output=$arg
+    want_output=0
+    continue
+  fi
+  if [ "$arg" = '--output' ]; then want_output=1; fi
+done
+case "$output" in
+  *'.%(ext)s') audio_file="${output%.%(ext)s}.wav" ;;
+  *) printf '%s\n' 'missing audio output template' >&2; exit 90 ;;
 esac
-",
-        calls = quote(&calls),
-    );
-    std::fs::write(&executable, script).unwrap();
-    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+printf '%s\n' 'fake audio data' > "$audio_file"
+"#
+        .to_string()
+    };
+    let script = r#"#!/bin/sh
+set -eu
+phase=audio
+for arg do
+  if [ "$arg" = '--dump-single-json' ]; then phase=metadata; fi
+done
+printf '%s' "$phase" >> @CALLS@
+for arg do printf '\t%s' "$arg" >> @CALLS@; done
+printf '\n' >> @CALLS@
+if [ "$phase" = metadata ]; then
+  printf '%s\n' @METADATA@
+  exit 0
+fi
+@AUDIO_ACTION@
+"#
+    .replace("@CALLS@", &quote(&calls))
+    .replace("@METADATA@", &shell_quote(metadata))
+    .replace("@AUDIO_ACTION@", &audio_action);
+    write_executable(&executable, &script);
     (executable, calls)
 }
 
-fn run(root: &Path, executable: &Path, args: &[&str]) -> Output {
-    Command::new(bin())
-        .args(["youtube", URL])
-        .args(args)
-        .env("POLYSCRIBE_YTDLP", executable)
-        .env("XDG_CACHE_HOME", root.join("cache"))
-        .env("HOME", root)
-        .env_remove("WHISPER_MODEL")
-        .output()
-        .expect("launch polyscribe")
+fn fake_voxtral(root: &Path, succeeds: bool) -> (PathBuf, PathBuf) {
+    fake_voxtral_for(root, "fake-voxtral", succeeds, VOXTRAL_RESPONSE)
 }
 
-fn call_log(path: &Path) -> Vec<String> {
+fn fake_voxtral_for(
+    root: &Path,
+    executable_name: &str,
+    succeeds: bool,
+    response: &str,
+) -> (PathBuf, PathBuf) {
+    let executable = root.join(executable_name);
+    let calls = root.join("voxtral-calls.log");
+    let action = if succeeds {
+        format!(
+            "printf '%s\\n' {}\nprintf '%s\\n' 'fake Voxtral diagnostic' >&2\n",
+            shell_quote(response)
+        )
+    } else {
+        "printf '%s\\n' 'fake Voxtral diagnostic before failure' >&2\nexit 23\n".to_string()
+    };
+    let script = r#"#!/bin/sh
+set -eu
+printf '%s' 'invoke' >> @CALLS@
+for arg do printf '\t%s' "$arg" >> @CALLS@; done
+printf '\n' >> @CALLS@
+version=''
+input=''
+language=''
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --protocol-version)
+      [ $# -ge 2 ] || exit 64
+      version=$2
+      shift 2
+      ;;
+    --input)
+      [ $# -ge 2 ] || exit 64
+      input=$2
+      shift 2
+      ;;
+    --language)
+      [ $# -ge 2 ] || exit 64
+      language=$2
+      shift 2
+      ;;
+    *) printf '%s\n' 'unexpected Voxtral argument' >&2; exit 64 ;;
+  esac
+done
+if [ "$version" != '1' ] || [ -z "$input" ] || [ ! -s "$input" ]; then
+  printf '%s\n' 'invalid Voxtral invocation or missing audio' >&2
+  exit 65
+fi
+if [ -n "$language" ] && [ "$language" != 'en' ]; then
+  printf '%s\n' 'unexpected language hint' >&2
+  exit 66
+fi
+if IFS= read -r stdin_line; then
+  printf '%s\n' 'Voxtral stdin was not closed' >&2
+  exit 67
+fi
+@ACTION@
+"#
+    .replace("@CALLS@", &quote(&calls))
+    .replace("@ACTION@", &action);
+    write_executable(&executable, &script);
+    (executable, calls)
+}
+
+fn run_with_voxtral(
+    root: &Path,
+    downloader: &Path,
+    args: &[&str],
+    voxtral: Option<&Path>,
+) -> Output {
+    run_with_voxtral_url(root, downloader, URL, args, voxtral)
+}
+
+fn run_with_voxtral_url(
+    root: &Path,
+    downloader: &Path,
+    url: &str,
+    args: &[&str],
+    voxtral: Option<&Path>,
+) -> Output {
+    let temp = root.join("tmp");
+    std::fs::create_dir_all(&temp).unwrap();
+    let mut command = Command::new(bin());
+    command
+        .args(["youtube", url])
+        .args(args)
+        .current_dir(root)
+        .env("POLYSCRIBE_YTDLP", downloader)
+        .env("HOME", root)
+        .env("XDG_CACHE_HOME", root.join("cache"))
+        .env("XDG_CONFIG_HOME", root.join("config"))
+        .env("XDG_DATA_HOME", root.join("data"))
+        .env("TMPDIR", temp)
+        .env_remove("POLYSCRIBE_VOXTRAL")
+        .env_remove("POLYSCRIBE_MODELS_DIR")
+        .env_remove("WHISPER_MODEL");
+    if let Some(voxtral) = voxtral {
+        command.env("POLYSCRIBE_VOXTRAL", voxtral);
+    }
+    command.output().expect("launch polyscribe")
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ProcessCall {
+    phase: String,
+    args: Vec<String>,
+}
+
+fn log_records(path: &Path) -> Vec<Vec<String>> {
     std::fs::read_to_string(path)
         .unwrap_or_default()
         .lines()
-        .map(ToString::to_string)
+        .map(|line| line.split('\t').map(ToString::to_string).collect())
         .collect()
 }
 
-#[test]
-fn captions_are_normalized_cached_and_refreshed_without_network_access() {
-    let root = tempfile::tempdir().unwrap();
-    let metadata = r#"{"id":"dQw4w9WgXcQ","title":"Fixture video","uploader":"Offline","duration":3,"subtitles":{"en":[{"ext":"vtt","url":"https://example.test/en.vtt","name":"English"}]},"automatic_captions":{}}"#;
-    let captions = "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nThe quick brown\n\n00:00:01.500 --> 00:00:02.500\nThe quick brown fox\n";
-    let (executable, calls) = fake_downloader(
-        root.path(),
-        metadata,
-        captions,
-        "printf 'unexpected audio download\\n' >> /dev/null; exit 90",
-    );
+fn downloader_calls(path: &Path) -> Vec<ProcessCall> {
+    log_records(path)
+        .into_iter()
+        .filter_map(|mut record| {
+            if record.is_empty() {
+                return None;
+            }
+            Some(ProcessCall {
+                phase: record.remove(0),
+                args: record,
+            })
+        })
+        .collect()
+}
 
-    let first = run(
+fn assert_no_caption_arguments(calls: &[ProcessCall]) {
+    for call in calls {
+        assert!(
+            call.args.iter().all(|argument| !matches!(
+                argument.as_str(),
+                "--write-subs" | "--write-auto-subs" | "--sub-langs"
+            )),
+            "caption download arguments were requested: {call:?}"
+        );
+    }
+}
+
+fn argument_after<'a>(call: &'a ProcessCall, option: &str) -> &'a str {
+    let index = call
+        .args
+        .iter()
+        .position(|argument| argument == option)
+        .unwrap_or_else(|| panic!("{option} missing from {call:?}"));
+    call.args
+        .get(index + 1)
+        .unwrap_or_else(|| panic!("value for {option} missing from {call:?}"))
+}
+
+fn assert_metadata_then_audio(calls: &[ProcessCall]) -> PathBuf {
+    assert_eq!(
+        calls
+            .iter()
+            .map(|call| call.phase.as_str())
+            .collect::<Vec<_>>(),
+        ["metadata", "audio"]
+    );
+    assert_no_caption_arguments(calls);
+    assert!(
+        calls[0]
+            .args
+            .iter()
+            .any(|argument| argument == "--dump-single-json")
+    );
+    assert!(
+        calls[0]
+            .args
+            .iter()
+            .any(|argument| argument == "--skip-download")
+    );
+    assert_eq!(argument_after(&calls[1], "--format"), "bestaudio/best");
+    for option in ["--retries", "--fragment-retries", "--extractor-retries"] {
+        assert_eq!(argument_after(&calls[0], option), "0");
+        assert_eq!(argument_after(&calls[1], option), "0");
+    }
+    let template = PathBuf::from(argument_after(&calls[1], "--output"));
+    assert_eq!(template.file_name(), Some(OsStr::new("audio.%(ext)s")));
+    template.with_file_name("audio.wav")
+}
+
+fn voxtral_input_path(record: &[String], language: Option<&str>) -> PathBuf {
+    assert_eq!(record.first().map(String::as_str), Some("invoke"));
+    assert_eq!(
+        record.get(1).map(String::as_str),
+        Some("--protocol-version")
+    );
+    assert_eq!(record.get(2).map(String::as_str), Some("1"));
+    assert_eq!(record.get(3).map(String::as_str), Some("--input"));
+    let input = PathBuf::from(record.get(4).expect("Voxtral input path"));
+    assert!(input.is_absolute(), "Voxtral input path must be absolute");
+    if let Some(language) = language {
+        assert_eq!(
+            record.get(5..),
+            Some(
+                ["--language", language]
+                    .into_iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .as_slice()
+            )
+        );
+    } else {
+        assert_eq!(record.len(), 5);
+    }
+    input
+}
+
+#[test]
+fn default_and_audio_only_download_bestaudio_without_caption_requests() {
+    for legacy_flag in [None, Some("--audio-only"), Some("--prefer-manual")] {
+        let root = tempfile::tempdir().unwrap();
+        let (downloader, downloader_log) =
+            fake_downloader(root.path(), METADATA_WITH_CAPTIONS, None);
+        let (voxtral, voxtral_log) = fake_voxtral(root.path(), true);
+        let mut args = vec!["--language", "en", "--format", "txt"];
+        if let Some(flag) = legacy_flag {
+            args.push(flag);
+        }
+
+        let result = run_with_voxtral(root.path(), &downloader, &args, Some(&voxtral));
+        assert!(
+            result.status.success(),
+            "audio mode failed: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+
+        let calls = downloader_calls(&downloader_log);
+        let audio_path = assert_metadata_then_audio(&calls);
+        let voxtral_calls = log_records(&voxtral_log);
+        assert_eq!(voxtral_calls.len(), 1);
+        assert_eq!(
+            voxtral_input_path(&voxtral_calls[0], Some("en")),
+            audio_path
+        );
+        assert!(
+            !audio_path.exists(),
+            "temporary audio must be removed after exit"
+        );
+    }
+}
+
+#[test]
+fn voxtral_success_emits_json_only_and_diagnostics_on_stderr() {
+    let root = tempfile::tempdir().unwrap();
+    let (downloader, downloader_log) = fake_downloader(root.path(), METADATA_WITH_CAPTIONS, None);
+    let (voxtral, voxtral_log) = fake_voxtral(root.path(), true);
+
+    let result = run_with_voxtral_url(
         root.path(),
-        &executable,
+        &downloader,
+        "https://youtu.be/dQw4w9WgXcQ",
+        &["--language", "en", "--format", "json"],
+        Some(&voxtral),
+    );
+    assert!(
+        result.status.success(),
+        "Voxtral command failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let transcript: serde_json::Value = serde_json::from_slice(&result.stdout)
+        .expect("stdout should contain only the JSON transcript");
+    assert_eq!(transcript["source"], "local-voxtral");
+    assert_eq!(transcript["source_url"], "https://youtu.be/dQw4w9WgXcQ");
+    assert_eq!(transcript["video_id"], "dQw4w9WgXcQ");
+    assert_eq!(transcript["title"], "Fixture video");
+    assert_eq!(transcript["uploader"], "Offline");
+    assert_eq!(transcript["duration_seconds"], 3.0);
+    assert_eq!(transcript["engine"], "voxtral");
+    assert_eq!(transcript["model"], "fake-model");
+    assert_eq!(transcript["language"], "en");
+    assert_eq!(transcript["requested_language"], "en");
+    assert_eq!(transcript["cues"][0]["text"], "hello");
+    assert_eq!(transcript["cues"][0]["start_ms"], 0);
+    assert_eq!(transcript["cues"][0]["end_ms"], 1200);
+
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("source: local-voxtral"), "stderr: {stderr}");
+    let audio_path = assert_metadata_then_audio(&downloader_calls(&downloader_log));
+    let voxtral_calls = log_records(&voxtral_log);
+    assert_eq!(voxtral_calls.len(), 1);
+    assert_eq!(
+        voxtral_input_path(&voxtral_calls[0], Some("en")),
+        audio_path
+    );
+    assert!(
+        !audio_path.exists(),
+        "temporary audio must be removed after exit"
+    );
+}
+
+#[test]
+fn cache_hit_reuses_transcript_across_formats_without_running_processes() {
+    let root = tempfile::tempdir().unwrap();
+    let (downloader, downloader_log) = fake_downloader(root.path(), METADATA_WITH_CAPTIONS, None);
+    let (voxtral, voxtral_log) = fake_voxtral(root.path(), true);
+
+    let first = run_with_voxtral(
+        root.path(),
+        &downloader,
         &["--language", "en", "--format", "txt"],
+        Some(&voxtral),
     );
     assert!(
         first.status.success(),
         "first run failed: {}",
         String::from_utf8_lossy(&first.stderr)
     );
-    assert_eq!(
-        String::from_utf8_lossy(&first.stdout).trim(),
-        "The quick brown fox"
+    assert_eq!(String::from_utf8_lossy(&first.stdout).trim(), "hello");
+    let audio_path = assert_metadata_then_audio(&downloader_calls(&downloader_log));
+    assert!(
+        !audio_path.exists(),
+        "temporary audio must be removed after exit"
     );
-    assert_eq!(call_log(&calls), ["metadata", "captions"]);
 
-    let cached = run(
+    let cached = run_with_voxtral(
         root.path(),
-        &executable,
+        &downloader,
         &["--language", "en", "--format", "srt"],
+        Some(&voxtral),
     );
     assert!(
         cached.status.success(),
-        "cached run failed: {}",
+        "cached SRT run failed: {}",
         String::from_utf8_lossy(&cached.stderr)
     );
-    assert!(String::from_utf8_lossy(&cached.stdout).contains("00:00:01,000 --> 00:00:02,500"));
-    assert!(String::from_utf8_lossy(&cached.stdout).contains("The quick brown fox"));
-    assert_eq!(call_log(&calls), ["metadata", "captions"]);
+    assert!(String::from_utf8_lossy(&cached.stdout).contains("00:00:00,000 --> 00:00:01,200"));
+    assert!(String::from_utf8_lossy(&cached.stdout).contains("hello"));
 
-    let refreshed = run(
+    let cached_json = run_with_voxtral(
         root.path(),
-        &executable,
-        &["--language", "en", "--format", "txt", "--refresh"],
+        &downloader,
+        &["--language", "en", "--format", "json"],
+        Some(&voxtral),
     );
     assert!(
-        refreshed.status.success(),
-        "refresh failed: {}",
-        String::from_utf8_lossy(&refreshed.stderr)
+        cached_json.status.success(),
+        "cached JSON run failed: {}",
+        String::from_utf8_lossy(&cached_json.stderr)
     );
-    assert_eq!(
-        call_log(&calls),
-        ["metadata", "captions", "metadata", "captions"]
-    );
+    let transcript: serde_json::Value = serde_json::from_slice(&cached_json.stdout).unwrap();
+    assert_eq!(transcript["source"], "local-voxtral");
+    assert_eq!(transcript["engine"], "voxtral");
+    assert_eq!(transcript["cues"][0]["text"], "hello");
+    assert_eq!(downloader_calls(&downloader_log).len(), 2);
+    assert_eq!(log_records(&voxtral_log).len(), 1);
 }
 
 #[test]
-fn explicit_language_mismatch_and_rate_limits_do_not_trigger_audio_fallback() {
+fn replacing_voxtral_at_the_same_path_invalidates_its_cache_entry() {
     let root = tempfile::tempdir().unwrap();
-    let metadata = r#"{"id":"dQw4w9WgXcQ","subtitles":{"de":[{"ext":"vtt","url":"https://example.test/de.vtt"}]},"automatic_captions":{}}"#;
-    let (executable, calls) = fake_downloader(
-        root.path(),
-        metadata,
-        "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nHallo\n",
-        "printf 'audio\\n' >> /dev/null; exit 90",
-    );
-    let mismatch = run(root.path(), &executable, &["--language", "en"]);
-    assert!(!mismatch.status.success());
-    assert!(String::from_utf8_lossy(&mismatch.stderr).contains("requested_language_unavailable"));
-    assert_eq!(call_log(&calls), ["metadata"]);
+    let (downloader, downloader_log) = fake_downloader(root.path(), METADATA_WITH_CAPTIONS, None);
+    let first_response = VOXTRAL_RESPONSE.replace("fake-model", "model-aa");
+    let (voxtral, voxtral_log) =
+        fake_voxtral_for(root.path(), "fake-voxtral", true, &first_response);
 
-    let rate_root = tempfile::tempdir().unwrap();
-    let rate_script = rate_root.path().join("fake-yt-dlp");
-    let rate_calls = rate_root.path().join("calls.log");
-    std::fs::write(
-        &rate_script,
-        format!(
-            "#!/bin/sh\nprintf 'metadata\\n' >> {}\nprintf 'ERROR: HTTP Error 429: Too Many Requests\\n' >&2\nexit 1\n",
-            quote(&rate_calls)
-        ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&rate_script, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let limited = run(rate_root.path(), &rate_script, &[]);
-    assert!(!limited.status.success());
-    assert!(String::from_utf8_lossy(&limited.stderr).contains("rate_limited"));
-    assert_eq!(call_log(&rate_calls), ["metadata"]);
+    let first = run_with_voxtral(
+        root.path(),
+        &downloader,
+        &["--language", "en", "--format", "json"],
+        Some(&voxtral),
+    );
+    assert!(first.status.success());
+    let first_transcript: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert_eq!(first_transcript["model"], "model-aa");
+
+    let replacement_response = VOXTRAL_RESPONSE.replace("fake-model", "model-bb");
+    let (replacement, _) = fake_voxtral_for(
+        root.path(),
+        "replacement-voxtral",
+        true,
+        &replacement_response,
+    );
+    std::fs::rename(replacement, &voxtral).unwrap();
+
+    let second = run_with_voxtral(
+        root.path(),
+        &downloader,
+        &["--language", "en", "--format", "json"],
+        Some(&voxtral),
+    );
+    assert!(
+        second.status.success(),
+        "replacement run failed: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let second_transcript: serde_json::Value = serde_json::from_slice(&second.stdout).unwrap();
+    assert_eq!(second_transcript["model"], "model-bb");
+    assert_eq!(downloader_calls(&downloader_log).len(), 4);
+    assert_eq!(log_records(&voxtral_log).len(), 2);
 }
 
 #[test]
-fn malformed_subtitle_data_is_not_reinterpreted_as_missing_captions() {
+fn configuration_change_during_voxtral_run_skips_cache_write() {
     let root = tempfile::tempdir().unwrap();
-    let metadata = r#"{"id":"dQw4w9WgXcQ","subtitles":{"en":[{"ext":"vtt","url":"https://example.test/en.vtt"}]},"automatic_captions":{}}"#;
-    let (executable, calls) = fake_downloader(
-        root.path(),
-        metadata,
-        "This is not a WebVTT document\n",
-        "printf 'audio\\n' >> /dev/null; exit 90",
+    let (downloader, downloader_log) = fake_downloader(root.path(), METADATA_WITH_CAPTIONS, None);
+    let voxtral = root.path().join("fake-voxtral");
+    let replacement = root.path().join("replacement-voxtral");
+    let voxtral_log = root.path().join("voxtral-calls.log");
+    let first_response = VOXTRAL_RESPONSE.replace("fake-model", "model-aa");
+    let second_response = VOXTRAL_RESPONSE.replace("fake-model", "model-bb");
+    let replacement_script = format!(
+        "#!/bin/sh\nset -eu\nprintf '%s\\n' 'invoke' >> {}\nprintf '%s\\n' {}\n",
+        quote(&voxtral_log),
+        shell_quote(&second_response)
     );
-    let result = run(root.path(), &executable, &["--language", "en"]);
-    assert!(!result.status.success());
-    assert!(String::from_utf8_lossy(&result.stderr).contains("malformed_subtitle"));
-    assert_eq!(call_log(&calls), ["metadata", "captions"]);
+    write_executable(&replacement, &replacement_script);
+    let first_script = format!(
+        "#!/bin/sh\nset -eu\nprintf '%s\\n' 'invoke' >> {}\nmv {} \"$0\"\nprintf '%s\\n' {}\n",
+        quote(&voxtral_log),
+        quote(&replacement),
+        shell_quote(&first_response)
+    );
+    write_executable(&voxtral, &first_script);
+
+    let first = run_with_voxtral(
+        root.path(),
+        &downloader,
+        &["--language", "en", "--format", "json"],
+        Some(&voxtral),
+    );
+    assert!(
+        first.status.success(),
+        "changed-config run failed: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let first_transcript: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert_eq!(first_transcript["model"], "model-aa");
+    assert_eq!(cache_json_count(root.path()), 0);
+
+    let second = run_with_voxtral(
+        root.path(),
+        &downloader,
+        &["--language", "en", "--format", "json"],
+        Some(&voxtral),
+    );
+    assert!(second.status.success());
+    let second_transcript: serde_json::Value = serde_json::from_slice(&second.stdout).unwrap();
+    assert_eq!(second_transcript["model"], "model-bb");
+    assert_eq!(cache_json_count(root.path()), 2);
+
+    let cached = run_with_voxtral(
+        root.path(),
+        &downloader,
+        &["--language", "en", "--format", "txt"],
+        Some(&voxtral),
+    );
+    assert!(cached.status.success());
+    assert_eq!(downloader_calls(&downloader_log).len(), 4);
+    assert_eq!(log_records(&voxtral_log).len(), 2);
 }
 
 #[test]
-fn captions_only_fails_without_trying_local_audio() {
+fn restored_voxtral_symlink_change_skips_cache_write() {
     let root = tempfile::tempdir().unwrap();
-    let metadata = r#"{"id":"dQw4w9WgXcQ","subtitles":{},"automatic_captions":{}}"#;
-    let (executable, calls) = fake_downloader(
-        root.path(),
-        metadata,
-        "",
-        "printf 'audio\\n' >> /dev/null; exit 90",
+    let (base_downloader, downloader_log) =
+        fake_downloader(root.path(), METADATA_WITH_CAPTIONS, None);
+    let original_response = VOXTRAL_RESPONSE.replace("fake-model", "model-aa");
+    let (original, voxtral_log) =
+        fake_voxtral_for(root.path(), "original-voxtral", true, &original_response);
+    let symlink = root.path().join("configured-voxtral");
+    let saved_symlink = root.path().join("saved-voxtral-link");
+    let attacker = root.path().join("replacement-voxtral");
+    let marker = root.path().join("replacement-installed");
+    std::os::unix::fs::symlink(&original, &symlink).unwrap();
+
+    let attacker_response = VOXTRAL_RESPONSE.replace("fake-model", "model-bb");
+    let attacker_script = format!(
+        "#!/bin/sh\nset -eu\nprintf '%s\\n' 'invoke' >> {}\ninput=''\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    --input) input=$2; shift 2 ;;\n    *) shift ;;\n  esac\ndone\n[ -s \"$input\" ]\nrm {}\nmv {} {}\nprintf '%s\\n' {}\n",
+        quote(&voxtral_log),
+        quote(&symlink),
+        quote(&saved_symlink),
+        quote(&symlink),
+        shell_quote(&attacker_response)
     );
-    let result = run(root.path(), &executable, &["--captions-only"]);
-    assert!(!result.status.success());
-    assert!(String::from_utf8_lossy(&result.stderr).contains("no_captions"));
-    assert_eq!(call_log(&calls), ["metadata"]);
+    write_executable(&attacker, &attacker_script);
+
+    let swapping_downloader = root.path().join("swapping-yt-dlp");
+    let swapping_script = format!(
+        "#!/bin/sh\nset -eu\nphase=audio\nfor arg do\n  if [ \"$arg\" = '--dump-single-json' ]; then phase=metadata; fi\ndone\nif [ \"$phase\" = audio ] && [ ! -e {} ]; then\n  mv {} {}\n  ln -s {} {}\n  : > {}\nfi\nexec {} \"$@\"\n",
+        quote(&marker),
+        quote(&symlink),
+        quote(&saved_symlink),
+        quote(&attacker),
+        quote(&symlink),
+        quote(&marker),
+        quote(&base_downloader)
+    );
+    write_executable(&swapping_downloader, &swapping_script);
+
+    let first = run_with_voxtral(
+        root.path(),
+        &swapping_downloader,
+        &["--language", "en", "--format", "json"],
+        Some(&symlink),
+    );
+    assert!(
+        first.status.success(),
+        "symlink swap run failed: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let first_transcript: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert_eq!(first_transcript["model"], "model-bb");
+    assert_eq!(cache_json_count(root.path()), 0);
+
+    let second = run_with_voxtral(
+        root.path(),
+        &swapping_downloader,
+        &["--language", "en", "--format", "json"],
+        Some(&symlink),
+    );
+    assert!(second.status.success());
+    let second_transcript: serde_json::Value = serde_json::from_slice(&second.stdout).unwrap();
+    assert_eq!(second_transcript["model"], "model-aa");
+    assert_eq!(cache_json_count(root.path()), 2);
+
+    let cached = run_with_voxtral(
+        root.path(),
+        &swapping_downloader,
+        &["--language", "en", "--format", "txt"],
+        Some(&symlink),
+    );
+    assert!(cached.status.success());
+    assert_eq!(downloader_calls(&downloader_log).len(), 4);
+    assert_eq!(log_records(&voxtral_log).len(), 2);
 }
 
 #[test]
-fn malformed_caption_metadata_must_not_trigger_audio_fallback() {
+fn restored_parent_symlink_change_skips_cache_write() {
     let root = tempfile::tempdir().unwrap();
-    let metadata = r#"{"id":"dQw4w9WgXcQ","subtitles":null,"automatic_captions":{}}"#;
-    let (executable, calls) = fake_downloader(
-        root.path(),
-        metadata,
-        "",
-        "printf 'audio\\n' >> 'CALL_LOG'; exit 90",
+    let (base_downloader, downloader_log) =
+        fake_downloader(root.path(), METADATA_WITH_CAPTIONS, None);
+    let original_dir = root.path().join("original-bin");
+    let replacement_dir = root.path().join("replacement-bin");
+    std::fs::create_dir_all(&original_dir).unwrap();
+    std::fs::create_dir_all(&replacement_dir).unwrap();
+    let original_response = VOXTRAL_RESPONSE.replace("fake-model", "model-aa");
+    let (_, voxtral_log) = fake_voxtral_for(&original_dir, "voxtral", true, &original_response);
+    let replacement_response = VOXTRAL_RESPONSE.replace("fake-model", "model-bb");
+    let configured_dir = root.path().join("current-bin");
+    let saved_dir = root.path().join("saved-current-bin");
+    let symlink_path = configured_dir.join("voxtral");
+    let marker = root.path().join("parent-symlink-replaced");
+    std::os::unix::fs::symlink(&original_dir, &configured_dir).unwrap();
+
+    let swapping_downloader = root.path().join("swapping-parent-yt-dlp");
+    let swapping_script = format!(
+        "#!/bin/sh\nset -eu\nphase=audio\nfor arg do\n  if [ \"$arg\" = '--dump-single-json' ]; then phase=metadata; fi\ndone\nif [ \"$phase\" = audio ] && [ ! -e {} ]; then\n  mv {} {}\n  ln -s {} {}\n  : > {}\nfi\nexec {} \"$@\"\n",
+        quote(&marker),
+        quote(&configured_dir),
+        quote(&saved_dir),
+        quote(&replacement_dir),
+        quote(&configured_dir),
+        quote(&marker),
+        quote(&base_downloader)
     );
-    let script = std::fs::read_to_string(&executable)
+    write_executable(&swapping_downloader, &swapping_script);
+
+    let replacement_runner = replacement_dir.join("voxtral");
+    let runner_script = format!(
+        "#!/bin/sh\nset -eu\nprintf '%s\\n' 'invoke' >> {}\ninput=''\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    --input) input=$2; shift 2 ;;\n    *) shift ;;\n  esac\ndone\n[ -s \"$input\" ]\nrm {}\nmv {} {}\nprintf '%s\\n' {}\n",
+        quote(&voxtral_log),
+        quote(&configured_dir),
+        quote(&saved_dir),
+        quote(&configured_dir),
+        shell_quote(&replacement_response)
+    );
+    write_executable(&replacement_runner, &runner_script);
+
+    let first = run_with_voxtral(
+        root.path(),
+        &swapping_downloader,
+        &["--language", "en", "--format", "json"],
+        Some(&symlink_path),
+    );
+    assert!(
+        first.status.success(),
+        "parent symlink swap run failed: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let first_transcript: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert_eq!(first_transcript["model"], "model-bb");
+    assert_eq!(cache_json_count(root.path()), 0);
+
+    let second = run_with_voxtral(
+        root.path(),
+        &swapping_downloader,
+        &["--language", "en", "--format", "json"],
+        Some(&symlink_path),
+    );
+    assert!(second.status.success());
+    let second_transcript: serde_json::Value = serde_json::from_slice(&second.stdout).unwrap();
+    assert_eq!(second_transcript["model"], "model-aa");
+    assert_eq!(cache_json_count(root.path()), 2);
+
+    let cached = run_with_voxtral(
+        root.path(),
+        &swapping_downloader,
+        &["--language", "en", "--format", "txt"],
+        Some(&symlink_path),
+    );
+    assert!(cached.status.success());
+    assert_eq!(downloader_calls(&downloader_log).len(), 4);
+    assert_eq!(log_records(&voxtral_log).len(), 2);
+}
+
+fn cache_json_count(root: &Path) -> usize {
+    std::fs::read_dir(root.join("cache/polyscribe/youtube/v3"))
         .unwrap()
-        .replace("CALL_LOG", &quote(&calls));
-    std::fs::write(&executable, script).unwrap();
-    let model = root.path().join("fake-model.bin");
-    std::fs::write(&model, b"not a model").unwrap();
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension() == Some(OsStr::new("json")))
+        .count()
+}
 
-    let result = Command::new(bin())
-        .args(["youtube", URL])
-        .env("POLYSCRIBE_YTDLP", &executable)
-        .env("XDG_CACHE_HOME", root.path().join("cache"))
-        .env("HOME", root.path())
-        .env("WHISPER_MODEL", &model)
-        .output()
-        .expect("launch polyscribe");
-    assert!(!result.status.success());
+#[test]
+fn refresh_downloads_audio_and_runs_voxtral_again() {
+    let root = tempfile::tempdir().unwrap();
+    let (downloader, downloader_log) = fake_downloader(root.path(), METADATA_WITH_CAPTIONS, None);
+    let (voxtral, voxtral_log) = fake_voxtral(root.path(), true);
+
+    for args in [
+        vec!["--language", "en", "--format", "txt"],
+        vec!["--language", "en", "--format", "txt", "--refresh"],
+    ] {
+        let result = run_with_voxtral(root.path(), &downloader, &args, Some(&voxtral));
+        assert!(
+            result.status.success(),
+            "refresh flow failed: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+
+    let calls = downloader_calls(&downloader_log);
     assert_eq!(
-        call_log(&calls),
-        ["metadata"],
-        "invalid caption metadata was mistaken for confirmed caption absence: {}",
-        String::from_utf8_lossy(&result.stderr)
+        calls
+            .iter()
+            .map(|call| call.phase.as_str())
+            .collect::<Vec<_>>(),
+        ["metadata", "audio", "metadata", "audio"]
+    );
+    assert_no_caption_arguments(&calls);
+    for audio_call in calls.iter().filter(|call| call.phase == "audio") {
+        assert_eq!(argument_after(audio_call, "--format"), "bestaudio/best");
+        let template = PathBuf::from(argument_after(audio_call, "--output"));
+        assert_eq!(template.file_name(), Some(OsStr::new("audio.%(ext)s")));
+        assert!(!template.with_file_name("audio.wav").exists());
+    }
+    let voxtral_calls = log_records(&voxtral_log);
+    assert_eq!(voxtral_calls.len(), 2);
+    for call in &voxtral_calls {
+        let audio_path = voxtral_input_path(call, Some("en"));
+        assert!(
+            !audio_path.exists(),
+            "temporary audio must be removed after exit"
+        );
+    }
+}
+
+#[test]
+fn captions_only_fails_before_any_process_invocation() {
+    let root = tempfile::tempdir().unwrap();
+    let (downloader, downloader_log) = fake_downloader(root.path(), METADATA_WITH_CAPTIONS, None);
+    let (voxtral, voxtral_log) = fake_voxtral(root.path(), true);
+
+    let result = run_with_voxtral(
+        root.path(),
+        &downloader,
+        &["--captions-only"],
+        Some(&voxtral),
+    );
+    assert!(!result.status.success());
+    assert!(result.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("unsupported_mode"));
+    assert!(downloader_calls(&downloader_log).is_empty());
+    assert!(log_records(&voxtral_log).is_empty());
+}
+
+#[test]
+fn audio_rate_limit_is_classified_before_voxtral_can_run() {
+    let root = tempfile::tempdir().unwrap();
+    let (downloader, downloader_log) = fake_downloader(
+        root.path(),
+        METADATA_WITH_CAPTIONS,
+        Some("ERROR: HTTP Error 429: Too Many Requests"),
+    );
+    let (voxtral, voxtral_log) = fake_voxtral(root.path(), true);
+
+    let result = run_with_voxtral(
+        root.path(),
+        &downloader,
+        &["--language", "en"],
+        Some(&voxtral),
+    );
+    assert!(!result.status.success());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("rate_limited"), "stderr: {stderr}");
+    assert!(!stderr.contains("audio_download"), "stderr: {stderr}");
+    let calls = downloader_calls(&downloader_log);
+    assert_eq!(
+        calls
+            .iter()
+            .map(|call| call.phase.as_str())
+            .collect::<Vec<_>>(),
+        ["metadata", "audio"]
+    );
+    assert_no_caption_arguments(&calls);
+    assert_eq!(argument_after(&calls[1], "--format"), "bestaudio/best");
+    assert!(log_records(&voxtral_log).is_empty());
+}
+
+#[test]
+fn voxtral_failure_tries_whisper_once_and_preserves_whisper_error_classification() {
+    let root = tempfile::tempdir().unwrap();
+    let (downloader, downloader_log) = fake_downloader(root.path(), METADATA_WITH_CAPTIONS, None);
+    let (voxtral, voxtral_log) = fake_voxtral(root.path(), false);
+
+    let result = run_with_voxtral(
+        root.path(),
+        &downloader,
+        &["--language", "en"],
+        Some(&voxtral),
+    );
+    assert!(!result.status.success());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("Voxtral failed"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("local Whisper fallback failed"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("no local Whisper model is available"),
+        "stderr: {stderr}"
+    );
+    assert!(stderr.contains("WHISPER_MODEL"), "stderr: {stderr}");
+    assert!(!stderr.contains("audio_download"), "stderr: {stderr}");
+
+    let calls = downloader_calls(&downloader_log);
+    let audio_path = assert_metadata_then_audio(&calls);
+    let voxtral_calls = log_records(&voxtral_log);
+    assert_eq!(voxtral_calls.len(), 1, "Voxtral fallback must run once");
+    assert_eq!(
+        voxtral_input_path(&voxtral_calls[0], Some("en")),
+        audio_path
+    );
+    assert!(
+        !audio_path.exists(),
+        "temporary audio must be removed after exit"
     );
 }
 
 #[test]
-fn confirmed_caption_absence_allows_audio_fallback_with_language_hint() {
+fn unconfigured_voxtral_tries_whisper_after_downloading_audio() {
     let root = tempfile::tempdir().unwrap();
-    let metadata = r#"{"id":"dQw4w9WgXcQ","subtitles":{},"automatic_captions":{}}"#;
-    let (executable, calls) = fake_downloader(
-        root.path(),
-        metadata,
-        "",
-        "printf 'audio\\n' >> 'CALL_LOG'; exit 90",
-    );
-    let script = std::fs::read_to_string(&executable)
-        .unwrap()
-        .replace("CALL_LOG", &quote(&calls));
-    std::fs::write(&executable, script).unwrap();
-    let model = root.path().join("fake-model.bin");
-    std::fs::write(&model, b"not a model").unwrap();
+    let (downloader, downloader_log) = fake_downloader(root.path(), METADATA_WITH_CAPTIONS, None);
 
-    let result = Command::new(bin())
-        .args(["youtube", URL, "--language", "en"])
-        .env("POLYSCRIBE_YTDLP", &executable)
-        .env("XDG_CACHE_HOME", root.path().join("cache"))
-        .env("HOME", root.path())
-        .env("WHISPER_MODEL", &model)
-        .output()
-        .expect("launch polyscribe");
+    let result = run_with_voxtral(root.path(), &downloader, &["--language", "en"], None);
+    assert!(!result.status.success());
+    assert!(result.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        stderr.contains("Voxtral is not configured"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("trying local Whisper once"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("local Whisper fallback failed"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("no local Whisper model is available"),
+        "stderr: {stderr}"
+    );
+    let calls = downloader_calls(&downloader_log);
+    let audio_path = assert_metadata_then_audio(&calls);
+    assert!(
+        !audio_path.exists(),
+        "temporary audio must be removed after exit"
+    );
+}
+
+#[test]
+fn malformed_voxtral_output_falls_back_once_to_whisper() {
+    let root = tempfile::tempdir().unwrap();
+    let (downloader, downloader_log) = fake_downloader(root.path(), METADATA_WITH_CAPTIONS, None);
+    let (voxtral, voxtral_log) =
+        fake_voxtral_for(root.path(), "fake-voxtral", true, "not protocol json");
+
+    let result = run_with_voxtral(
+        root.path(),
+        &downloader,
+        &["--language", "en"],
+        Some(&voxtral),
+    );
     assert!(!result.status.success());
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(
-        stderr.contains("audio_download"),
-        "unexpected error: {stderr}"
+        stderr.contains("valid protocol-v1 transcript"),
+        "stderr: {stderr}"
     );
-    assert!(!stderr.contains("requested_language_unavailable"));
-    assert_eq!(call_log(&calls), ["metadata", "audio"]);
-}
-
-#[test]
-fn unsupported_caption_formats_do_not_trigger_audio_fallback() {
-    let root = tempfile::tempdir().unwrap();
-    let metadata = r#"{"id":"dQw4w9WgXcQ","subtitles":{"en":[{"ext":"srv3","url":"https://example.test/en.xml"}]},"automatic_captions":{}}"#;
-    let (executable, calls) = fake_downloader(
-        root.path(),
-        metadata,
-        "",
-        "printf 'unexpected audio\\n' >> /dev/null; exit 90",
+    assert!(
+        stderr.contains("local Whisper fallback failed"),
+        "stderr: {stderr}"
     );
-    let result = run(root.path(), &executable, &[]);
-    assert!(!result.status.success());
-    assert!(String::from_utf8_lossy(&result.stderr).contains("unsupported_caption_format"));
-    assert_eq!(call_log(&calls), ["metadata"]);
+    assert!(
+        stderr.contains("no local Whisper model is available"),
+        "stderr: {stderr}"
+    );
+    assert!(!stderr.contains("audio_download"), "stderr: {stderr}");
+    assert_eq!(downloader_calls(&downloader_log).len(), 2);
+    assert_eq!(log_records(&voxtral_log).len(), 1);
 }
 
 #[test]
-fn missing_selected_caption_artifact_allows_audio_fallback() {
+fn unexpected_metadata_video_id_is_not_echoed_to_terminal() {
     let root = tempfile::tempdir().unwrap();
-    let executable = root.path().join("fake-yt-dlp");
-    let calls = root.path().join("calls.log");
-    let model = root.path().join("fake-model.bin");
-    std::fs::write(&model, b"not a model").unwrap();
-    std::fs::write(
-        &executable,
-        format!(
-            "#!/bin/sh
-case \"$*\" in
-  *--dump-single-json*)
-    printf 'metadata\\n' >> {calls}
-    printf '%s\\n' '{{\"id\":\"dQw4w9WgXcQ\",\"subtitles\":{{\"en\":[{{\"ext\":\"vtt\",\"url\":\"https://example.test/en.vtt\"}}]}},\"automatic_captions\":{{}}}}'
-    ;;
-  *--write-subs*|*--write-auto-subs*)
-    printf 'captions\\n' >> {calls}
-    exit 0
-    ;;
-  *)
-    printf 'audio\\n' >> {calls}
-    exit 90
-    ;;
-esac
-",
-            calls = quote(&calls),
-        ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let metadata = r#"{"id":"\u001b[31mnot-the-requested-video","title":"Fixture"}"#;
+    let (downloader, downloader_log) = fake_downloader(root.path(), metadata, None);
 
-    let result = Command::new(bin())
-        .args(["youtube", URL, "--language", "en"])
-        .env("POLYSCRIBE_YTDLP", &executable)
-        .env("XDG_CACHE_HOME", root.path().join("cache"))
-        .env("HOME", root.path())
-        .env("WHISPER_MODEL", &model)
-        .output()
-        .expect("launch polyscribe");
+    let result = run_with_voxtral(root.path(), &downloader, &[], None);
     assert!(!result.status.success());
-    assert!(String::from_utf8_lossy(&result.stderr).contains("audio_download"));
-    assert_eq!(call_log(&calls), ["metadata", "captions", "audio"]);
-}
-
-#[test]
-fn caption_http_and_network_failures_do_not_trigger_audio_fallback() {
-    for (failure, expected_kind) in [
-        ("ERROR: HTTP Error 403: Forbidden", "forbidden"),
-        ("Unable to download webpage: timed out", "network"),
-    ] {
-        let root = tempfile::tempdir().unwrap();
-        let executable = root.path().join("fake-yt-dlp");
-        let calls = root.path().join("calls.log");
-        std::fs::write(
-            &executable,
-            format!(
-                "#!/bin/sh
-case \"$*\" in
-  *--dump-single-json*)
-    printf 'metadata\\n' >> {calls}
-    printf '%s\\n' '{{\"id\":\"dQw4w9WgXcQ\",\"subtitles\":{{\"en\":[{{\"ext\":\"vtt\",\"url\":\"https://example.test/en.vtt\"}}]}},\"automatic_captions\":{{}}}}'
-    ;;
-  *--write-subs*|*--write-auto-subs*)
-    printf 'captions\\n' >> {calls}
-    printf '%s\\n' '{failure}' >&2
-    exit 1
-    ;;
-  *)
-    printf 'audio\\n' >> {calls}
-    exit 0
-    ;;
-esac
-",
-                calls = quote(&calls),
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
-
-        let result = run(root.path(), &executable, &["--language", "en"]);
-        assert!(!result.status.success());
-        assert!(
-            String::from_utf8_lossy(&result.stderr).contains(expected_kind),
-            "expected {expected_kind}, got {}",
-            String::from_utf8_lossy(&result.stderr)
-        );
-        assert_eq!(call_log(&calls), ["metadata", "captions"]);
-    }
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("different video id"), "stderr: {stderr}");
+    assert!(
+        !stderr.contains('\u{1b}'),
+        "terminal escape leaked to stderr"
+    );
+    assert_eq!(
+        downloader_calls(&downloader_log)
+            .iter()
+            .map(|call| call.phase.as_str())
+            .collect::<Vec<_>>(),
+        ["metadata"]
+    );
 }

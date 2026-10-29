@@ -185,3 +185,64 @@ fn first_run_with_whisper_model_pointing_at_directory_is_actionable() {
         "unexpected stderr: {stderr}"
     );
 }
+
+#[cfg(target_os = "linux")]
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// Regression for the ffmpeg decoder inheriting a controlling terminal.
+///
+/// The decoder runs in its own process group. If its stdin is the pty, a
+/// read or tty write stops it with SIGTTIN/SIGTTOU and transcription hangs
+/// before the first audio window. Without a model this must instead fail
+/// quickly with the actionable no-model message.
+#[cfg(target_os = "linux")]
+#[test]
+fn ffmpeg_decoder_runs_under_a_controlling_terminal() {
+    let Some(env) = setup() else {
+        return;
+    };
+    if Command::new("script").arg("--version").output().is_err() {
+        eprintln!("NOT RUN: script is not available; skipping pty regression test");
+        return;
+    }
+    if Command::new("timeout").arg("--version").output().is_err() {
+        eprintln!("NOT RUN: timeout is not available; skipping pty regression test");
+        return;
+    }
+
+    let inner = format!(
+        "timeout 10 {} transcribe --language en {}",
+        shell_quote(bin()),
+        shell_quote(env.audio.to_str().unwrap())
+    );
+    let output = Command::new("script")
+        .arg("-qec")
+        .arg(&inner)
+        .arg("/dev/null")
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", &env.home)
+        .env("POLYSCRIBE_MODELS_DIR", &env.models_dir)
+        .env("POLYSCRIBE_CACHE_DIR", &env.cache_root)
+        .env("XDG_CACHE_HOME", env.home.join("xdg-cache"))
+        .env("XDG_DATA_HOME", env.home.join("xdg-data"))
+        .output()
+        .expect("failed to run the CLI under a pty");
+
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_ne!(
+        output.status.code(),
+        Some(124),
+        "ffmpeg stalled under the controlling terminal: {combined}"
+    );
+    assert!(
+        combined.contains("No Whisper model files (*.bin) found"),
+        "the decoder did not reach model discovery under the pty: {combined}"
+    );
+}

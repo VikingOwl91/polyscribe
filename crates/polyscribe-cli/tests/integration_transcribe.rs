@@ -193,6 +193,36 @@ fn cli_writes_separate_outputs_by_default() {
 }
 
 #[test]
+fn input_filename_controls_are_escaped_in_terminal_diagnostics() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory
+        .path()
+        .join("record\u{1b}]52;c;aGVsbG8=\u{7}.unknown");
+    fs::write(&input, b"not a supported media file").unwrap();
+
+    let output = Command::new(bin())
+        .args(["--no-interaction", "--no-progress", "transcribe"])
+        .arg(&input)
+        .output()
+        .expect("failed to spawn polyscribe");
+    assert!(!output.status.success());
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains('\u{1b}'),
+        "raw ESC reached stderr: {stderr:?}"
+    );
+    assert!(
+        !stderr.contains('\u{7}'),
+        "raw BEL reached stderr: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("record\\u{1b}]52;c;aGVsbG8=\\u{7}.unknown"),
+        "escaped filename missing from stderr: {stderr:?}"
+    );
+}
+
+#[test]
 fn cli_merges_json_inputs_with_flag_and_writes_outputs_to_temp_dir() {
     let tmp = tempfile::tempdir().unwrap();
     // Use a nested output directory to also verify auto-creation
@@ -653,5 +683,48 @@ fn cli_reports_ffmpeg_failure_for_invalid_media() {
         stderr.contains("ffmpeg failed"),
         "unexpected stderr: {}",
         stderr
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn ffmpeg_stderr_controls_are_escaped_in_terminal_diagnostics() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let fake_bin = directory.path().join("bin");
+    fs::create_dir(&fake_bin).unwrap();
+    let ffmpeg = fake_bin.join("ffmpeg");
+    fs::write(
+        &ffmpeg,
+        "#!/bin/sh\nprintf '\\033]52;c;aGVsbG8=\\007\\n' >&2\nexit 1\n",
+    )
+    .unwrap();
+    fs::set_permissions(&ffmpeg, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut paths = vec![fake_bin];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    let output = Command::new(bin())
+        .args(["--no-interaction", "transcribe", "--language", "en"])
+        .arg(fixture("sample.mp3"))
+        .env("PATH", std::env::join_paths(paths).unwrap())
+        .output()
+        .expect("failed to spawn polyscribe");
+
+    assert!(!output.status.success());
+    let stderr = stderr_string(&output);
+    assert!(
+        !stderr.contains('\u{1b}'),
+        "raw ESC reached stderr: {stderr:?}"
+    );
+    assert!(
+        !stderr.contains('\u{7}'),
+        "raw BEL reached stderr: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("\\u{1b}]52;c;aGVsbG8=\\u{7}"),
+        "escaped ffmpeg diagnostic missing: {stderr:?}"
     );
 }

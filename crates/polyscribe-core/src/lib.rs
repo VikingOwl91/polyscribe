@@ -234,9 +234,8 @@ pub mod model_manager;
 /// This is the single resolver behind model discovery (`find_model_file`)
 /// and the interactive downloader (`ConfigService::models_dir`), so model
 /// installation and transcription always agree on the directory. Models
-/// installed by `models add` live in the ModelManager cache dir
-/// (`$XDG_CACHE_HOME/polyscribe/models`) and are picked up by
-/// `find_model_file` as a fallback.
+/// installed by `models add` live in the same model directory by default
+/// and are picked up directly by `find_model_file`.
 pub fn models_dir_path() -> PathBuf {
     resolve_models_dir_with(|name| env::var(name).ok())
 }
@@ -356,24 +355,38 @@ pub fn find_model_file() -> Result<PathBuf> {
 ///
 /// `whisper_model` is the `WHISPER_MODEL` override (must point at an existing
 /// file), `models_dir` the primary transcription models dir, and `cache_dir`
-/// the optional ModelManager cache dir used as a fallback so models installed
-/// via `polyscribe models add` are found.
+/// the optional ModelManager cache dir. The default registry cache is the
+/// same model directory; `POLYSCRIBE_CACHE_DIR` overrides it for isolated runs.
 fn find_model_file_in(
     whisper_model: Option<&Path>,
     models_dir: &Path,
     cache_dir: Option<&Path>,
 ) -> anyhow::Result<PathBuf> {
     if let Some(p) = whisper_model {
+        if p.is_file() {
+            return Ok(p.to_path_buf());
+        }
+
+        // A bare model file name is looked up in the models directory. This
+        // keeps `WHISPER_MODEL=ggml-small.bin` useful without turning an
+        // arbitrary relative path into a search.
+        if p.components().count() == 1 {
+            let candidate = models_dir.join(p);
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+
         if !p.exists() {
             return Err(anyhow!(
                 "WHISPER_MODEL points to a non-existing path: {}",
-                p.display()
+                crate::ui::terminal_safe_path(p)
             ));
         }
         if !p.is_file() {
             return Err(anyhow!(
                 "WHISPER_MODEL must point to a file, but is not: {}",
-                p.display()
+                crate::ui::terminal_safe_path(p)
             ));
         }
         return Ok(p.to_path_buf());
@@ -382,18 +395,22 @@ fn find_model_file_in(
     if models_dir.exists() && !models_dir.is_dir() {
         return Err(anyhow!(
             "Models path exists but is not a directory: {}",
-            models_dir.display()
+            crate::ui::terminal_safe_path(models_dir)
         ));
     }
     std::fs::create_dir_all(models_dir).with_context(|| {
         format!(
             "Failed to ensure models dir exists: {}",
-            models_dir.display()
+            crate::ui::terminal_safe_path(models_dir)
         )
     })?;
 
-    let mut candidates = scan_model_dir(models_dir)
-        .with_context(|| format!("Failed to read models dir: {}", models_dir.display()))?;
+    let mut candidates = scan_model_dir(models_dir).with_context(|| {
+        format!(
+            "Failed to read models dir: {}",
+            crate::ui::terminal_safe_path(models_dir)
+        )
+    })?;
 
     // Fall back to the ModelManager cache dir so models installed via
     // `polyscribe models add` are found by transcribe. A missing cache dir
@@ -409,7 +426,7 @@ fn find_model_file_in(
             Err(e) => {
                 return Err(e).context(format!(
                     "Failed to read models dir: {}",
-                    cache_dir.display()
+                    crate::ui::terminal_safe_path(cache_dir)
                 ));
             }
         }
@@ -419,7 +436,7 @@ fn find_model_file_in(
         return Err(anyhow!(
             "No Whisper model files (*.bin) found in {}. \
              Please download a model (polyscribe models add) or set WHISPER_MODEL.",
-            models_dir.display()
+            crate::ui::terminal_safe_path(models_dir)
         ));
     }
 
@@ -490,7 +507,7 @@ pub fn decode_audio_to_pcm_f32_ffmpeg(audio_path: &Path) -> Result<Vec<f32>> {
                 let _ = child.wait();
                 return Err(anyhow!(
                     "Failed to read ffmpeg output for {}: {}",
-                    audio_path.display(),
+                    crate::ui::terminal_safe_path(audio_path),
                     e
                 )
                 .into());
@@ -503,8 +520,8 @@ pub fn decode_audio_to_pcm_f32_ffmpeg(audio_path: &Path) -> Result<Vec<f32>> {
     if !status.success() {
         return Err(anyhow!(
             "ffmpeg failed for {}: {}",
-            audio_path.display(),
-            String::from_utf8_lossy(&stderr_bytes)
+            crate::ui::terminal_safe_path(audio_path),
+            crate::ui::escape_terminal_controls(&String::from_utf8_lossy(&stderr_bytes))
         )
         .into());
     }
@@ -695,6 +712,18 @@ mod tests {
             msg.contains("exists but is not a directory"),
             "unexpected error: {msg}"
         );
+    }
+
+    #[test]
+    fn test_find_model_file_whisper_model_bare_name_resolves_in_models_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let models_dir = tmp.path().join("models");
+        let model = models_dir.join("ggml-small.bin");
+        write_file(&model, b"fake model");
+
+        let found = find_model_file_in(Some(Path::new("ggml-small.bin")), &models_dir, None)
+            .expect("a bare model name should resolve in the models dir");
+        assert_eq!(found, model);
     }
 
     #[test]

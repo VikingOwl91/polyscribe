@@ -5,7 +5,25 @@ pub mod progress;
 use std::io;
 use std::io::IsTerminal;
 use std::io::Write as _;
+use std::path::Path;
 use std::time::{Duration, Instant};
+
+pub fn escape_terminal_controls(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        if character.is_control() {
+            use std::fmt::Write as _;
+            let _ = write!(&mut escaped, "\\u{{{:x}}}", character as u32);
+        } else {
+            escaped.push(character);
+        }
+    }
+    escaped
+}
+
+pub fn terminal_safe_path(path: &Path) -> String {
+    escape_terminal_controls(&path.to_string_lossy())
+}
 
 /// Informational message; suppressed in quiet mode.
 pub fn info(msg: impl AsRef<str>) {
@@ -359,5 +377,19 @@ impl BytesProgress {
             eprintln!();
         }
         let _ = cliclack::log::error(text);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn escapes_terminal_controls_without_changing_path_data() {
+        let path = Path::new("record\u{1b}]52;c;aGVsbG8=\u{7}.wav");
+        let display = terminal_safe_path(path);
+        assert_eq!(display, "record\\u{1b}]52;c;aGVsbG8=\\u{7}.wav");
+        assert!(!display.chars().any(char::is_control));
+        assert_eq!(path.as_os_str(), "record\u{1b}]52;c;aGVsbG8=\u{7}.wav");
     }
 }

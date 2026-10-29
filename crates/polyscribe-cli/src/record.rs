@@ -139,15 +139,19 @@ pub fn run(args: RecordArgs) -> Result<()> {
     // first samples tells the user that the microphone works, instead of
     // leaving them in front of a silent command.
     let ready = wait_for_audio(&capture);
+    let display_device = device
+        .as_deref()
+        .map(polyscribe_core::ui::escape_terminal_controls);
+    let display_device = display_device.as_deref().unwrap_or("the default source");
     if ready {
         polyscribe_core::ilog!(
             "recording from {} (Ctrl+C stops the recording)",
-            device.as_deref().unwrap_or("the default source")
+            display_device
         );
     } else {
         polyscribe_core::ilog!(
             "recording from {} (no audio yet, Ctrl+C stops the recording)",
-            device.as_deref().unwrap_or("the default source")
+            display_device
         );
     }
 
@@ -343,7 +347,8 @@ fn resolve_device(requested: Option<&str>) -> Result<Option<String>> {
             // The nodes cannot be listed, so the device cannot be checked.
             // The run continues, and the risk is named.
             polyscribe_core::ui::warn(format!(
-                "the device '{requested}' could not be checked ({error}). pw-record records from the default source when it is given a node that does not exist."
+                "the device '{}' could not be checked ({error}). pw-record records from the default source when it is given a node that does not exist.",
+                polyscribe_core::ui::escape_terminal_controls(requested)
             ));
             return Ok(Some(requested.to_string()));
         }
@@ -351,12 +356,23 @@ fn resolve_device(requested: Option<&str>) -> Result<Option<String>> {
     if devices.iter().any(|device| device.name == requested) {
         return Ok(Some(requested.to_string()));
     }
-    let mut names: Vec<&str> = devices.iter().map(|device| device.name.as_str()).collect();
+    Err(unknown_device_error(requested, &devices))
+}
+
+fn unknown_device_error(
+    requested: &str,
+    devices: &[polyscribe_core::capture::CaptureDevice],
+) -> anyhow::Error {
+    let mut names: Vec<String> = devices
+        .iter()
+        .map(|device| polyscribe_core::ui::escape_terminal_controls(&device.name))
+        .collect();
     names.sort_unstable();
-    Err(anyhow!(
-        "there is no capture source named '{requested}'. The sources of the session are: {}",
+    anyhow!(
+        "there is no capture source named '{}'. The sources of the session are: {}",
+        polyscribe_core::ui::escape_terminal_controls(requested),
         names.join(", ")
-    ))
+    )
 }
 
 /// The model file for the given name.
@@ -369,7 +385,10 @@ fn resolve_model(name: &str) -> Result<PathBuf> {
         return Ok(path);
     }
     if name.contains('/') {
-        return Err(anyhow!("the model file does not exist: {}", path.display()));
+        return Err(anyhow!(
+            "the model file does not exist: {}",
+            polyscribe_core::ui::terminal_safe_path(&path)
+        ));
     }
     let in_models_dir = polyscribe_core::models_dir_path().join(name);
     if in_models_dir.is_file() {
@@ -382,7 +401,8 @@ fn resolve_model(name: &str) -> Result<PathBuf> {
         }
     }
     Err(anyhow!(
-        "the model '{name}' was not found. Give the path of a model file, or install one with 'polyscribe models add'."
+        "the model '{}' was not found. Give the path of a model file, or install one with 'polyscribe models add'.",
+        polyscribe_core::ui::escape_terminal_controls(name)
     ))
 }
 
@@ -418,7 +438,10 @@ impl SegmentWriter {
                     .truncate(true)
                     .open(&path)
                     .with_context(|| {
-                        format!("the output file could not be opened: {}", path.display())
+                        format!(
+                            "the output file could not be opened: {}",
+                            polyscribe_core::ui::terminal_safe_path(&path)
+                        )
                     })?;
                 Some(file)
             }
@@ -487,5 +510,27 @@ mod tests {
     #[test]
     fn the_window_is_checked() {
         assert!(LiveWindowPolicy::new(5.0).window_samples() > 0);
+    }
+
+    #[test]
+    fn a_missing_bare_model_name_is_safe_to_print() {
+        let name = "missing\u{1b}]52;c;aGVsbG8=\u{7}.bin";
+        let error = resolve_model(name).unwrap_err().to_string();
+        assert!(!error.contains('\u{1b}'));
+        assert!(!error.contains('\u{7}'));
+        assert!(error.contains("missing\\u{1b}]52;c;aGVsbG8=\\u{7}.bin"));
+    }
+
+    #[test]
+    fn an_unknown_device_error_escapes_pipewire_node_names() {
+        let device = polyscribe_core::capture::CaptureDevice {
+            name: "source\u{1b}]52;c;aGVsbG8=\u{7}".to_string(),
+            description: "source".to_string(),
+            media_class: "Audio/Source".to_string(),
+        };
+        let error = unknown_device_error("missing", &[device]).to_string();
+        assert!(!error.contains('\u{1b}'));
+        assert!(!error.contains('\u{7}'));
+        assert!(error.contains("source\\u{1b}]52;c;aGVsbG8=\\u{7}"));
     }
 }

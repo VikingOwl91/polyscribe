@@ -54,7 +54,9 @@ fn free_space_bytes_for_path(path: &Path) -> Result<u64> {
     unsafe {
         let mut s: libc::statvfs = std::mem::zeroed();
         if statvfs(cpath.as_ptr(), &mut s) != 0 {
-            return Err(anyhow!("statvfs failed for {}", dir.display()).into());
+            return Err(
+                anyhow!("statvfs failed for {}", crate::ui::terminal_safe_path(dir)).into(),
+            );
         }
         // c_ulong is u32 on 32-bit platforms, so the widening cast is needed there.
         #[allow(clippy::unnecessary_cast)]
@@ -508,7 +510,12 @@ fn save_manifest_to_cache(
         .write(true)
         .truncate(true)
         .open(&cache_path)
-        .with_context(|| format!("opening cache file {}", cache_path.display()))?;
+        .with_context(|| {
+            format!(
+                "opening cache file {}",
+                crate::ui::terminal_safe_path(&cache_path)
+            )
+        })?;
 
     serde_json::to_writer_pretty(cache_file, &cached)
         .with_context(|| "serializing cached manifest")?;
@@ -692,7 +699,10 @@ pub fn ensure_model_available_noninteractive(name: &str) -> Result<PathBuf> {
     let dest = dir.join(&entry.file);
 
     if file_matches(&dest, entry.size, entry.sha256.as_deref())? {
-        crate::ui::info(format!("Already up to date: {}", dest.display()));
+        crate::ui::info(format!(
+            "Already up to date: {}",
+            crate::ui::terminal_safe_path(&dest)
+        ));
         return Ok(dest);
     }
 
@@ -707,6 +717,22 @@ pub fn ensure_model_available_noninteractive(name: &str) -> Result<PathBuf> {
     ));
 
     download_with_progress(&dest, &entry)?;
+
+    // Keep the interactive downloader and `models ls` in sync: register the
+    // freshly downloaded file in the same manifest that `models ls` reads.
+    // Registration is local metadata only and does not download the model
+    // again.
+    let mm: crate::model_manager::ModelManager<crate::model_manager::ReqwestClient> =
+        crate::model_manager::ModelManager::new(crate::model_manager::Settings::default())?;
+    mm.register_local_model(
+        &entry.name,
+        &ConfigService::hf_repo(),
+        &entry.file,
+        None,
+        entry.size,
+        entry.sha256.clone(),
+    )?;
+
     Ok(dest)
 }
 
@@ -749,7 +775,8 @@ fn file_matches(path: &Path, size: Option<u64>, sha256_hex: Option<&str>) -> Res
     }
 
     if let Some(exp_hash) = sha256_hex {
-        let mut f = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+        let mut f = File::open(path)
+            .with_context(|| format!("opening {}", crate::ui::terminal_safe_path(path)))?;
         let mut hasher = Sha256::new();
         let mut buf = vec![0u8; 1024 * 1024];
         loop {
@@ -765,7 +792,8 @@ fn file_matches(path: &Path, size: Option<u64>, sha256_hex: Option<&str>) -> Res
     }
 
     if let Some(expected) = size {
-        let meta = fs::metadata(path).with_context(|| format!("stat {}", path.display()))?;
+        let meta = fs::metadata(path)
+            .with_context(|| format!("stat {}", crate::ui::terminal_safe_path(path)))?;
         return Ok(meta.len() == expected);
     }
 
@@ -801,7 +829,10 @@ fn download_with_progress(dest_path: &Path, entry: &ModelEntry) -> Result<()> {
     }
 
     if dest_path.exists() && file_matches(dest_path, total_len, entry.sha256.as_deref())? {
-        crate::ui::info(format!("Already up to date: {}", dest_path.display()));
+        crate::ui::info(format!(
+            "Already up to date: {}",
+            crate::ui::terminal_safe_path(dest_path)
+        ));
         return Ok(());
     }
 
@@ -839,7 +870,7 @@ fn download_with_progress(dest_path: &Path, entry: &ModelEntry) -> Result<()> {
         .read(true)
         .append(true)
         .open(&part_path)
-        .with_context(|| format!("opening {}", part_path.display()))?;
+        .with_context(|| format!("opening {}", crate::ui::terminal_safe_path(&part_path)))?;
 
     let mut req = client.get(url);
     if ranges_ok && resume_from > 0 {
@@ -849,7 +880,10 @@ fn download_with_progress(dest_path: &Path, entry: &ModelEntry) -> Result<()> {
         }
     }
 
-    crate::ui::info(format!("Download: {}", part_path.display()));
+    crate::ui::info(format!(
+        "Download: {}",
+        crate::ui::terminal_safe_path(&part_path)
+    ));
 
     let pb_total = total_len.unwrap_or(0);
     let mut bar = crate::ui::BytesProgress::start(pb_total, "Downloading", resume_from);
@@ -877,7 +911,7 @@ fn download_with_progress(dest_path: &Path, entry: &ModelEntry) -> Result<()> {
             .read(true)
             .append(true)
             .open(&part_path)
-            .with_context(|| format!("opening {}", part_path.display()))?;
+            .with_context(|| format!("opening {}", crate::ui::terminal_safe_path(&part_path)))?;
     }
 
     {
@@ -926,8 +960,13 @@ fn download_with_progress(dest_path: &Path, entry: &ModelEntry) -> Result<()> {
         fs::create_dir_all(parent).ok();
     }
     drop(part_file);
-    fs::rename(&part_path, dest_path)
-        .with_context(|| format!("renaming {} → {}", part_path.display(), dest_path.display()))?;
+    fs::rename(&part_path, dest_path).with_context(|| {
+        format!(
+            "renaming {} → {}",
+            crate::ui::terminal_safe_path(&part_path),
+            crate::ui::terminal_safe_path(dest_path)
+        )
+    })?;
     _tmp_guard.disarm();
 
     let final_size = fs::metadata(dest_path).map(|m| m.len()).ok();
@@ -939,7 +978,7 @@ fn download_with_progress(dest_path: &Path, entry: &ModelEntry) -> Result<()> {
             let rate = mib / elapsed;
             crate::ui::success(format!(
                 "Saved: {} ({}) in {:.1}s, {:.1} MiB/s",
-                dest_path.display(),
+                crate::ui::terminal_safe_path(dest_path),
                 format_size_mb(Some(sz)),
                 elapsed,
                 rate
@@ -947,14 +986,14 @@ fn download_with_progress(dest_path: &Path, entry: &ModelEntry) -> Result<()> {
         } else {
             crate::ui::success(format!(
                 "Saved: {} ({})",
-                dest_path.display(),
+                crate::ui::terminal_safe_path(dest_path),
                 format_size_mb(Some(sz))
             ));
         }
     } else {
         crate::ui::success(format!(
             "Saved: {} ({})",
-            dest_path.display(),
+            crate::ui::terminal_safe_path(dest_path),
             format_size_mb(None)
         ));
     }
@@ -1115,7 +1154,8 @@ pub fn update_local_models() -> Result<()> {
     let mut updated = 0usize;
     let mut up_to_date = 0usize;
 
-    let rd = fs::read_dir(&dir).with_context(|| format!("reading models dir {}", dir.display()))?;
+    let rd = fs::read_dir(&dir)
+        .with_context(|| format!("reading models dir {}", crate::ui::terminal_safe_path(&dir)))?;
     let entries: Vec<_> = rd.flatten().collect();
 
     if entries.is_empty() {
@@ -1149,7 +1189,7 @@ pub fn update_local_models() -> Result<()> {
             let Some(mut m) = manifest_entry.take() else {
                 ui::warn(format!(
                     "Skipping unknown local model (not in online manifest): {}",
-                    path.display()
+                    crate::ui::terminal_safe_path(&path)
                 ));
                 continue;
             };
@@ -1170,7 +1210,7 @@ pub fn update_local_models() -> Result<()> {
             };
 
             if target_path.exists() && file_matches(&target_path, m.size, m.sha256.as_deref())? {
-                crate::dlog!(1, "OK: {}", target_path.display());
+                crate::dlog!(1, "OK: {}", crate::ui::terminal_safe_path(&target_path));
                 up_to_date += 1;
                 continue;
             }
@@ -1181,7 +1221,7 @@ pub fn update_local_models() -> Result<()> {
             } else if !target_path.exists() {
                 crate::ilog!("Fetching latest for '{}' -> {}", file_name, m.file);
             } else {
-                crate::ilog!("Refreshing {}", target_path.display());
+                crate::ilog!("Refreshing {}", crate::ui::terminal_safe_path(&target_path));
             }
 
             download_with_progress(&target_path, &m)?;
