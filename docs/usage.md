@@ -105,6 +105,8 @@ polyscribe youtube [OPTIONS] <URL>
 | `--format <FORMAT>` | `txt` | Select one output format: `txt`, `srt`, or `json` (lowercase). |
 | `-o`, `--output <OUTPUT>` | stdout | Write the selected format to this file instead of stdout. |
 | `--refresh` | off | Ignore a cached transcript, fetch audio, and transcribe again. The new result is cached when caching is available. |
+| `--cookies <FILE>` | auto-discover `youtube/cookies.txt` in the app config directory | Override the stored Netscape-format YouTube cookie file. On Unix, cached transcripts are scoped to the selected file version. |
+| `--no-cookies` | off | Skip cookie discovery and run anonymously with ordinary caching. Conflicts with `--cookies`. |
 | `--prefer-manual` | on | Deprecated compatibility flag. No effect; captions are not used. |
 | `--audio-only` | off | Compatibility alias. Audio is already the default. |
 | `--captions-only` | off | Unsupported. Fails before any network or process invocation. It conflicts with `--audio-only`. |
@@ -122,9 +124,38 @@ polyscribe youtube 'https://youtu.be/VIDEO_ID' --language de --format srt -o tal
 
 # JSON to stdout, ignoring the cached transcript
 polyscribe youtube 'https://www.youtube.com/watch?v=VIDEO_ID' --format json --refresh
+
+# Explicit cookie file for a YouTube authentication/bot challenge
+polyscribe youtube 'https://www.youtube.com/shorts/VIDEO_ID' --cookies /path/to/cookies.txt
 ```
 
 `--json` is a global output/logging option and does not change `--format`. For JSON transcript content, use `--format json`.
+
+### Set up YouTube cookies once
+
+On Linux, PolyScribe automatically uses `$XDG_CONFIG_HOME/polyscribe/youtube/cookies.txt`, or `~/.config/polyscribe/youtube/cookies.txt` when `XDG_CONFIG_HOME` is unset or not absolute. The discovered filename must be exactly **`cookies.txt`**. The installed binary's location and current working directory do not affect discovery. `--cookies FILE` overrides this default; `--no-cookies` skips it entirely. No cookie file is shipped with PolyScribe.
+
+To export a YouTube session:
+
+1. Install [Get cookies.txt LOCALLY for Chromium](https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc) or [cookies.txt for Firefox](https://addons.mozilla.org/en-US/firefox/addon/cookies-txt/), and allow the extension in private/incognito windows. These are the extensions linked by [yt-dlp's FAQ](https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp).
+2. Open a fresh private/incognito window, visit YouTube, and complete the required verification or sign-in.
+3. In the same tab, visit `https://www.youtube.com/robots.txt`. Keep it as the only tab in that private session.
+4. Export only `youtube.com` cookies in **Netscape** format, saving them as **`cookies.txt`**. Do not choose JSON or an export of all sites.
+5. Close that private session without signing out first, and do not reopen the exported session. This follows [yt-dlp's cookie-export procedure](https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies) to reduce cookie rotation.
+
+Install the exported file with owner-only permissions. These commands work in Bash and Fish and use the default Linux location:
+
+```sh
+install -d -m 700 ~/.config/polyscribe/youtube
+install -m 600 ./cookies.txt ~/.config/polyscribe/youtube/cookies.txt
+polyscribe youtube 'https://www.youtube.com/shorts/VIDEO_ID'
+```
+
+If you set `XDG_CONFIG_HOME`, use that directory in place of `~/.config`. Cookie discovery never creates directories or changes permissions. The `youtube` directory must belong to your user and allow no group/other access (`0700` recommended). The cookie file must be a user-owned regular file with no group/other permissions (`0600` recommended; `0400` also works). Discovery rejects symlinks anywhere in the path, an app config directory owned by another user, and writable parent directories, except root-owned sticky directories such as `/tmp`. Use `--cookies FILE` for an explicitly chosen path when automatic discovery cannot safely resolve your layout. Explicit paths retain their existing regular-file/size checks and may follow symlinks.
+
+A missing default file means anonymous operation. An existing unsafe, unreadable, empty, or invalid file produces an error instead of silently switching to anonymous access. A short stderr message reports when stored cookies are selected; cookie contents are never printed. Automatic discovery uses Unix ownership and permissions; non-Unix platforms retain explicit `--cookies` support without automatic discovery. Linux is the tested platform.
+
+Treat `cookies.txt` as a session credential: keep it out of repositories, shared folders, and unencrypted backups, and remove unnecessary export copies after installation. File permissions do not protect it from other processes running as your user. Cookies can expire or still fail verification; replace the export when authentication fails. [yt-dlp also warns of account restrictions when using an account for downloads](https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies). PolyScribe never refreshes cookies from your browser automatically.
 
 ### Output and errors
 
@@ -134,12 +165,20 @@ Common failures are reported on stderr with a category such as `invalid_url`, `i
 
 - Invalid URL or language: use a supported HTTPS YouTube URL and omit `--language` for automatic selection.
 - `yt-dlp` unavailable: install it and put it on `PATH`, or set `POLYSCRIBE_YTDLP` to its file path.
+- `authentication_required`: YouTube requires bot verification. Install or replace the stored `cookies.txt`, or supply `--cookies FILE`; `--refresh` only bypasses the transcript cache. See [cookie setup](#set-up-youtube-cookies-once).
+- `invalid_cookies`: supply a readable, nonempty regular file in Netscape format, at most 4 MiB.
 - HTTP 403/429 or another download error: check that the video is available to your network/account and try again later. PolyScribe does not start transcription after a download failure and does not retry through captions.
 - Voxtral failure followed by a Whisper error: install a Whisper model or point `WHISPER_MODEL` at a valid local model. See [Whisper model lookup](#whisper-model-lookup).
 - Unsupported caption mode: remove `--captions-only`; caption transcription is not implemented.
 - Invalid output path or unwritable destination: use a path without `..` components or control characters and ensure its parent directory exists and is writable.
 
 ### Cache behavior and invalidation
+
+On Unix, explicit and automatically discovered cookies both support transcript caching. The selected cookie file is validated and captured before cache lookup. Its device, inode, size, modification time and change time separate its cache entries from anonymous requests and other cookie-file versions. Cookie contents, paths, and content-derived hashes are never saved in the cache. Changing or replacing the cookie file invalidates reuse; explicit and automatic selection of the same unchanged file share results. `--no-cookies` selects the anonymous cache, leaving authenticated entries separate. Non-Unix builds continue to bypass authenticated caching because a sufficiently precise file identity is not implemented there.
+
+Authenticated transcripts, including any account-restricted content, are stored in the existing protected local cache as plaintext. Cache hits do not contact YouTube or recheck current account authorization; they report `Using cached YouTube transcript.` Use `--refresh` to acquire a fresh result. Existing anonymous entries remain reusable.
+
+On a cache miss, PolyScribe gives yt-dlp a private temporary copy of the captured cookie bytes, shared by the metadata and audio requests. The original is never modified, and PolyScribe does not automatically access browser cookies or load yt-dlp configuration. The temporary copy is removed on normal completion and handled errors; the signal-cleanup limitation below also applies to cookies. Transcripts can still be explicitly saved with `-o`.
 
 YouTube transcripts are stored under `$XDG_CACHE_HOME/polyscribe/youtube/v3/`, or `~/.cache/polyscribe/youtube/v3/` when `XDG_CACHE_HOME` is unset and `HOME` is available. The cached cues are reused across TXT, SRT, and JSON renders.
 

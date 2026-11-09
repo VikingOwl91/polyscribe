@@ -692,6 +692,8 @@ fn main() -> Result<()> {
             output,
             prefer_manual,
             refresh,
+            cookies,
+            no_cookies,
             captions_only,
             audio_only,
         } => youtube::run(
@@ -701,6 +703,8 @@ fn main() -> Result<()> {
             output,
             prefer_manual,
             refresh,
+            cookies,
+            no_cookies,
             captions_only,
             audio_only,
         ),

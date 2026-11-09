@@ -3,7 +3,7 @@
 //! Cache-first YouTube audio acquisition and local transcription.
 
 use std::ffi::OsString;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,11 +21,10 @@ use polyscribe_core::youtube::{
     render_txt, validate_youtube_url,
 };
 use serde::Serialize;
-use tempfile::TempDir;
 
 use crate::youtube_cache::{
-    CACHE_SCHEMA_VERSION, CacheIdentity, CacheRecord, ExecutableIdentity, Lookup, RequestKey,
-    SourceIdentity, VideoSummary, YoutubeCache, model_stat,
+    CACHE_SCHEMA_VERSION, CacheIdentity, CacheRecord, ExecutableIdentity, Lookup, ModelStat,
+    RequestKey, SourceIdentity, VideoSummary, YoutubeCache, file_stat, model_stat,
 };
 use crate::youtube_process::{self, ProcessFailure, ProcessOutput, ProcessPolicy};
 
@@ -35,6 +34,7 @@ const AUDIO_DECODER_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 const MAX_METADATA_BYTES: usize = 50 * 1024 * 1024;
 const MAX_AUDIO_BYTES: u64 = 250 * 1024 * 1024;
 const MAX_STDERR_BYTES: usize = 32 * 1024;
+const MAX_COOKIE_BYTES: u64 = 4 * 1024 * 1024;
 const AUDIO_POLICY_VERSION: u32 = 2;
 
 struct DownloadContext<'a> {
@@ -42,6 +42,13 @@ struct DownloadContext<'a> {
     environment: &'a [(OsString, OsString)],
     directory: &'a Path,
     cache: Option<&'a YoutubeCache>,
+    cookies: Option<&'a Path>,
+}
+
+// Contains credentials: never derive Debug or serialize this buffer.
+struct PreparedCookies {
+    bytes: Vec<u8>,
+    identity: ModelStat,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -95,6 +102,8 @@ enum YouTubeErrorKind {
     ToolUnavailable,
     RateLimited,
     Forbidden,
+    AuthenticationRequired,
+    InvalidCookies,
     Network,
     Downloader,
     DownloaderTimeout,
@@ -127,6 +136,8 @@ impl std::fmt::Display for YouTubeErrorKind {
             Self::ToolUnavailable => "tool_unavailable",
             Self::RateLimited => "rate_limited",
             Self::Forbidden => "forbidden",
+            Self::AuthenticationRequired => "authentication_required",
+            Self::InvalidCookies => "invalid_cookies",
             Self::Network => "network",
             Self::Downloader => "downloader",
             Self::DownloaderTimeout => "downloader_timeout",
@@ -183,6 +194,8 @@ pub fn run(
     output: Option<PathBuf>,
     _prefer_manual: bool,
     refresh: bool,
+    cookies: Option<PathBuf>,
+    no_cookies: bool,
     captions_only: bool,
     _audio_only: bool,
 ) -> Result<()> {
@@ -205,6 +218,9 @@ pub fn run(
             "--captions-only is unsupported; YouTube transcription uses audio only",
         ));
     }
+    let cookies = select_cookies(cookies.as_deref(), no_cookies)?
+        .map(prepare_cookies)
+        .transpose()?;
     let voxtral_config = VoxtralConfigSnapshot::from_environment();
     let request = RequestKey {
         cache_schema_version: CACHE_SCHEMA_VERSION,
@@ -214,9 +230,15 @@ pub fn run(
         requested_language: language.clone(),
         voxtral_executable: voxtral_config.path_bytes.clone(),
         voxtral_executable_identity: voxtral_config.executable_stat.clone(),
+        cookie_file_identity: cookies.as_ref().map(|cookies| cookies.identity.clone()),
     };
 
-    let cache = open_cache();
+    // Unix file identity separates authenticated requests without retaining secrets.
+    let cache = if cfg!(unix) || cookies.is_none() {
+        open_cache()
+    } else {
+        None
+    };
     let cache = if voxtral_config.cache_eligible {
         cache
     } else {
@@ -229,6 +251,7 @@ pub fn run(
     if !refresh && let Some(cache) = &cache {
         match cache.lookup(&request) {
             Ok(Lookup::Hit(record)) if cache_record_is_current(&record) => {
+                polyscribe_core::ilog!("Using cached YouTube transcript.");
                 return write_transcript(
                     &source_url,
                     &yt_url.video_id,
@@ -248,13 +271,25 @@ pub fn run(
     }
 
     let ytdlp = find_ytdlp()?;
-    let scratch = TempDir::new().context("create private temporary directory for yt-dlp")?;
+    let mut scratch_builder = tempfile::Builder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        scratch_builder.permissions(std::fs::Permissions::from_mode(0o700));
+    }
+    let scratch = scratch_builder
+        .tempdir()
+        .context("create private temporary directory for yt-dlp")?;
+    let cookie_snapshot = cookies
+        .map(|cookies| snapshot_cookies(&cookies, scratch.path()))
+        .transpose()?;
     let environment = youtube_process::safe_environment(scratch.path());
     let download_context = DownloadContext {
         ytdlp: &ytdlp,
         environment: &environment,
         directory: scratch.path(),
         cache: cache.as_ref(),
+        cookies: cookie_snapshot.as_deref(),
     };
     polyscribe_core::ilog!("Fetching YouTube metadata...");
     let metadata = fetch_metadata(
@@ -262,6 +297,7 @@ pub fn run(
         &environment,
         &yt_url.video_id,
         &yt_url.canonical_url,
+        cookie_snapshot.as_deref(),
     )?;
     let record = transcribe_audio(
         &download_context,
@@ -369,8 +405,8 @@ fn find_ytdlp() -> Result<PathBuf> {
     ))
 }
 
-fn common_args() -> Vec<OsString> {
-    [
+fn common_args(cookies: Option<&Path>) -> Vec<OsString> {
+    let mut args: Vec<OsString> = [
         "--ignore-config",
         "--no-cache-dir",
         "--no-playlist",
@@ -385,7 +421,180 @@ fn common_args() -> Vec<OsString> {
     ]
     .into_iter()
     .map(OsString::from)
-    .collect()
+    .collect();
+    if let Some(path) = cookies {
+        args.extend(["--cookies".into(), path.as_os_str().to_os_string()]);
+    }
+    args
+}
+
+fn select_cookies(explicit: Option<&Path>, disabled: bool) -> Result<Option<std::fs::File>> {
+    if disabled {
+        return Ok(None);
+    }
+    if let Some(path) = explicit {
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NONBLOCK);
+        }
+        return options
+            .open(path)
+            .map(Some)
+            .map_err(|_| invalid_cookie_file());
+    }
+    let Some(dirs) = polyscribe_core::config::ConfigService::project_dirs() else {
+        return Ok(None);
+    };
+    let cookies = open_default_cookies(dirs.config_dir())?;
+    if cookies.is_some() {
+        polyscribe_core::ilog!("Using stored YouTube cookies.");
+    }
+    Ok(cookies)
+}
+
+fn invalid_cookie_file() -> anyhow::Error {
+    youtube_error(
+        YouTubeErrorKind::InvalidCookies,
+        "cookies.txt must be a readable, nonempty regular cookie file of at most 4 MiB in Netscape format",
+    )
+}
+
+fn unsafe_default_cookies() -> anyhow::Error {
+    youtube_error(
+        YouTubeErrorKind::InvalidCookies,
+        "cannot safely use stored youtube/cookies.txt: use an owned directory with mode 700 and an owned regular file with mode 600 (400 is also accepted); symlinks and writable parent directories are not allowed. Use --cookies FILE to select another file or --no-cookies to run anonymously",
+    )
+}
+
+#[cfg(unix)]
+fn open_default_cookies(config_dir: &Path) -> Result<Option<std::fs::File>> {
+    use std::ffi::{CStr, CString};
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::MetadataExt;
+
+    fn open_at(
+        directory: &std::fs::File,
+        name: &CStr,
+        flags: i32,
+    ) -> std::io::Result<std::fs::File> {
+        let fd = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(), flags) };
+        if fd < 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+        }
+    }
+
+    if !config_dir.is_absolute()
+        || config_dir
+            .components()
+            .any(|part| matches!(part, Component::ParentDir | Component::CurDir))
+    {
+        return Err(unsafe_default_cookies());
+    }
+    let flags = libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK;
+    let mut directory = std::fs::File::open("/").map_err(|_| unsafe_default_cookies())?;
+    let components: Vec<_> = config_dir
+        .components()
+        .chain([Component::Normal(std::ffi::OsStr::new("youtube"))])
+        .filter_map(|part| match part {
+            Component::Normal(name) => Some(name),
+            _ => None,
+        })
+        .collect();
+    let effective_uid = unsafe { libc::geteuid() };
+    let mut directories = Vec::new();
+    for (index, name) in components.iter().enumerate() {
+        let name = CString::new(name.as_bytes()).map_err(|_| unsafe_default_cookies())?;
+        directory = match open_at(&directory, &name, flags | libc::O_DIRECTORY) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(unsafe_default_cookies()),
+        };
+        let stat = directory.metadata().map_err(|_| unsafe_default_cookies())?;
+        directories.push((index, stat));
+    }
+    let file = match open_at(&directory, c"cookies.txt", flags) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(unsafe_default_cookies()),
+    };
+    // A missing file means anonymous operation. Validate all held descriptors
+    // before reading any credentials, without reopening a pathname.
+    for (index, stat) in directories {
+        let is_private_directory = index + 1 == components.len();
+        let is_app_directory = index + 2 == components.len();
+        let safe = if is_private_directory {
+            stat.uid() == effective_uid && stat.mode() & 0o077 == 0
+        } else if is_app_directory {
+            stat.uid() == effective_uid && stat.mode() & 0o022 == 0
+        } else {
+            (stat.uid() == effective_uid || stat.uid() == 0)
+                && (stat.mode() & 0o022 == 0
+                    || (stat.uid() == 0 && stat.mode() & libc::S_ISVTX != 0))
+        };
+        if !safe {
+            return Err(unsafe_default_cookies());
+        }
+    }
+    let stat = file.metadata().map_err(|_| unsafe_default_cookies())?;
+    if !stat.is_file() || stat.uid() != effective_uid || stat.mode() & 0o077 != 0 {
+        return Err(unsafe_default_cookies());
+    }
+    Ok(Some(file))
+}
+
+#[cfg(not(unix))]
+fn open_default_cookies(_config_dir: &Path) -> Result<Option<std::fs::File>> {
+    // Automatic credential discovery requires verified Unix ownership/permissions.
+    // Explicit --cookies remains available on platforms without these checks.
+    Ok(None)
+}
+
+fn prepare_cookies(source: std::fs::File) -> Result<PreparedCookies> {
+    let invalid = invalid_cookie_file;
+    let metadata = source.metadata().map_err(|_| invalid())?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_COOKIE_BYTES {
+        return Err(invalid());
+    }
+    let identity = file_stat(&source).map_err(|_| invalid())?;
+    let mut bytes = Vec::new();
+    (&source)
+        .take(MAX_COOKIE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| invalid())?;
+    if bytes.is_empty() || bytes.len() as u64 > MAX_COOKIE_BYTES {
+        return Err(invalid());
+    }
+    if identity != file_stat(&source).map_err(|_| invalid())? || bytes.len() as u64 != identity.size
+    {
+        return Err(youtube_error(
+            YouTubeErrorKind::InvalidCookies,
+            "cookie file changed while being read; retry after the export is complete",
+        ));
+    }
+    Ok(PreparedCookies { bytes, identity })
+}
+
+fn snapshot_cookies(cookies: &PreparedCookies, directory: &Path) -> Result<PathBuf> {
+    let invalid = invalid_cookie_file;
+    let path = directory.join("cookies.txt");
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut destination = options.open(&path).map_err(|_| invalid())?;
+    destination
+        .write_all(&cookies.bytes)
+        .map_err(|_| invalid())?;
+    Ok(path)
 }
 
 fn fetch_metadata(
@@ -393,8 +602,9 @@ fn fetch_metadata(
     environment: &[(OsString, OsString)],
     expected_video_id: &str,
     url: &str,
+    cookies: Option<&Path>,
 ) -> Result<VideoMetadata> {
-    let mut args = common_args();
+    let mut args = common_args(cookies);
     args.push("--skip-download".into());
     args.push("--dump-single-json".into());
     args.push(url.into());
@@ -454,7 +664,7 @@ fn non_empty_string(value: Option<&serde_json::Value>) -> Option<String> {
 fn download_audio(context: &DownloadContext<'_>, url: &str) -> Result<PathBuf> {
     polyscribe_core::ilog!("Downloading YouTube audio...");
     let template = context.directory.join("audio.%(ext)s");
-    let mut args = common_args();
+    let mut args = common_args(context.cookies);
     args.extend([
         "--format".into(),
         "bestaudio/best".into(),
@@ -497,6 +707,8 @@ fn wrap_audio_download_error(error: anyhow::Error) -> anyhow::Error {
             kind,
             YouTubeErrorKind::RateLimited
                 | YouTubeErrorKind::Forbidden
+                | YouTubeErrorKind::AuthenticationRequired
+                | YouTubeErrorKind::InvalidCookies
                 | YouTubeErrorKind::Network
                 | YouTubeErrorKind::ToolUnavailable
                 | YouTubeErrorKind::DownloaderTimeout
@@ -877,6 +1089,12 @@ fn ensure_success(output: &ProcessOutput, action: &str) -> Result<()> {
             format!("{action} failed: YouTube rate-limited the request")
         }
         YouTubeErrorKind::Forbidden => format!("{action} failed: YouTube denied access"),
+        YouTubeErrorKind::AuthenticationRequired => format!(
+            "{action} failed: YouTube requires bot verification; install or replace youtube/cookies.txt in the PolyScribe config directory, or provide an exported YouTube cookie file with --cookies FILE. --refresh only bypasses the transcript cache and cannot resolve this challenge"
+        ),
+        YouTubeErrorKind::InvalidCookies => {
+            format!("{action} failed: --cookies requires a cookie file in Netscape format")
+        }
         YouTubeErrorKind::Network => {
             format!("{action} failed: network error while contacting YouTube")
         }
@@ -887,7 +1105,15 @@ fn ensure_success(output: &ProcessOutput, action: &str) -> Result<()> {
 
 fn classify_downloader_youtube_error(stderr: &str) -> YouTubeErrorKind {
     let lowercase = stderr.to_ascii_lowercase();
-    if lowercase.contains("http error 429")
+    if lowercase.contains("does not look like a netscape format cookies file")
+        || lowercase.contains("cookies file must be netscape formatted")
+    {
+        YouTubeErrorKind::InvalidCookies
+    } else if lowercase.contains("sign in to confirm you’re not a bot")
+        || lowercase.contains("sign in to confirm you're not a bot")
+    {
+        YouTubeErrorKind::AuthenticationRequired
+    } else if lowercase.contains("http error 429")
         || lowercase.contains("too many requests")
         || lowercase.contains("status code 429")
     {
@@ -1040,6 +1266,27 @@ fn validate_output_path(path: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn cookie_snapshot_keeps_the_prepared_bytes_and_identity_after_source_changes() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source-cookies.txt");
+        let original = "# Netscape HTTP Cookie File\n# synthetic-original\n";
+        std::fs::write(&source, original).unwrap();
+        let prepared = prepare_cookies(std::fs::File::open(&source).unwrap()).unwrap();
+        std::fs::write(
+            &source,
+            "# Netscape HTTP Cookie File\n# synthetic-replacement-longer\n",
+        )
+        .unwrap();
+        assert_ne!(
+            prepared.identity,
+            file_stat(&std::fs::File::open(&source).unwrap()).unwrap()
+        );
+        let snapshot = snapshot_cookies(&prepared, directory.path()).unwrap();
+        assert_eq!(std::fs::read_to_string(snapshot).unwrap(), original);
+        assert_eq!(prepared.identity.size, original.len() as u64);
+    }
+
     #[cfg(unix)]
     #[test]
     fn voxtral_timeout_invokes_the_whisper_fallback_once() {
@@ -1114,7 +1361,7 @@ mod tests {
 
     #[test]
     fn downloader_disables_caption_writes_and_retries() {
-        let args: Vec<String> = common_args()
+        let args: Vec<String> = common_args(None)
             .into_iter()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect();
@@ -1184,6 +1431,8 @@ mod tests {
             "\u{1b}]52;c;aGVsbG8=\u{7}".to_string(),
             None,
             true,
+            false,
+            None,
             false,
             false,
             false,

@@ -78,6 +78,8 @@ polyscribe record
 
 YouTube transcription needs network access to YouTube and a working `yt-dlp` installation. HTTP 403/429 responses and other download failures stop before transcription. See the [CLI usage guide](docs/usage.md#youtube) for cache identity, limits, errors, and options.
 
+If YouTube requests bot verification, install a Netscape-format export as `~/.config/polyscribe/youtube/cookies.txt` (or below `$XDG_CONFIG_HOME`). Use directory mode `0700` and file mode `0600`. PolyScribe automatically uses this file through a temporary copy. On Unix, transcripts are cached separately for each cookie-file version; repeat requests reuse the transcript without downloading or transcribing again. `--cookies /path/to/cookies.txt` overrides the stored file; `--no-cookies` selects the anonymous cache. See [cookie export and setup](docs/usage.md#set-up-youtube-cookies-once). PolyScribe never reads browser cookies automatically.
+
 ## Optional Voxtral integration and Whisper fallback
 
 Voxtral is not bundled or installed by PolyScribe. To use it, set `POLYSCRIBE_VOXTRAL` to an absolute path to a local executable that implements PolyScribe's protocol-v1 wrapper contract. When configured, PolyScribe tries that executable first. If it is unset, times out, exits unsuccessfully, or returns invalid output, PolyScribe makes one local Whisper attempt with the same downloaded audio.

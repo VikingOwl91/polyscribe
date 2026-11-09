@@ -169,6 +169,14 @@ pub enum Commands {
         #[arg(long)]
         refresh: bool,
 
+        /// Cookie file override. Otherwise use the config directory's youtube/cookies.txt.
+        #[arg(long, value_name = "FILE", conflicts_with = "no_cookies")]
+        cookies: Option<PathBuf>,
+
+        /// Ignore stored cookies and run anonymously, with transcript caching.
+        #[arg(long)]
+        no_cookies: bool,
+
         /// Unsupported. YouTube transcription uses audio only.
         #[arg(long, conflicts_with = "audio_only")]
         captions_only: bool,

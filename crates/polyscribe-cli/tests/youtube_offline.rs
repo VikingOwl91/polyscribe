@@ -224,6 +224,489 @@ fn assert_no_caption_arguments(calls: &[ProcessCall]) {
     }
 }
 
+#[test]
+fn cookies_use_a_private_mutable_snapshot_and_a_separate_transcript_cache() {
+    let root = tempfile::tempdir().unwrap();
+    let (base, downloader_log) = fake_downloader(root.path(), METADATA_WITH_CAPTIONS, None);
+    let (voxtral, voxtral_log) = fake_voxtral(root.path(), true);
+    let original = root.path().join("original cookies.txt");
+    let fixture =
+        "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t0\tfixture\tsynthetic-secret\n";
+    std::fs::write(&original, fixture).unwrap();
+
+    let warm = run_with_voxtral(root.path(), &base, &[], Some(&voxtral));
+    assert!(warm.status.success());
+    let cache_count = cache_json_count(root.path());
+    for call in downloader_calls(&downloader_log) {
+        assert!(!call.args.iter().any(|arg| arg == "--cookies"));
+    }
+    // Explicit selection must override even an unsafe default.
+    let default = install_default_cookies(root.path());
+    std::fs::set_permissions(default, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    let wrapper = root.path().join("cookie-checking-downloader");
+    write_executable(
+        &wrapper,
+        &format!(
+            r#"#!/bin/sh
+set -eu
+cookies=''
+phase=audio
+want_cookie=0
+for arg do
+  if [ "$want_cookie" -eq 1 ]; then cookies=$arg; want_cookie=0; fi
+  if [ "$arg" = '--cookies' ]; then want_cookie=1; fi
+  if [ "$arg" = '--dump-single-json' ]; then phase=metadata; fi
+done
+[ -n "$cookies" ]
+[ "$cookies" != {original} ]
+[ "$(stat -c %a "$cookies")" = 600 ]
+[ "$(stat -c %a "$(dirname "$cookies")")" = 700 ]
+if [ "$phase" = metadata ]; then
+  cmp "$cookies" {original}
+  printf '\n# updated\n' >> "$cookies"
+else
+  [ "$(tail -n 1 "$cookies")" = '# updated' ]
+fi
+exec {base} "$@"
+"#,
+            original = quote(&original),
+            base = quote(&base)
+        ),
+    );
+
+    for _ in 0..2 {
+        let result = run_with_voxtral(
+            root.path(),
+            &wrapper,
+            &["--cookies", original.to_str().unwrap()],
+            Some(&voxtral),
+        );
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(!String::from_utf8_lossy(&result.stderr).contains("synthetic-secret"));
+        assert_eq!(std::fs::read_to_string(&original).unwrap(), fixture);
+        assert_eq!(cache_json_count(root.path()), cache_count + 2);
+    }
+    let calls = downloader_calls(&downloader_log);
+    assert_eq!(calls.len(), 4);
+    for pair in calls[2..].chunks_exact(2) {
+        let metadata_snapshot = argument_after(&pair[0], "--cookies");
+        assert_eq!(metadata_snapshot, argument_after(&pair[1], "--cookies"));
+        assert!(!Path::new(metadata_snapshot).exists());
+        assert!(!Path::new(metadata_snapshot).parent().unwrap().exists());
+    }
+    let cached = run_with_voxtral(root.path(), &base, &["--no-cookies"], Some(&voxtral));
+    assert!(cached.status.success());
+    assert_eq!(cached.stdout, warm.stdout);
+    assert_eq!(downloader_calls(&downloader_log).len(), 4);
+    assert_eq!(log_records(&voxtral_log).len(), 2);
+}
+
+fn install_default_cookies(root: &Path) -> PathBuf {
+    let directory = root.join("config/polyscribe/youtube");
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let path = directory.join("cookies.txt");
+    std::fs::write(
+        &path,
+        "# Netscape HTTP Cookie File\n# synthetic-default-cookie\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    path
+}
+
+#[test]
+fn default_cookies_are_discovered_before_cache_lookup_and_can_be_disabled() {
+    let root = tempfile::tempdir().unwrap();
+    let (downloader, log) = fake_downloader(root.path(), METADATA_WITH_CAPTIONS, None);
+    let (voxtral, voxtral_log) = fake_voxtral(root.path(), true);
+    let anonymous = run_with_voxtral(root.path(), &downloader, &[], Some(&voxtral));
+    assert!(anonymous.status.success());
+    let count = cache_json_count(root.path());
+    let original = install_default_cookies(root.path());
+    let fixture = std::fs::read(&original).unwrap();
+    for mode in [0o600, 0o400] {
+        std::fs::set_permissions(&original, std::fs::Permissions::from_mode(mode)).unwrap();
+        for format in ["txt", "srt", "json"] {
+            let result = run_with_voxtral(
+                root.path(),
+                &downloader,
+                &["--format", format],
+                Some(&voxtral),
+            );
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            if format != "txt" {
+                assert!(
+                    String::from_utf8_lossy(&result.stderr)
+                        .contains("Using cached YouTube transcript")
+                );
+            }
+        }
+    }
+    let calls = downloader_calls(&log);
+    assert_eq!(
+        calls.len(),
+        6,
+        "unchanged default cookies must reuse the authenticated cache"
+    );
+    for pair in calls[2..].chunks_exact(2) {
+        let snapshot = argument_after(&pair[0], "--cookies");
+        assert_eq!(snapshot, argument_after(&pair[1], "--cookies"));
+        assert_ne!(Path::new(snapshot), original);
+        assert!(!Path::new(snapshot).exists());
+    }
+    assert_eq!(std::fs::read(&original).unwrap(), fixture);
+    assert_eq!(cache_json_count(root.path()), count + 4);
+    let explicit = run_with_voxtral(
+        root.path(),
+        &downloader,
+        &["--cookies", original.to_str().unwrap()],
+        Some(&voxtral),
+    );
+    assert!(explicit.status.success());
+    assert!(String::from_utf8_lossy(&explicit.stderr).contains("Using cached YouTube transcript"));
+    let opted_out = run_with_voxtral(root.path(), &downloader, &["--no-cookies"], Some(&voxtral));
+    assert!(opted_out.status.success());
+    assert_eq!(opted_out.stdout, anonymous.stdout);
+    assert_eq!(downloader_calls(&log).len(), 6);
+    assert_eq!(log_records(&voxtral_log).len(), 3);
+}
+
+#[test]
+fn unsafe_default_cookies_fail_closed_but_opt_out_still_works() {
+    for case in [
+        "file_mode",
+        "directory_mode",
+        "app_mode",
+        "empty",
+        "oversized",
+        "symlink",
+        "dangling_symlink",
+        "directory_symlink",
+        "dangling_directory_symlink",
+        "fifo",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let path = install_default_cookies(root.path());
+        let directory = path.parent().unwrap();
+        match case {
+            "file_mode" => {
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap()
+            }
+            "directory_mode" => {
+                std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o755)).unwrap()
+            }
+            "app_mode" => std::fs::set_permissions(
+                directory.parent().unwrap(),
+                std::fs::Permissions::from_mode(0o777),
+            )
+            .unwrap(),
+            "empty" => std::fs::write(&path, "").unwrap(),
+            "oversized" => std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_len(4 * 1024 * 1024 + 1)
+                .unwrap(),
+            "symlink" | "dangling_symlink" => {
+                let target = root.path().join("elsewhere");
+                std::fs::rename(&path, &target).unwrap();
+                if case == "dangling_symlink" {
+                    std::fs::remove_file(&target).unwrap();
+                }
+                std::os::unix::fs::symlink(target, &path).unwrap();
+            }
+            "directory_symlink" | "dangling_directory_symlink" => {
+                let target = root.path().join("elsewhere");
+                std::fs::rename(directory, &target).unwrap();
+                if case == "dangling_directory_symlink" {
+                    std::fs::remove_dir_all(&target).unwrap();
+                }
+                std::os::unix::fs::symlink(target, directory).unwrap();
+            }
+            "fifo" => {
+                std::fs::remove_file(&path).unwrap();
+                let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+                assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+            }
+            _ => unreachable!(),
+        }
+        let (downloader, log) = fake_downloader(root.path(), METADATA_WITH_CAPTIONS, None);
+        let result = run_with_voxtral(root.path(), &downloader, &[], None);
+        assert!(!result.status.success(), "{case}");
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(stderr.contains("invalid_cookies"), "{case}: {stderr}");
+        assert!(!stderr.contains("synthetic-default-cookie"));
+        assert!(result.stdout.is_empty());
+        assert!(downloader_calls(&log).is_empty(), "{case}");
+        let (voxtral, _) = fake_voxtral(root.path(), true);
+        let anonymous =
+            run_with_voxtral(root.path(), &downloader, &["--no-cookies"], Some(&voxtral));
+        assert!(anonymous.status.success(), "{case}");
+        for call in downloader_calls(&log) {
+            assert!(!call.args.iter().any(|arg| arg == "--cookies"));
+        }
+    }
+}
+
+#[test]
+fn cookie_flags_conflict_before_any_downloader_invocation() {
+    let root = tempfile::tempdir().unwrap();
+    let (downloader, log) = fake_downloader(root.path(), METADATA_WITH_CAPTIONS, None);
+    let result = run_with_voxtral(
+        root.path(),
+        &downloader,
+        &["--cookies", "cookies.txt", "--no-cookies"],
+        None,
+    );
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("cannot be used with"));
+    assert!(downloader_calls(&log).is_empty());
+}
+
+#[test]
+fn missing_default_never_discovers_other_cookie_files() {
+    for case in [
+        "no_config",
+        "no_youtube",
+        "no_file",
+        "wrong_name",
+        "cwd_only",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        if case == "no_youtube" {
+            std::fs::create_dir_all(root.path().join("config/polyscribe")).unwrap();
+        } else if case == "no_file" || case == "wrong_name" {
+            let path = install_default_cookies(root.path());
+            if case == "wrong_name" {
+                std::fs::rename(&path, path.with_file_name("Cookies.txt")).unwrap();
+            } else {
+                std::fs::remove_file(&path).unwrap();
+                std::fs::set_permissions(
+                    path.parent().unwrap(),
+                    std::fs::Permissions::from_mode(0o755),
+                )
+                .unwrap();
+            }
+        } else if case == "cwd_only" {
+            std::fs::write(
+                root.path().join("cookies.txt"),
+                "# synthetic-unselected-cookie\n",
+            )
+            .unwrap();
+        }
+        let (downloader, log) = fake_downloader(root.path(), METADATA_WITH_CAPTIONS, None);
+        let (voxtral, _) = fake_voxtral(root.path(), true);
+        let result = run_with_voxtral(root.path(), &downloader, &[], Some(&voxtral));
+        assert!(
+            result.status.success(),
+            "{case}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        for call in downloader_calls(&log) {
+            assert!(!call.args.iter().any(|arg| arg == "--cookies"), "{case}");
+        }
+    }
+}
+
+#[test]
+fn cookie_discovery_falls_back_to_home_for_unset_or_relative_xdg_config() {
+    let root = tempfile::tempdir().unwrap();
+    let path = install_default_cookies(root.path());
+    let home_config = root.path().join(".config/polyscribe");
+    std::fs::create_dir_all(&home_config).unwrap();
+    std::fs::rename(path.parent().unwrap(), home_config.join("youtube")).unwrap();
+    let (downloader, log) = fake_downloader(root.path(), METADATA_WITH_CAPTIONS, None);
+    let (voxtral, _) = fake_voxtral(root.path(), true);
+    for relative_xdg in [false, true] {
+        let mut command = Command::new(bin());
+        command
+            .args(["youtube", URL])
+            .current_dir(root.path())
+            .env("HOME", root.path())
+            .env("POLYSCRIBE_YTDLP", &downloader)
+            .env("POLYSCRIBE_VOXTRAL", &voxtral)
+            .env("XDG_CACHE_HOME", root.path().join("cache"))
+            .env("XDG_DATA_HOME", root.path().join("data"))
+            .env_remove("XDG_CONFIG_HOME");
+        if relative_xdg {
+            command.env("XDG_CONFIG_HOME", "relative-config");
+        }
+        let result = command.output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+    let calls = downloader_calls(&log);
+    assert_eq!(calls.len(), 2);
+    for call in calls {
+        assert!(!Path::new(argument_after(&call, "--cookies")).exists());
+    }
+    assert_eq!(cache_json_count(root.path()), 2);
+}
+
+#[test]
+fn authenticated_cache_invalidates_for_cookie_file_changes_and_refresh() {
+    use sha2::Digest;
+    let root = tempfile::tempdir().unwrap();
+    let original = install_default_cookies(root.path());
+    let original_bytes = std::fs::read(&original).unwrap();
+    let (downloader, log) = fake_downloader(root.path(), METADATA_WITH_CAPTIONS, None);
+    let (voxtral, _) = fake_voxtral(root.path(), true);
+    let run = |path: &Path, refresh: bool| {
+        let mut args = vec!["--cookies", path.to_str().unwrap()];
+        if refresh {
+            args.push("--refresh");
+        }
+        let result = run_with_voxtral(root.path(), &downloader, &args, Some(&voxtral));
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    };
+    run(&original, false);
+    run(&original, false);
+    assert_eq!(downloader_calls(&log).len(), 2);
+    let other = root.path().join("other-cookies.txt");
+    std::fs::write(&other, &original_bytes).unwrap();
+    run(&other, false);
+    assert_eq!(
+        downloader_calls(&log).len(),
+        4,
+        "same contents in a different file must not share auth cache"
+    );
+    run(&original, false);
+    assert_eq!(downloader_calls(&log).len(), 4);
+    // Replacing the same pathname must invalidate even with identical bytes.
+    std::fs::rename(&other, &original).unwrap();
+    run(&original, false);
+    assert_eq!(downloader_calls(&log).len(), 6);
+    let rewritten = String::from_utf8(original_bytes.clone())
+        .unwrap()
+        .replace("default", "changed");
+    assert_eq!(rewritten.len(), original_bytes.len());
+    std::fs::write(&original, rewritten).unwrap();
+    run(&original, false);
+    assert_eq!(
+        downloader_calls(&log).len(),
+        8,
+        "equal-length in-place changes must invalidate"
+    );
+    run(&original, false);
+    assert_eq!(downloader_calls(&log).len(), 8);
+    run(&original, true);
+    assert_eq!(downloader_calls(&log).len(), 10);
+    run(&original, false);
+    assert_eq!(downloader_calls(&log).len(), 10);
+    for entry in std::fs::read_dir(root.path().join("cache/polyscribe/youtube/v3")).unwrap() {
+        let entry = entry.unwrap();
+        let bytes = std::fs::read(entry.path()).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(!text.contains("synthetic-default-cookie"));
+        assert!(!text.contains("synthetic-changed-cookie"));
+        assert!(!text.contains(original.to_str().unwrap()));
+        assert!(!text.contains(&format!("{:x}", sha2::Sha256::digest(&original_bytes))));
+        assert_eq!(
+            std::fs::metadata(entry.path())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+}
+
+#[test]
+fn invalid_cookie_files_fail_before_starting_the_downloader() {
+    let root = tempfile::tempdir().unwrap();
+    let (downloader, log) = fake_downloader(root.path(), METADATA_WITH_CAPTIONS, None);
+    let empty = root.path().join("empty");
+    std::fs::write(&empty, "").unwrap();
+    let oversized = root.path().join("oversized");
+    std::fs::File::create(&oversized)
+        .unwrap()
+        .set_len(4 * 1024 * 1024 + 1)
+        .unwrap();
+    let fifo = root.path().join("fifo");
+    let fifo_name = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(fifo_name.as_ptr(), 0o600) }, 0);
+    for file in [
+        root.path().join("missing\u{1b}[31m"),
+        empty,
+        oversized,
+        fifo,
+        root.path().to_path_buf(),
+    ] {
+        let result = run_with_voxtral(
+            root.path(),
+            &downloader,
+            &["--cookies", file.to_str().unwrap()],
+            None,
+        );
+        assert!(!result.status.success());
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(stderr.contains("invalid_cookies"), "{stderr}");
+        assert!(!stderr.contains('\u{1b}'));
+        assert!(result.stdout.is_empty());
+    }
+    assert!(downloader_calls(&log).is_empty());
+}
+
+#[test]
+fn cookie_snapshots_are_removed_after_downloader_failures() {
+    for phase in ["metadata", "audio"] {
+        let root = tempfile::tempdir().unwrap();
+        let original = root.path().join("cookies.txt");
+        let fixture = "# Netscape HTTP Cookie File\n# synthetic-private-cookie\n";
+        std::fs::write(&original, fixture).unwrap();
+        let diagnostic =
+            "Cookies file must be Netscape formatted, not JSON. synthetic-private-cookie\u{1b}[31m";
+        let (base, log) = fake_downloader(root.path(), METADATA_WITH_CAPTIONS, Some(diagnostic));
+        let wrapper = root.path().join("failing-downloader");
+        write_executable(
+            &wrapper,
+            &format!(
+                "#!/bin/sh\n{} \"$@\"\nprintf '%s\\n' {} >&2\nexit 1\n",
+                quote(&base),
+                shell_quote(diagnostic)
+            ),
+        );
+        let downloader = if phase == "metadata" { &wrapper } else { &base };
+        let result = run_with_voxtral(
+            root.path(),
+            downloader,
+            &["--cookies", original.to_str().unwrap()],
+            None,
+        );
+        assert!(!result.status.success());
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(stderr.contains("invalid_cookies"), "{stderr}");
+        assert!(!stderr.contains("synthetic-private-cookie"), "{stderr}");
+        assert!(!stderr.contains('\u{1b}'));
+        assert!(result.stdout.is_empty());
+        let calls = downloader_calls(&log);
+        assert_eq!(calls.len(), if phase == "metadata" { 1 } else { 2 });
+        let snapshot = Path::new(argument_after(&calls[0], "--cookies"));
+        assert!(!snapshot.exists());
+        assert!(!snapshot.parent().unwrap().exists());
+        assert_eq!(std::fs::read_to_string(original).unwrap(), fixture);
+        assert_eq!(cache_json_count(root.path()), 0);
+    }
+}
+
 fn argument_after<'a>(call: &'a ProcessCall, option: &str) -> &'a str {
     let index = call
         .args
@@ -921,4 +1404,45 @@ fn unexpected_metadata_video_id_is_not_echoed_to_terminal() {
             .collect::<Vec<_>>(),
         ["metadata"]
     );
+}
+
+#[test]
+fn youtube_bot_challenge_is_actionable_without_echoing_downloader_stderr() {
+    for challenge in [
+        "Sign in to confirm you’re not a bot",
+        "Sign in to confirm you're not a bot",
+    ] {
+        for phase in ["metadata", "audio"] {
+            let root = tempfile::tempdir().unwrap();
+            let diagnostic = format!("ERROR: {challenge}. private-diagnostic\u{1b}[31m");
+            let (downloader, _) =
+                fake_downloader(root.path(), METADATA_WITH_CAPTIONS, Some(&diagnostic));
+            if phase == "metadata" {
+                write_executable(
+                    &downloader,
+                    &format!(
+                        "#!/bin/sh\nprintf '%s\\n' {} >&2\nexit 1\n",
+                        shell_quote(&diagnostic)
+                    ),
+                );
+            }
+            let (voxtral, voxtral_log) = fake_voxtral(root.path(), true);
+            let result = run_with_voxtral(root.path(), &downloader, &[], Some(&voxtral));
+            assert!(!result.status.success());
+            assert!(result.stdout.is_empty());
+            let stderr = String::from_utf8_lossy(&result.stderr);
+            assert!(
+                stderr.contains("authentication_required"),
+                "{phase}: {stderr}"
+            );
+            assert!(
+                stderr.contains("YouTube requires bot verification"),
+                "{stderr}"
+            );
+            assert!(stderr.contains("--refresh"), "{stderr}");
+            assert!(!stderr.contains("private-diagnostic"), "{stderr}");
+            assert!(!stderr.contains('\u{1b}'), "{stderr}");
+            assert!(log_records(&voxtral_log).is_empty());
+        }
+    }
 }

@@ -24,6 +24,8 @@ pub struct RequestKey {
     pub requested_language: Option<String>,
     pub voxtral_executable: Option<Vec<u8>>,
     pub voxtral_executable_identity: Option<ExecutableIdentity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cookie_file_identity: Option<ModelStat>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -224,6 +226,11 @@ fn model_stat_from_metadata(metadata: &std::fs::Metadata) -> ModelStat {
         changed_seconds: metadata.ctime(),
         changed_nanoseconds: metadata.ctime_nsec(),
     }
+}
+
+pub(crate) fn file_stat(file: &File) -> Result<ModelStat> {
+    let metadata = file.metadata().context("inspect opened cookie file")?;
+    Ok(model_stat_from_metadata(&metadata))
 }
 
 #[cfg(not(unix))]
@@ -684,6 +691,18 @@ mod tests {
     use super::*;
     use polyscribe_core::youtube::CaptionCue;
 
+    #[test]
+    fn anonymous_request_keeps_its_legacy_cache_key() {
+        let legacy = r#"{"cache_schema_version":3,"normalization_version":4,"selection_policy_version":1,"video_id":"dQw4w9WgXcQ","requested_language":"de","voxtral_executable":null,"voxtral_executable_identity":null}"#;
+        let request = request("dQw4w9WgXcQ");
+        assert_eq!(serde_json::to_string(&request).unwrap(), legacy);
+        assert_eq!(serde_json::from_str::<RequestKey>(legacy).unwrap(), request);
+        assert_eq!(
+            digest_json(&request).unwrap(),
+            format!("{:x}", Sha256::digest(legacy.as_bytes()))
+        );
+    }
+
     fn request(video_id: &str) -> RequestKey {
         RequestKey {
             cache_schema_version: CACHE_SCHEMA_VERSION,
@@ -693,6 +712,7 @@ mod tests {
             requested_language: Some("de".to_string()),
             voxtral_executable: None,
             voxtral_executable_identity: None,
+            cookie_file_identity: None,
         }
     }
 
