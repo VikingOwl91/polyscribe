@@ -75,7 +75,9 @@ polyscribe record
 
 ## YouTube audio transcription
 
-`polyscribe youtube URL` checks its local transcript cache first. On a cache miss, `yt-dlp` fetches video metadata and the best available audio. PolyScribe never requests or downloads subtitles. The audio is transcribed locally and the transcript is cached independently of its output format. Use `--refresh` to bypass the cache and acquire a new transcript.
+`polyscribe youtube URL` checks its local transcript cache first. On a cache miss, `yt-dlp` fetches video metadata and the best available audio. PolyScribe never requests or downloads subtitles. The audio is transcribed with the selected engine and the transcript is cached independently of its output format. Use `--refresh` to bypass the cache and acquire a new transcript.
+
+By default the audio is transcribed locally (the optional `POLYSCRIBE_VOXTRAL` wrapper, then local Whisper). `--engine voxtral-cloud` sends the downloaded audio to Mistral's transcription API instead (no fallback; see [Engines and cloud upload](docs/usage.md#engines-and-cloud-upload)), and `--engine auto` does that only when the `mistral_token` file is configured, with a local fallback on cloud errors.
 
 `txt` output starts with a YAML frontmatter block (title, source URL, video ID, channel, upload date, duration, language, transcription time and engine); `--no-frontmatter` writes plain text, and `json` carries the same fields. See [YouTube output](docs/usage.md#output-and-errors).
 
@@ -85,7 +87,7 @@ If YouTube requests bot verification, install a Netscape-format export as `~/.co
 
 ## Optional Mistral cloud engine
 
-`polyscribe transcribe --engine voxtral-cloud` sends the audio to Mistral's Voxtral transcription API. It is part of every build (CPU, CUDA, and HIP), needs no GPU, and is only used when you select it. `--engine auto` uses it only if the `mistral_token` file exists (a bare `MISTRAL_API_KEY` does not count) and falls back to local Whisper with a warning if the cloud fails; the default engine stays `whisper`. Audio leaves your machine, so PolyScribe prints a one-line notice before the first upload (silence it with `--yes`). The API key is read from `MISTRAL_API_KEY` or, if that is unset, from `~/.config/polyscribe/mistral_token` (keep it mode `0600`); it is never logged. See [transcription engines](docs/usage.md#transcription-engines) for options, retries, and the AMD note.
+`polyscribe transcribe --engine voxtral-cloud` sends the audio to Mistral's Voxtral transcription API, and the same `--engine`/`--voxtral-model`/`--yes` options work on `polyscribe youtube`, where the already-downloaded audio file is uploaded. It is part of every build (CPU, CUDA, and HIP), needs no GPU, and is only used when you select it. `--engine auto` uses it only if the `mistral_token` file exists (a bare `MISTRAL_API_KEY` does not count) and falls back to the local engine with a warning if the cloud fails; the default engine stays `whisper`. Audio leaves your machine, so PolyScribe prints a one-line notice before the first upload (silence it with `--yes` or `POLYSCRIBE_CLOUD_OK=1`); on `youtube` only the audio file is uploaded, never cookies, the URL, or metadata. The API key is read from `MISTRAL_API_KEY` or, if that is unset, from `~/.config/polyscribe/mistral_token` (keep it mode `0600`); it is never logged. See [transcription engines](docs/usage.md#transcription-engines) and [YouTube engines and cloud upload](docs/usage.md#engines-and-cloud-upload) for options, retries, and the AMD note.
 
 ## Optional Voxtral wrapper and Whisper fallback
 

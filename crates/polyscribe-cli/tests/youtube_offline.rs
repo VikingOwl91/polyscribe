@@ -159,13 +159,13 @@ fn run_with_voxtral(
     run_with_voxtral_url(root, downloader, URL, args, voxtral)
 }
 
-fn run_with_voxtral_url(
+fn youtube_command(
     root: &Path,
     downloader: &Path,
     url: &str,
     args: &[&str],
     voxtral: Option<&Path>,
-) -> Output {
+) -> Command {
     let temp = root.join("tmp");
     std::fs::create_dir_all(&temp).unwrap();
     let mut command = Command::new(bin());
@@ -181,11 +181,27 @@ fn run_with_voxtral_url(
         .env("TMPDIR", temp)
         .env_remove("POLYSCRIBE_VOXTRAL")
         .env_remove("POLYSCRIBE_MODELS_DIR")
-        .env_remove("WHISPER_MODEL");
+        .env_remove("WHISPER_MODEL")
+        // Never read the real Mistral credentials of this machine in a test.
+        .env_remove("MISTRAL_API_KEY")
+        .env_remove("POLYSCRIBE_MISTRAL_TOKEN_FILE")
+        .env_remove("POLYSCRIBE_CLOUD_OK");
     if let Some(voxtral) = voxtral {
         command.env("POLYSCRIBE_VOXTRAL", voxtral);
     }
-    command.output().expect("launch polyscribe")
+    command
+}
+
+fn run_with_voxtral_url(
+    root: &Path,
+    downloader: &Path,
+    url: &str,
+    args: &[&str],
+    voxtral: Option<&Path>,
+) -> Output {
+    youtube_command(root, downloader, url, args, voxtral)
+        .output()
+        .expect("launch polyscribe")
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1359,6 +1375,137 @@ fn unconfigured_voxtral_tries_whisper_after_downloading_audio() {
         !audio_path.exists(),
         "temporary audio must be removed after exit"
     );
+}
+
+#[test]
+fn engine_whisper_keeps_the_wrapper_first_local_behavior() {
+    let root = tempfile::tempdir().unwrap();
+    let (downloader, downloader_log) = fake_downloader(root.path(), METADATA_WITH_CAPTIONS, None);
+    let (voxtral, voxtral_log) = fake_voxtral(root.path(), true);
+
+    // Explicit --engine whisper behaves exactly like the default: the
+    // configured wrapper transcribes, local Whisper is not attempted.
+    let result = run_with_voxtral(
+        root.path(),
+        &downloader,
+        &[
+            "--language",
+            "en",
+            "--engine",
+            "whisper",
+            "--format",
+            "json",
+        ],
+        Some(&voxtral),
+    );
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let transcript: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(transcript["source"], "local-voxtral");
+    assert_eq!(transcript["engine"], "voxtral");
+    assert!(transcript["cues"][0].get("speaker").is_none());
+    assert_eq!(log_records(&voxtral_log).len(), 1);
+    assert_metadata_then_audio(&downloader_calls(&downloader_log));
+}
+
+#[test]
+fn engine_voxtral_cloud_aborts_with_cloud_error_and_no_fallback() {
+    let root = tempfile::tempdir().unwrap();
+    let (downloader, downloader_log) = fake_downloader(root.path(), METADATA_WITH_CAPTIONS, None);
+    // A configured wrapper must be ignored on the explicit cloud engine.
+    let (voxtral, voxtral_log) = fake_voxtral(root.path(), true);
+
+    // No Mistral key and no token file are set in this environment, so the
+    // cloud backend fails before any network request.
+    let result = run_with_voxtral(
+        root.path(),
+        &downloader,
+        &[
+            "--language",
+            "en",
+            "--engine",
+            "voxtral-cloud",
+            "--voxtral-model",
+            "test-model",
+        ],
+        Some(&voxtral),
+    );
+    assert!(!result.status.success());
+    assert!(result.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("cloud"), "stderr: {stderr}");
+    assert!(stderr.contains("No Mistral API key"), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("local Whisper fallback"),
+        "explicit voxtral-cloud must not fall back: {stderr}"
+    );
+    assert!(!stderr.contains("Voxtral failed"), "stderr: {stderr}");
+    // The audio was downloaded, but neither the wrapper nor Whisper ran.
+    assert_metadata_then_audio(&downloader_calls(&downloader_log));
+    assert!(log_records(&voxtral_log).is_empty());
+}
+
+#[test]
+fn engine_flag_is_part_of_the_youtube_cache_key_and_auto_without_token_file_stays_local() {
+    let root = tempfile::tempdir().unwrap();
+    let (downloader, _) = fake_downloader(root.path(), METADATA_WITH_CAPTIONS, None);
+    let (voxtral, voxtral_log) = fake_voxtral(root.path(), true);
+    let json_args = ["--language", "en", "--format", "json"];
+
+    // Default engine: the local wrapper transcribes and the result is cached.
+    let first = run_with_voxtral(root.path(), &downloader, &json_args, Some(&voxtral));
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert_eq!(log_records(&voxtral_log).len(), 1);
+    let first_json: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert_eq!(first_json["source"], "local-voxtral");
+
+    // Same request again: cache hit, no new transcription.
+    let cached = run_with_voxtral(root.path(), &downloader, &json_args, Some(&voxtral));
+    assert!(cached.status.success());
+    assert_eq!(log_records(&voxtral_log).len(), 1);
+
+    // Explicit --engine whisper is the same request key as the default.
+    let mut whisper_args = json_args.to_vec();
+    whisper_args.extend(["--engine", "whisper"]);
+    let explicit = run_with_voxtral(root.path(), &downloader, &whisper_args, Some(&voxtral));
+    assert!(explicit.status.success());
+    assert_eq!(
+        log_records(&voxtral_log).len(),
+        1,
+        "whisper shares the default cache key"
+    );
+
+    // --engine auto without a token file runs the local path (no cloud
+    // notice), but under its own request key: no reuse of the whisper entry.
+    let mut auto_args = json_args.to_vec();
+    auto_args.extend(["--engine", "auto"]);
+    let auto = run_with_voxtral(root.path(), &downloader, &auto_args, Some(&voxtral));
+    assert!(
+        auto.status.success(),
+        "{}",
+        String::from_utf8_lossy(&auto.stderr)
+    );
+    assert_eq!(log_records(&voxtral_log).len(), 2);
+    let auto_stderr = String::from_utf8_lossy(&auto.stderr);
+    assert!(
+        !auto_stderr.contains("Mistral cloud") && !auto_stderr.contains("token file"),
+        "auto without a token file must stay local: {auto_stderr}"
+    );
+    let auto_json: serde_json::Value = serde_json::from_slice(&auto.stdout).unwrap();
+    assert_eq!(auto_json["source"], "local-voxtral");
+    assert_eq!(auto_json["cues"], first_json["cues"]);
+
+    // The auto entry is cached under its own key as well.
+    let auto_cached = run_with_voxtral(root.path(), &downloader, &auto_args, Some(&voxtral));
+    assert!(auto_cached.status.success());
+    assert_eq!(log_records(&voxtral_log).len(), 2);
 }
 
 #[test]

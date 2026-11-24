@@ -1,4 +1,5 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -14,7 +15,8 @@ pub enum GpuBackend {
 /// API (`voxtral-cloud`, needs a Mistral API key). `auto` uses the cloud only
 /// when the `mistral_token` file is configured (the `MISTRAL_API_KEY` env var
 /// alone does not activate it), otherwise the local whisper engine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Engine {
     Whisper,
     VoxtralCloud,
@@ -24,6 +26,12 @@ pub enum Engine {
 /// The default of `--engine`. To make `auto` the default later, change this
 /// one constant.
 pub const DEFAULT_ENGINE: Engine = Engine::Whisper;
+
+impl Default for Engine {
+    fn default() -> Self {
+        DEFAULT_ENGINE
+    }
+}
 
 #[derive(Debug, Clone, Args)]
 pub struct OutputOpts {
@@ -221,6 +229,25 @@ pub enum Commands {
         /// Omit the YAML metadata frontmatter from txt output. srt and json are unchanged.
         #[arg(long)]
         no_frontmatter: bool,
+
+        /// Transcription engine: whisper (local: the optional POLYSCRIBE_VOXTRAL
+        /// wrapper, then local Whisper), voxtral-cloud (Mistral cloud API,
+        /// uploads the downloaded audio, needs a Mistral API key, no fallback),
+        /// or auto (voxtral-cloud only when the mistral_token file is
+        /// configured, with a local fallback on cloud errors; else the local
+        /// path directly).
+        #[arg(long, value_enum, default_value_t = DEFAULT_ENGINE)]
+        engine: Engine,
+
+        /// Voxtral model id for voxtral-cloud (default:
+        /// voxtral-mini-transcribe-3).
+        #[arg(long)]
+        voxtral_model: Option<String>,
+
+        /// Acknowledge that voxtral-cloud uploads audio to the Mistral API;
+        /// suppresses the one-time warning (or set POLYSCRIBE_CLOUD_OK=1).
+        #[arg(long, default_value_t = false)]
+        yes: bool,
     },
 }
 
@@ -509,6 +536,63 @@ mod tests {
                 "--captions-only",
             ])
             .is_err()
+        );
+    }
+
+    #[test]
+    fn youtube_engine_options_parse_with_shared_default() {
+        let url = "https://youtu.be/dQw4w9WgXcQ";
+        // Default: same DEFAULT_ENGINE as transcribe, no model, no --yes.
+        let cli = Cli::try_parse_from(["polyscribe", "youtube", url]).unwrap();
+        let Commands::YouTube {
+            engine,
+            voxtral_model,
+            yes,
+            ..
+        } = cli.command
+        else {
+            panic!("expected youtube command");
+        };
+        assert_eq!(engine, DEFAULT_ENGINE);
+        assert!(voxtral_model.is_none());
+        assert!(!yes);
+        // All engine values parse, with model and --yes.
+        for value in ["whisper", "voxtral-cloud", "auto"] {
+            let cli = Cli::try_parse_from([
+                "polyscribe",
+                "youtube",
+                url,
+                "--engine",
+                value,
+                "--voxtral-model",
+                "some-model",
+                "--yes",
+            ])
+            .unwrap();
+            let Commands::YouTube {
+                engine,
+                voxtral_model,
+                yes,
+                ..
+            } = cli.command
+            else {
+                panic!("expected youtube command");
+            };
+            assert!(voxtral_model.as_deref() == Some("some-model"));
+            assert!(yes);
+            match value {
+                "whisper" => assert!(matches!(engine, Engine::Whisper)),
+                "voxtral-cloud" => assert!(matches!(engine, Engine::VoxtralCloud)),
+                "auto" => assert!(matches!(engine, Engine::Auto)),
+                _ => unreachable!(),
+            }
+        }
+        let err = Cli::try_parse_from(["polyscribe", "youtube", url, "--engine", "gpt"])
+            .expect_err("unknown engine must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invalid value") && msg.contains("voxtral-cloud"),
+            "error should explain valid values, got: {msg}"
         );
     }
 

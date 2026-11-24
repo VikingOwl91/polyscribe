@@ -101,7 +101,7 @@ Common errors:
 
 ## `youtube`
 
-Transcribe the audio of a YouTube video. The default is audio-only. PolyScribe checks the local transcript cache first. On a cache miss, it runs `yt-dlp` to fetch metadata and download audio, then uses a configured Voxtral wrapper or local Whisper. It never requests or downloads captions/subtitles.
+Transcribe the audio of a YouTube video. The default is audio-only. PolyScribe checks the local transcript cache first. On a cache miss, it runs `yt-dlp` to fetch metadata and download audio, then transcribes with the selected engine (see [Engines and cloud upload](#engines-and-cloud-upload)): by default the configured Voxtral wrapper or local Whisper. It never requests or downloads captions/subtitles.
 
 ### Syntax and options
 
@@ -121,6 +121,9 @@ polyscribe youtube [OPTIONS] <URL>
 | `--prefer-manual` | on | Deprecated compatibility flag. No effect; captions are not used. |
 | `--audio-only` | off | Compatibility alias. Audio is already the default. |
 | `--captions-only` | off | Unsupported. Fails before any network or process invocation. It conflicts with `--audio-only`. |
+| `--engine <ENGINE>` | `whisper` | Transcription engine: `whisper` (local: the optional `POLYSCRIBE_VOXTRAL` wrapper, then local Whisper), `voxtral-cloud` (Mistral cloud API, uploads the downloaded audio, no fallback), or `auto` (cloud only when the `mistral_token` file is configured, with a local fallback on cloud errors; else local). See [Engines and cloud upload](#engines-and-cloud-upload). |
+| `--voxtral-model <ID>` | engine default | Model id for `voxtral-cloud`. Default: `voxtral-mini-transcribe-3`. |
+| `--yes` | off | Acknowledge that `voxtral-cloud` uploads audio to Mistral and suppress the one-time warning. `POLYSCRIBE_CLOUD_OK=1` does the same. |
 
 Supported URLs use HTTPS YouTube forms such as `youtube.com/watch`, `youtu.be`, `youtube.com/embed`, and `youtube.com/shorts`.
 
@@ -141,6 +144,20 @@ polyscribe youtube 'https://www.youtube.com/shorts/VIDEO_ID' --cookies /path/to/
 ```
 
 `--json` is a global output/logging option and does not change `--format`. For JSON transcript content, use `--format json`.
+
+### Engines and cloud upload
+
+`--engine` selects how the downloaded audio is transcribed:
+
+- `whisper` (default) is the unchanged local path: the optional `POLYSCRIBE_VOXTRAL` wrapper first, then one local Whisper attempt.
+- `voxtral-cloud` transcribes the downloaded audio file with Mistral's Audio Transcriptions API (`POST https://api.mistral.ai/v1/audio/transcriptions`, see [Transcription engines](#transcription-engines) for the shared details: model, chunking, retries). There is no fallback: a cloud error aborts the run with the `cloud` error category. The API key is read from `MISTRAL_API_KEY` or the `mistral_token` file (same rules as for `transcribe`); it is never logged, never written to files, and never part of any cache entry, and it is scrubbed from error messages.
+- `auto` uses `voxtral-cloud` only when the `mistral_token` file is configured (the `MISTRAL_API_KEY` env var alone does not activate it), prints the same one-line notice as `transcribe --engine auto`, and falls back to the local path (wrapper, then Whisper) with a visible warning when the cloud fails. Without the token file, `auto` is the local path directly.
+
+Data protection: with `--engine voxtral-cloud` or a cloud-resolving `auto`, only the audio file that was already downloaded locally for this run is uploaded to Mistral. No cookies, no URL, and no video metadata are sent. Before the first upload of a run a one-line warning goes to stderr; suppress it with `--yes` or `POLYSCRIBE_CLOUD_OK=1`.
+
+Cache identity: the requested engine and the `--voxtral-model` value are part of the cache request key, and the record stores which source really produced it (`local-voxtral`, `local-whisper`, or `cloud-voxtral` with the model id and the language hint; a cloud entry never contains the API key or the token-file path). A cloud result is therefore never served to a `whisper` request and vice versa. An `auto` result that fell back to the local engine is stored under the `auto` key with the local source identity, so the entry always names the engine that really produced it. The normalization version was raised to 5 when the fixed `speaker1` label was removed, so cache entries written before that change (which may still contain `speaker1` in their cues) are discarded and never served; the cache schema and directory stay at v4.
+
+Speaker labels: YouTube transcription does not diarize. Cues no longer carry the fixed `speaker1` label, so `txt` output is plain flowing text without `speaker1:` prefixes and JSON cues have no `speaker` field (it is omitted when empty).
 
 ### Set up YouTube cookies once
 
@@ -170,9 +187,9 @@ Treat `cookies.txt` as a session credential: keep it out of repositories, shared
 
 ### Output and errors
 
-When no output file is given, the selected transcript is written to stdout with a trailing newline. `txt` starts with a YAML frontmatter block (`---` ... `---`) holding `title`, `source` (the canonical watch URL), `video_id`, `channel`, `channel_url`, `upload_date` (ISO `YYYY-MM-DD`), `duration` (whole seconds, omitted when unknown), `language`, `transcribed_at` (ISO-8601 with timezone, the time of the original transcription), and a `transcription:` block with the `engine`, `model`, and, for Whisper, the `backend` actually used; after the closing `---` comes the cue text. String values are double-quoted YAML scalars (JSON-style escapes), so titles with colons, quotes, newlines, or emoji stay intact; missing metadata fields are written as `null`, never as placeholders. `--no-frontmatter` writes the plain cue text without this block. `srt` contains numbered timed cues only; the SRT format cannot carry metadata, so `srt` output is identical with and without frontmatter. `json` contains the source URL, video ID, available title/uploader/channel/channel_url/upload_date/duration, `transcribed_at`, requested language, Voxtral-reported language when available (or the Whisper hint), engine/model, cue count, normalization statistics, and timed cues; missing metadata fields are `null`. The audio-only JSON also retains `caption_language`, `is_automatic`, and `is_translated` fields as `null`. The command writes a short source summary to stderr, including when stdout is JSON or `--quiet` is used. `-o` writes the transcript file and reports the destination on stderr.
+When no output file is given, the selected transcript is written to stdout with a trailing newline. `txt` starts with a YAML frontmatter block (`---` ... `---`) holding `title`, `source` (the canonical watch URL), `video_id`, `channel`, `channel_url`, `upload_date` (ISO `YYYY-MM-DD`), `duration` (whole seconds, omitted when unknown), `language`, `transcribed_at` (ISO-8601 with timezone, the time of the original transcription), and a `transcription:` block with the `engine`, `model`, and, for Whisper, the `backend` actually used; after the closing `---` comes the cue text. String values are double-quoted YAML scalars (JSON-style escapes), so titles with colons, quotes, newlines, or emoji stay intact; missing metadata fields are written as `null`, never as placeholders. `--no-frontmatter` writes the plain cue text without this block. `srt` contains numbered timed cues only; the SRT format cannot carry metadata, so `srt` output is identical with and without frontmatter. `json` contains the source URL, video ID, available title/uploader/channel/channel_url/upload_date/duration, `transcribed_at`, requested language, the language of the source that produced the transcript (Voxtral-reported language for the local wrapper, the hint for Whisper and for `voxtral-cloud`, `null` when no hint was given; never a guessed value), engine/model, cue count, normalization statistics, and timed cues; missing metadata fields are `null`. `source` is `local-voxtral`, `local-whisper`, or `cloud-voxtral`, and `engine` is `voxtral`, `whisper`, or `voxtral-cloud` with the model id. The audio-only JSON also retains `caption_language`, `is_automatic`, and `is_translated` fields as `null`. The command writes a short source summary to stderr, including when stdout is JSON or `--quiet` is used. `-o` writes the transcript file and reports the destination on stderr.
 
-Common failures are reported on stderr with a category such as `invalid_url`, `invalid_language`, `unsupported_format`, `tool_unavailable`, `rate_limited`, `forbidden`, `network`, `audio_download`, or `whisper`:
+Common failures are reported on stderr with a category such as `invalid_url`, `invalid_language`, `unsupported_format`, `tool_unavailable`, `rate_limited`, `forbidden`, `network`, `audio_download`, `whisper`, or `cloud` (a `voxtral-cloud` failure; explicit `--engine voxtral-cloud` aborts with it, `auto` only after the local fallback also failed):
 
 - Invalid URL or language: use a supported HTTPS YouTube URL and omit `--language` for automatic selection.
 - `yt-dlp` unavailable: install it and put it on `PATH`, or set `POLYSCRIBE_YTDLP` to its file path.
@@ -180,6 +197,7 @@ Common failures are reported on stderr with a category such as `invalid_url`, `i
 - `invalid_cookies`: supply a readable, nonempty regular file in Netscape format, at most 4 MiB.
 - HTTP 403/429 or another download error: check that the video is available to your network/account and try again later. PolyScribe does not start transcription after a download failure and does not retry through captions.
 - Voxtral failure followed by a Whisper error: install a Whisper model or point `WHISPER_MODEL` at a valid local model. See [Whisper model lookup](#whisper-model-lookup).
+- `cloud`: the Mistral cloud engine failed (no API key, HTTP error, or an invalid response). With `--engine auto` this category only appears when the local fallback failed too; with `--engine voxtral-cloud` there is no fallback. Set `MISTRAL_API_KEY` or create the `mistral_token` file, and use `--engine whisper` to stay local.
 - Unsupported caption mode: remove `--captions-only`; caption transcription is not implemented.
 - Invalid output path or unwritable destination: use a path without `..` components or control characters and ensure its parent directory exists and is writable.
 
@@ -193,11 +211,11 @@ On a cache miss, PolyScribe gives yt-dlp a private temporary copy of the capture
 
 YouTube transcripts are stored under `$XDG_CACHE_HOME/polyscribe/youtube/v4/`, or `~/.cache/polyscribe/youtube/v4/` when `XDG_CACHE_HOME` is unset and `HOME` is available. The cached cues are reused across TXT, SRT, and JSON renders. The cache moved from schema/path v3 to v4 with the richer video metadata, so old v3 entries (which lack `channel`, `channel_url`, and `upload_date`) are never served with empty fields; they stay in their old directory untouched. `transcribed_at` is the time of the original transcription recorded in the cache entry; a cache hit reports that original time, not the time of the hit.
 
-Cache identity includes the cache/schema, normalization and audio-policy versions, video ID, requested language, and configured Voxtral executable identity. Voxtral identity includes its configured path and resolved executable/symlink metadata. A Whisper-backed result also records the model identity and is rejected when the selected model's file metadata changes. Changing the language, Voxtral executable, relevant version, or Whisper model invalidates the matching entry. Unsafe, unreadable, invalid, or unavailable cache storage is ignored and the command continues without caching. `--refresh` bypasses lookup; there is no separate YouTube cache-clear subcommand.
+Cache identity includes the cache/schema, normalization and audio-policy versions, video ID, requested language, configured Voxtral executable identity, the requested engine (`whisper`/`voxtral-cloud`/`auto`), and the `--voxtral-model` value. Voxtral identity includes its configured path and resolved executable/symlink metadata. A Whisper-backed result also records the model identity and is rejected when the selected model's file metadata changes. A cloud-backed result records the model id and language hint, never the API key or token-file path. Changing the language, Voxtral executable, engine, model, relevant version, or Whisper model invalidates the matching entry; a cloud entry can never satisfy a whisper request and vice versa. The normalization version is 5 since the fixed `speaker1` label was removed; entries cached under version 4 are discarded, not served. Unsafe, unreadable, invalid, or unavailable cache storage is ignored and the command continues without caching. `--refresh` bypasses lookup; there is no separate YouTube cache-clear subcommand.
 
 ### Network, limits, and temporary files
 
-YouTube processing is not fully offline: `yt-dlp` contacts YouTube and related hosts to retrieve metadata and audio. Transcription itself runs locally. Metadata retrieval is limited to 120 seconds and 50 MiB of stdout. Audio download is limited to 15 minutes and 250 MiB. Voxtral and the ffmpeg audio decoder each have a 60-minute process deadline. The decoder deadline does not interrupt a Whisper inference call already running in-process. Temporary downloads use a private temporary directory and are removed on normal completion and handled errors. The YouTube command does not install `SIGINT` or `SIGTERM` handlers; abrupt signal termination can bypass cleanup and leave temporary files. A subprocess descendant that leaves its process group may also survive termination.
+YouTube processing is not fully offline: `yt-dlp` contacts YouTube and related hosts to retrieve metadata and audio. With the default `whisper` engine, transcription itself then runs locally; with `--engine voxtral-cloud` (or cloud-resolving `auto`) the downloaded audio is additionally uploaded to the Mistral API. Metadata retrieval is limited to 120 seconds and 50 MiB of stdout. Audio download is limited to 15 minutes and 250 MiB. Voxtral and the ffmpeg audio decoder each have a 60-minute process deadline. The decoder deadline does not interrupt a Whisper inference call already running in-process. Temporary downloads use a private temporary directory and are removed on normal completion and handled errors. The YouTube command does not install `SIGINT` or `SIGTERM` handlers; abrupt signal termination can bypass cleanup and leave temporary files. A subprocess descendant that leaves its process group may also survive termination.
 
 ## Optional Voxtral wrapper
 
@@ -341,7 +359,7 @@ The model-download cache and transcript cache are different locations. YouTube t
 ## Network and local processing
 
 - `transcribe` with the default `whisper` engine and `record` use local Whisper inference and do not contact remote services. `transcribe --engine voxtral-cloud` uploads the audio to the Mistral API. `record` needs PipeWire and `pw-record`; `transcribe` needs `ffmpeg` for media decoding.
-- `youtube` contacts YouTube through `yt-dlp` to fetch metadata and audio. Voxtral and Whisper processing then happen locally.
+- `youtube` contacts YouTube through `yt-dlp` to fetch metadata and audio. Local engines (the Voxtral wrapper, Whisper) then process the audio locally. `youtube --engine voxtral-cloud` (or an `auto` run with a configured `mistral_token` file) additionally uploads the downloaded audio to the Mistral API; only the audio file is uploaded, never cookies, the URL, or metadata.
 - `models add`, `update`, `search`, and the interactive downloader contact Hugging Face. Other model commands work on the local manifest and files.
 - `plugins`, `completions`, and `man` have no built-in network activity. A plugin may make its own requests.
 
