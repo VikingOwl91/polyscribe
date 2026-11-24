@@ -3,6 +3,10 @@ mod output;
 mod record;
 mod transcribe;
 mod youtube;
+mod youtube_cache;
+mod youtube_process;
+mod youtube_transcript;
+mod youtube_voxtral;
 
 use anyhow::{Context, Result, anyhow};
 use clap::{CommandFactory, Parser};
@@ -413,7 +417,8 @@ fn main() -> Result<()> {
                 ModelsCmd::Verify { alias, common } => {
                     let mm: ModelManager<ReqwestClient> =
                         ModelManager::new(handle_common(&common))?;
-                    let found = mm.ls()?.into_iter().any(|r| r.alias == alias);
+                    let resolved = mm.resolve_alias(&alias)?;
+                    let found = resolved.is_some();
                     if !found {
                         match output_mode {
                             OutputMode::Json => {
@@ -435,7 +440,7 @@ fn main() -> Result<()> {
                         }
                         EXIT_NOT_FOUND
                     } else {
-                        let ok = mm.verify(&alias)?;
+                        let ok = mm.verify(resolved.as_deref().unwrap_or(&alias))?;
                         match output_mode {
                             OutputMode::Json => {
                                 #[derive(serde::Serialize)]
@@ -458,6 +463,17 @@ fn main() -> Result<()> {
                         ModelManager::new(handle_common(&common))?;
                     let mut rc = EXIT_OK;
                     for rec in mm.ls()? {
+                        if rec.repo == "local" {
+                            if let OutputMode::Human { quiet } = &output_mode
+                                && !quiet
+                            {
+                                println!(
+                                    "skip {}: local model (no Hugging Face source)",
+                                    rec.alias
+                                );
+                            }
+                            continue;
+                        }
                         match mm.add_or_update(&rec.alias, &rec.repo, &rec.file) {
                             Ok(_) => {}
                             Err(e) => {
@@ -675,6 +691,22 @@ fn main() -> Result<()> {
             format,
             output,
             prefer_manual,
-        } => youtube::run(url, language, format, output, prefer_manual),
+            refresh,
+            cookies,
+            no_cookies,
+            captions_only,
+            audio_only,
+        } => youtube::run(
+            url,
+            language,
+            format,
+            output,
+            prefer_manual,
+            refresh,
+            cookies,
+            no_cookies,
+            captions_only,
+            audio_only,
+        ),
     }
 }

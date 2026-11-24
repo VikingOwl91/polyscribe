@@ -125,6 +125,148 @@ fn command(fake: &Fake) -> Command {
     cmd
 }
 
+#[test]
+fn model_path_controls_are_escaped_in_terminal_diagnostics() {
+    let directory = tempfile::tempdir().unwrap();
+    let model = directory
+        .path()
+        .join("missing\u{1b}]52;c;aGVsbG8=\u{7}.bin");
+    let output = Command::new(bin())
+        .args(["--no-interaction", "record", "--model"])
+        .arg(&model)
+        .output()
+        .expect("failed to spawn polyscribe");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains('\u{1b}'),
+        "raw ESC reached stderr: {stderr:?}"
+    );
+    assert!(
+        !stderr.contains('\u{7}'),
+        "raw BEL reached stderr: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("missing\\u{1b}]52;c;aGVsbG8=\\u{7}.bin"),
+        "escaped model path missing from stderr: {stderr:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn pipewire_node_controls_are_escaped_in_terminal_diagnostics() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let fake_bin = directory.path().join("bin");
+    std::fs::create_dir(&fake_bin).unwrap();
+    let pw_cli = fake_bin.join("pw-cli");
+    std::fs::write(
+        &pw_cli,
+        "#!/bin/sh\nprintf 'id 42, type PipeWire:Interface:Node/3\\n  node.name = \"source\\033]52;c;aGVsbG8=\\007\"\\n  node.description = \"source\"\\n  media.class = \"Audio/Source\"\\n'\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&pw_cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let model = directory.path().join("model.bin");
+    std::fs::write(&model, b"test").unwrap();
+    let mut paths = vec![fake_bin];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    let output = Command::new(bin())
+        .args(["--no-interaction", "record", "--model"])
+        .arg(model)
+        .args(["--device", "missing"])
+        .env("PATH", std::env::join_paths(paths).unwrap())
+        .output()
+        .expect("failed to spawn polyscribe");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains('\u{1b}'),
+        "raw ESC reached stderr: {stderr:?}"
+    );
+    assert!(
+        !stderr.contains('\u{7}'),
+        "raw BEL reached stderr: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("source\\u{1b}]52;c;aGVsbG8=\\u{7}"),
+        "escaped PipeWire node name missing: {stderr:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn pipewire_node_controls_are_escaped_in_both_recording_statuses() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let fake_bin = directory.path().join("bin");
+    std::fs::create_dir(&fake_bin).unwrap();
+    let pw_cli = fake_bin.join("pw-cli");
+    std::fs::write(
+        &pw_cli,
+        "#!/bin/sh\nprintf 'id 42, type PipeWire:Interface:Node/3\\n  node.name = \"source\\033]52;c;aGVsbG8=\\007\"\\n  media.class = \"Audio/Source\"\\n'\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&pw_cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let model = directory.path().join("model.bin");
+    std::fs::write(&model, b"test").unwrap();
+    let pcm = directory.path().join("audio.raw");
+    std::fs::write(&pcm, vec![0; 64_000]).unwrap();
+    let device = "source\u{1b}]52;c;aGVsbG8=\u{7}";
+    let escaped_device = "source\\u{1b}]52;c;aGVsbG8=\\u{7}";
+
+    for (with_audio, status_suffix) in [
+        (false, " (no audio yet, Ctrl+C stops the recording)"),
+        (true, " (Ctrl+C stops the recording)"),
+    ] {
+        let settings = if with_audio {
+            vec![("FAKE_PCM", pcm.to_str().unwrap())]
+        } else {
+            Vec::new()
+        };
+        let fake_capture = Fake::new(&settings);
+        let mut paths = vec![fake_bin.clone()];
+        paths.extend(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ));
+        let output = command(&fake_capture)
+            .args([
+                "--no-interaction",
+                "--no-progress",
+                "record",
+                "--gpu-backend",
+                "cpu",
+                "--model",
+            ])
+            .arg(&model)
+            .args(["--language", "en", "--device"])
+            .arg(device)
+            .env("PATH", std::env::join_paths(paths).unwrap())
+            .output()
+            .expect("failed to spawn polyscribe");
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr.contains('\u{1b}'),
+            "raw ESC reached stderr: {stderr:?}"
+        );
+        assert!(
+            !stderr.contains('\u{7}'),
+            "raw BEL reached stderr: {stderr:?}"
+        );
+        assert!(
+            stderr.contains(&format!("recording from {escaped_device}{status_suffix}")),
+            "escaped PipeWire name missing from status: {stderr:?}"
+        );
+    }
+}
+
 /// A capture that fails is reported with a nonzero status.
 ///
 /// The command needs a model, and the model is looked up when the pipeline

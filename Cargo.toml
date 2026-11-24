@@ -37,7 +37,6 @@ clap_complete = "4.5.57"
 clap_mangen = "0.2.29"
 
 # Additional shared deps used across members
-tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 # rustls-tls instead of the default native-tls: pure-Rust TLS with bundled
 # Mozilla roots, so building does not require system OpenSSL.

@@ -194,7 +194,10 @@ fn a_capture_that_fails_is_reported() {
 fn the_diagnostics_of_the_capture_are_kept() {
     let fake = Fake::new(&[
         ("FAKE_EXIT", "2"),
-        ("FAKE_STDERR", "the microphone is busy"),
+        (
+            "FAKE_STDERR",
+            "the microphone is busy\u{1b}]52;c;aGVsbG8=\u{7}",
+        ),
     ]);
 
     let config = CaptureConfig::new().with_program(fake.program());
@@ -205,8 +208,16 @@ fn the_diagnostics_of_the_capture_are_kept() {
     };
     let message = error.to_string();
     assert!(
-        message.contains("the microphone is busy"),
+        message.contains("the microphone is busy\\u{1b}]52;c;aGVsbG8=\\u{7}"),
         "the diagnostics of the capture are missing: {message}"
+    );
+    assert!(
+        !message.contains('\u{1b}'),
+        "raw ESC reached the error: {message:?}"
+    );
+    assert!(
+        !message.contains('\u{7}'),
+        "raw BEL reached the error: {message:?}"
     );
 }
 
@@ -233,6 +244,33 @@ fn a_capture_with_the_wrong_format_is_refused() {
     assert!(
         message.contains("48000 Hz"),
         "the error does not name the rate: {message}"
+    );
+}
+
+#[test]
+fn a_reported_format_with_terminal_controls_is_escaped_in_the_error() {
+    let format =
+        "raw: rate=16000 channels=1 fmt=s16\u{1b}]52;c;aGVsbG8=\u{7} samplesize=2 stride=2";
+    let fake = Fake::new(&[("FAKE_FORMAT_LINE", format)]);
+    let config = CaptureConfig::new().with_program(fake.program());
+    let mut capture = PipeWireCapture::new(config, CancellationToken::new()).unwrap();
+    let error = match drain(&mut capture) {
+        Ok(_) => panic!("the capture with an unsafe reported format was not refused"),
+        Err(error) => error,
+    };
+    let message = error.to_string();
+
+    assert!(
+        !message.contains('\u{1b}'),
+        "raw ESC reached the error: {message:?}"
+    );
+    assert!(
+        !message.contains('\u{7}'),
+        "raw BEL reached the error: {message:?}"
+    );
+    assert!(
+        message.contains("s16\\u{1b}]52;c;aGVsbG8=\\u{7}"),
+        "escaped format missing from the error: {message:?}"
     );
 }
 

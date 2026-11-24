@@ -11,10 +11,10 @@ pub enum GpuBackend {
 
 #[derive(Debug, Clone, Args)]
 pub struct OutputOpts {
-    /// Emit machine-readable JSON to stdout; suppress decorative logs
+    /// Request structured JSON where supported; suppress decorative logs
     #[arg(long, global = true, action = clap::ArgAction::SetTrue)]
     pub json: bool,
-    /// Reduce log chatter (errors only unless --json)
+    /// Reduce informational output; errors and warnings remain visible
     #[arg(long, global = true, action = clap::ArgAction::SetTrue)]
     pub quiet: bool,
 }
@@ -64,7 +64,7 @@ pub enum Commands {
         #[arg(long, default_value_t = false)]
         merge_and_separate: bool,
 
-        /// Language code hint, e.g. en, de
+        /// Language code hint, e.g. en or de; required for audio/video inputs
         #[arg(long)]
         language: Option<String>,
 
@@ -106,7 +106,7 @@ pub enum Commands {
         #[arg(long)]
         device: Option<String>,
 
-        /// The length of a live window in seconds. The default is 5.
+        /// Live window length in seconds; defaults to 5 and must be at least 2
         #[arg(long)]
         window: Option<f64>,
 
@@ -143,14 +143,13 @@ pub enum Commands {
     /// Generate a man page to stdout
     Man,
 
-    /// Retrieve and transcribe YouTube captions
+    /// Download and transcribe YouTube audio
     #[command(name = "youtube")]
     YouTube {
         /// YouTube URL (watch, youtu.be, embed, or shorts)
         url: String,
 
-        /// Caption language code, e.g. en, de. Without it the best
-        /// available track is selected automatically.
+        /// Language hint, e.g. en or de. Without it the engine detects language.
         #[arg(long)]
         language: Option<String>,
 
@@ -162,9 +161,29 @@ pub enum Commands {
         #[arg(short, long)]
         output: Option<PathBuf>,
 
-        /// Prefer manual captions over automatic ones.
+        /// Deprecated. Accepted for compatibility and has no effect.
         #[arg(long, default_value_t = true)]
         prefer_manual: bool,
+
+        /// Ignore a cached transcript and acquire it again.
+        #[arg(long)]
+        refresh: bool,
+
+        /// Cookie file override. Otherwise use the config directory's youtube/cookies.txt.
+        #[arg(long, value_name = "FILE", conflicts_with = "no_cookies")]
+        cookies: Option<PathBuf>,
+
+        /// Ignore stored cookies and run anonymously, with transcript caching.
+        #[arg(long)]
+        no_cookies: bool,
+
+        /// Unsupported. YouTube transcription uses audio only.
+        #[arg(long, conflicts_with = "audio_only")]
+        captions_only: bool,
+
+        /// Compatibility alias. Audio transcription is the default.
+        #[arg(long, conflicts_with = "captions_only")]
+        audio_only: bool,
     },
 }
 
@@ -180,7 +199,7 @@ pub struct ModelCommon {
 
 #[derive(Debug, Subcommand)]
 pub enum ModelsCmd {
-    /// List installed models (from manifest)
+    /// List installed and discovered models
     Ls {
         #[command(flatten)]
         common: ModelCommon,
@@ -194,19 +213,19 @@ pub enum ModelsCmd {
         #[command(flatten)]
         common: ModelCommon,
     },
-    /// Remove a model by alias
+    /// Remove a model by alias or file name
     Rm {
         alias: String,
         #[command(flatten)]
         common: ModelCommon,
     },
-    /// Verify model file integrity by alias
+    /// Verify model file integrity by alias or file name
     Verify {
         alias: String,
         #[command(flatten)]
         common: ModelCommon,
     },
-    /// Update all models (HEAD + ETag; skip if unchanged)
+    /// Update Hugging Face models (local files are skipped)
     Update {
         #[command(flatten)]
         common: ModelCommon,
@@ -220,7 +239,7 @@ pub enum ModelsCmd {
         #[command(flatten)]
         common: ModelCommon,
     },
-    /// Search a repo for GGUF files
+    /// Search a repo for .bin and .gguf model files
     Search {
         /// Hugging Face repo, e.g. ggml-org/models
         repo: String,
@@ -363,6 +382,48 @@ mod tests {
             "out.txt",
         ])
         .unwrap();
+    }
+
+    #[test]
+    fn youtube_modes_parse_and_exclude_each_other() {
+        Cli::try_parse_from([
+            "polyscribe",
+            "youtube",
+            "https://youtu.be/dQw4w9WgXcQ",
+            "--refresh",
+        ])
+        .unwrap();
+        Cli::try_parse_from([
+            "polyscribe",
+            "youtube",
+            "https://youtu.be/dQw4w9WgXcQ",
+            "--captions-only",
+        ])
+        .unwrap();
+        Cli::try_parse_from([
+            "polyscribe",
+            "youtube",
+            "https://youtu.be/dQw4w9WgXcQ",
+            "--audio-only",
+        ])
+        .unwrap();
+        Cli::try_parse_from([
+            "polyscribe",
+            "youtube",
+            "https://youtu.be/dQw4w9WgXcQ",
+            "--prefer-manual",
+        ])
+        .unwrap();
+        assert!(
+            Cli::try_parse_from([
+                "polyscribe",
+                "youtube",
+                "https://youtu.be/dQw4w9WgXcQ",
+                "--audio-only",
+                "--captions-only",
+            ])
+            .is_err()
+        );
     }
 
     #[test]

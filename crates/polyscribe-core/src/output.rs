@@ -66,22 +66,34 @@ pub fn write_output_files(dir: &Path, base_name: &str, out: &OutputRoot) -> Resu
     let toml_path = dir.join(format!("{base_name}.toml"));
     let srt_path = dir.join(format!("{base_name}.srt"));
 
-    let mut json_file = File::create(&json_path)
-        .with_context(|| format!("Failed to create output file: {}", json_path.display()))?;
+    let mut json_file = File::create(&json_path).with_context(|| {
+        format!(
+            "Failed to create output file: {}",
+            crate::ui::terminal_safe_path(&json_path)
+        )
+    })?;
     serde_json::to_writer_pretty(&mut json_file, out)?;
     writeln!(&mut json_file)?;
 
     let toml_str = toml::to_string_pretty(out)?;
-    let mut toml_file = File::create(&toml_path)
-        .with_context(|| format!("Failed to create output file: {}", toml_path.display()))?;
+    let mut toml_file = File::create(&toml_path).with_context(|| {
+        format!(
+            "Failed to create output file: {}",
+            crate::ui::terminal_safe_path(&toml_path)
+        )
+    })?;
     toml_file.write_all(toml_str.as_bytes())?;
     if !toml_str.ends_with('\n') {
         writeln!(&mut toml_file)?;
     }
 
     let srt_str = crate::render_srt(&out.items);
-    let mut srt_file = File::create(&srt_path)
-        .with_context(|| format!("Failed to create output file: {}", srt_path.display()))?;
+    let mut srt_file = File::create(&srt_path).with_context(|| {
+        format!(
+            "Failed to create output file: {}",
+            crate::ui::terminal_safe_path(&srt_path)
+        )
+    })?;
     srt_file.write_all(srt_str.as_bytes())?;
     Ok(())
 }
@@ -116,11 +128,15 @@ struct InputSegment {
 pub fn load_json_transcript(path: &Path) -> Result<Vec<OutputEntry>> {
     let mut buf = String::new();
     File::open(path)
-        .with_context(|| format!("Failed to open: {}", path.display()))?
+        .with_context(|| format!("Failed to open: {}", crate::ui::terminal_safe_path(path)))?
         .read_to_string(&mut buf)
-        .with_context(|| format!("Failed to read: {}", path.display()))?;
-    let root: InputRoot = serde_json::from_str(&buf)
-        .with_context(|| format!("Invalid JSON transcript parsed from {}", path.display()))?;
+        .with_context(|| format!("Failed to read: {}", crate::ui::terminal_safe_path(path)))?;
+    let root: InputRoot = serde_json::from_str(&buf).with_context(|| {
+        format!(
+            "Invalid JSON transcript parsed from {}",
+            crate::ui::terminal_safe_path(path)
+        )
+    })?;
     Ok(root
         .segments
         .into_iter()

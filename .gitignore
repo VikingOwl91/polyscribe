@@ -3,6 +3,7 @@
 input
 output
 /models
+cookies.txt
 
 # The report of the architecture audit stays a local document.
 audit-2026.md

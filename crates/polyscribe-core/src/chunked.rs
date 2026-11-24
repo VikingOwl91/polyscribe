@@ -26,7 +26,10 @@ use std::collections::VecDeque;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 /// The sample rate whisper expects.
 pub const WHISPER_SAMPLE_RATE: u32 = 16_000;
@@ -257,6 +260,7 @@ pub(crate) fn spawn_ffmpeg_decoder(audio_path: &Path) -> anyhow::Result<Child> {
         .arg("-ar")
         .arg(WHISPER_SAMPLE_RATE.to_string())
         .arg("pipe:1")
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -268,12 +272,95 @@ pub(crate) fn spawn_ffmpeg_decoder(audio_path: &Path) -> anyhow::Result<Child> {
             } else {
                 anyhow!(
                     "Failed to execute ffmpeg for {}: {}",
-                    audio_path.display(),
+                    crate::ui::terminal_safe_path(audio_path),
                     e
                 )
             }
         })?;
     Ok(child)
+}
+
+#[cfg(unix)]
+fn spawn_supervised_ffmpeg_decoder(audio_path: &Path) -> anyhow::Result<Child> {
+    use std::os::unix::process::CommandExt;
+
+    let mut command = Command::new("ffmpeg");
+    command
+        .arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-i")
+        .arg(audio_path)
+        .arg("-f")
+        .arg("f32le")
+        .arg("-ac")
+        .arg("1")
+        .arg("-ar")
+        .arg(WHISPER_SAMPLE_RATE.to_string())
+        .arg("pipe:1")
+        // The decoder is in its own process group. Without a null stdin it
+        // inherits the controlling terminal and can be stopped by SIGTTIN or
+        // SIGTTOU while it is not the foreground process group, which stalls
+        // the first read forever.
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0);
+    #[cfg(target_os = "linux")]
+    {
+        let parent_pid = unsafe { libc::getpid() };
+        unsafe {
+            command.pre_exec(move || {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::getppid() != parent_pid {
+                    libc::_exit(1);
+                }
+                Ok(())
+            });
+        }
+    }
+    command.spawn().map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            anyhow!("ffmpeg not found on PATH. Please install ffmpeg and ensure it is available.")
+        } else {
+            anyhow!(
+                "Failed to execute ffmpeg for {}: {error}",
+                crate::ui::terminal_safe_path(audio_path)
+            )
+        }
+    })
+}
+
+/// Probe the duration of a media file with ffprobe.
+///
+/// This is used only for progress hints. A missing ffprobe or an unreadable
+/// duration is not an error; the transcription proceeds without a total.
+pub fn probe_audio_duration_seconds(audio_path: &Path) -> Option<f64> {
+    let output = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+        ])
+        .arg(audio_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
 }
 
 /// Decodes a media file into windows of audio.
@@ -286,6 +373,9 @@ pub struct ChunkedAudio {
     child: Option<Child>,
     stdout: Option<std::io::BufReader<ChildStdout>>,
     stderr_thread: Option<JoinHandle<Vec<u8>>>,
+    decoder_timed_out: Option<Arc<AtomicBool>>,
+    watchdog_stop: Option<Arc<AtomicBool>>,
+    watchdog_thread: Option<JoinHandle<()>>,
     assembler: WindowAssembler,
     /// The index where the next window starts.
     next_start: u64,
@@ -295,7 +385,55 @@ pub struct ChunkedAudio {
 impl ChunkedAudio {
     /// Start decoding the given media file.
     pub fn new(audio_path: &Path, config: ChunkConfig) -> anyhow::Result<Self> {
-        let mut child = spawn_ffmpeg_decoder(audio_path)?;
+        Self::new_inner(audio_path, config, None)
+    }
+
+    /// Start decoding with a maximum ffmpeg lifetime.
+    ///
+    /// This bound applies to the decoder subprocess only. In-process Whisper
+    /// inference is not interruptible by this deadline.
+    #[cfg(unix)]
+    pub fn new_with_timeout(
+        audio_path: &Path,
+        config: ChunkConfig,
+        timeout: Duration,
+    ) -> anyhow::Result<Self> {
+        if timeout.is_zero() {
+            return Err(anyhow!("decoder timeout must be greater than zero"));
+        }
+        Self::new_inner(audio_path, config, Some(timeout))
+    }
+
+    #[cfg(not(unix))]
+    pub fn new_with_timeout(
+        _audio_path: &Path,
+        _config: ChunkConfig,
+        _timeout: Duration,
+    ) -> anyhow::Result<Self> {
+        Err(anyhow!(
+            "bounded ffmpeg decoding is not supported on this platform"
+        ))
+    }
+
+    fn new_inner(
+        audio_path: &Path,
+        config: ChunkConfig,
+        timeout: Option<Duration>,
+    ) -> anyhow::Result<Self> {
+        let mut child = if timeout.is_some() {
+            #[cfg(unix)]
+            {
+                spawn_supervised_ffmpeg_decoder(audio_path)?
+            }
+            #[cfg(not(unix))]
+            {
+                return Err(anyhow!(
+                    "bounded ffmpeg decoding is not supported on this platform"
+                ));
+            }
+        } else {
+            spawn_ffmpeg_decoder(audio_path)?
+        };
         let stdout = child
             .stdout
             .take()
@@ -307,18 +445,29 @@ impl ChunkedAudio {
 
         // Drain stderr on a separate thread so ffmpeg can never deadlock on
         // a full pipe.
-        let stderr_thread = std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            let mut stderr = stderr;
-            let _ = stderr.read_to_end(&mut buf);
-            buf
-        });
+        let stderr_thread = std::thread::spawn(move || read_decoder_stderr(stderr, timeout));
+
+        #[cfg(unix)]
+        let (decoder_timed_out, watchdog_stop, watchdog_thread) = match timeout {
+            Some(timeout) => {
+                let timed_out = Arc::new(AtomicBool::new(false));
+                let stop = Arc::new(AtomicBool::new(false));
+                let watcher = spawn_decoder_watchdog(child.id(), timeout, &timed_out, &stop);
+                (Some(timed_out), Some(stop), Some(watcher))
+            }
+            None => (None, None, None),
+        };
+        #[cfg(not(unix))]
+        let (decoder_timed_out, watchdog_stop, watchdog_thread) = (None, None, None);
 
         Ok(Self {
             audio_path: audio_path.to_path_buf(),
             child: Some(child),
             stdout: Some(std::io::BufReader::new(stdout)),
             stderr_thread: Some(stderr_thread),
+            decoder_timed_out,
+            watchdog_stop,
+            watchdog_thread,
             assembler: WindowAssembler::new(config),
             next_start: 0,
             finished: false,
@@ -366,7 +515,7 @@ impl ChunkedAudio {
                 Err(e) => {
                     return Err(anyhow!(
                         "Failed to read ffmpeg output for {}: {}",
-                        self.audio_path.display(),
+                        crate::ui::terminal_safe_path(&self.audio_path),
                         e
                     ));
                 }
@@ -393,18 +542,26 @@ impl ChunkedAudio {
             .take()
             .map(|t| t.join().unwrap_or_default())
             .unwrap_or_default();
-        let stderr = String::from_utf8_lossy(&stderr).into_owned();
+        let stderr = crate::ui::escape_terminal_controls(&String::from_utf8_lossy(&stderr));
         if let Some(mut child) = self.child.take() {
             let status = child.wait().with_context(|| {
                 format!(
                     "Failed to wait for ffmpeg for {}",
-                    self.audio_path.display()
+                    crate::ui::terminal_safe_path(&self.audio_path)
                 )
             })?;
+            self.stop_watchdog();
+            if self
+                .decoder_timed_out
+                .as_ref()
+                .is_some_and(|flag| flag.load(Ordering::Relaxed))
+            {
+                return Err(anyhow!("ffmpeg decoder exceeded its timeout"));
+            }
             if !status.success() {
                 return Err(anyhow!(
                     "ffmpeg failed for {}: {}",
-                    self.audio_path.display(),
+                    crate::ui::terminal_safe_path(&self.audio_path),
                     stderr
                 ));
             }
@@ -412,14 +569,16 @@ impl ChunkedAudio {
         Ok(())
     }
 
-    /// The next window of audio, or `None` at the end of the recording.
-    pub fn next_window(&mut self) -> anyhow::Result<Option<AudioWindow>> {
-        crate::stream::WindowSource::next_window(self, &crate::stream::CancellationToken::new())
+    fn stop_watchdog(&mut self) {
+        if let Some(stop) = self.watchdog_stop.take() {
+            stop.store(true, Ordering::Relaxed);
+        }
+        if let Some(watcher) = self.watchdog_thread.take() {
+            let _ = watcher.join();
+        }
     }
-}
 
-impl crate::stream::WindowSource for ChunkedAudio {
-    fn next_window(
+    fn next_window_timed(
         &mut self,
         cancel: &crate::stream::CancellationToken,
     ) -> anyhow::Result<Option<AudioWindow>> {
@@ -447,6 +606,28 @@ impl crate::stream::WindowSource for ChunkedAudio {
             .take_window(self.next_start)
             .expect("the window is complete");
         Ok(Some(window))
+    }
+
+    /// The next window of audio, or `None` at the end of the recording.
+    pub fn next_window(&mut self) -> anyhow::Result<Option<AudioWindow>> {
+        crate::stream::WindowSource::next_window(self, &crate::stream::CancellationToken::new())
+    }
+}
+
+impl crate::stream::WindowSource for ChunkedAudio {
+    fn next_window(
+        &mut self,
+        cancel: &crate::stream::CancellationToken,
+    ) -> anyhow::Result<Option<AudioWindow>> {
+        let started = Instant::now();
+        let window = self.next_window_timed(cancel)?;
+        crate::dlog!(
+            2,
+            "ffmpeg next_window finished in {:.1} ms: samples={}",
+            started.elapsed().as_secs_f64() * 1000.0,
+            window.as_ref().map(|w| w.samples.len()).unwrap_or(0),
+        );
+        Ok(window)
     }
 
     fn next_recovery_window(
@@ -480,13 +661,77 @@ impl Drop for ChunkedAudio {
         // A decoder that is dropped before the end of the stream has to
         // leave no ffmpeg behind.
         if let Some(mut child) = self.child.take() {
+            if self.watchdog_stop.is_some() {
+                #[cfg(unix)]
+                unsafe {
+                    libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
+                }
+            }
             let _ = child.kill();
             let _ = child.wait();
         }
+        self.stop_watchdog();
         if let Some(thread) = self.stderr_thread.take() {
             let _ = thread.join();
         }
     }
+}
+
+fn read_decoder_stderr(
+    mut stderr: std::process::ChildStderr,
+    timeout: Option<Duration>,
+) -> Vec<u8> {
+    const STDERR_LIMIT: usize = 64 * 1024;
+    if timeout.is_none() {
+        let mut bytes = Vec::new();
+        let _ = stderr.read_to_end(&mut bytes);
+        return bytes;
+    }
+    let mut bytes = Vec::with_capacity(STDERR_LIMIT);
+    let mut buffer = [0u8; 8192];
+    loop {
+        match stderr.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => {
+                bytes.extend_from_slice(&buffer[..count]);
+                if bytes.len() > STDERR_LIMIT {
+                    let excess = bytes.len() - STDERR_LIMIT;
+                    bytes.drain(..excess);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => break,
+        }
+    }
+    bytes
+}
+
+#[cfg(unix)]
+fn spawn_decoder_watchdog(
+    pid: u32,
+    timeout: Duration,
+    timed_out: &Arc<AtomicBool>,
+    stop: &Arc<AtomicBool>,
+) -> JoinHandle<()> {
+    let timed_out = Arc::clone(timed_out);
+    let stop = Arc::clone(stop);
+    std::thread::spawn(move || {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                timed_out.store(true, Ordering::Relaxed);
+                unsafe {
+                    libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+                }
+                return;
+            }
+            std::thread::sleep((deadline - now).min(Duration::from_millis(20)));
+        }
+    })
 }
 
 #[cfg(test)]
@@ -498,6 +743,41 @@ mod tests {
             window_samples: window,
             lookback_samples: 0,
         }
+    }
+
+    #[test]
+    fn test_probe_audio_duration_reads_a_wav() {
+        if Command::new("ffprobe").arg("-version").output().is_err() {
+            eprintln!("NOT RUN: ffprobe is not available on PATH");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("probe.wav");
+        let sample_rate = 16_000u32;
+        let seconds = 2u32;
+        let data_len = sample_rate * seconds * 2;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data_len).to_le_bytes());
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&sample_rate.to_le_bytes());
+        bytes.extend_from_slice(&(sample_rate * 2).to_le_bytes());
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&16u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data_len.to_le_bytes());
+        bytes.resize(bytes.len() + data_len as usize, 0);
+        std::fs::write(&path, bytes).unwrap();
+
+        let duration = probe_audio_duration_seconds(&path).expect("duration should be readable");
+        assert!(
+            (duration - 2.0).abs() < 0.01,
+            "unexpected duration: {duration}"
+        );
     }
 
     #[test]
@@ -605,6 +885,29 @@ mod tests {
         assert!(a.take_window(11).is_none());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn decoder_watchdog_kills_a_blocked_process_group() {
+        use std::os::unix::process::CommandExt;
+
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "exec sleep 10"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0);
+        let mut child = command.spawn().unwrap();
+        let timed_out = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(AtomicBool::new(false));
+        let watchdog =
+            spawn_decoder_watchdog(child.id(), Duration::from_millis(50), &timed_out, &stop);
+        let status = child.wait().unwrap();
+        stop.store(true, Ordering::Relaxed);
+        watchdog.join().unwrap();
+        assert!(timed_out.load(Ordering::Relaxed));
+        assert!(!status.success());
+    }
+
     #[test]
     fn test_finished_file_source_can_retry_its_final_partial_window() {
         let mut audio = ChunkedAudio {
@@ -612,6 +915,9 @@ mod tests {
             child: None,
             stdout: None,
             stderr_thread: None,
+            decoder_timed_out: None,
+            watchdog_stop: None,
+            watchdog_thread: None,
             assembler: WindowAssembler::new(ChunkConfig {
                 window_samples: 10,
                 lookback_samples: 2,

@@ -58,7 +58,7 @@ impl Default for Settings {
 
 #[derive(Debug, Clone)]
 pub struct Paths {
-    pub cache_dir: PathBuf,   // $XDG_CACHE_HOME/polyscribe/models
+    pub cache_dir: PathBuf, // default: models_dir_path(); POLYSCRIBE_CACHE_DIR/models overrides it
     pub config_path: PathBuf, // $XDG_CONFIG_HOME/polyscribe/models.json
 }
 
@@ -76,30 +76,22 @@ impl Paths {
                 config_path,
             });
         }
-        let cache_dir = default_cache_dir();
+        // Default to the canonical transcription models directory so the
+        // registry and `find_model_file` agree. `POLYSCRIBE_CACHE_DIR` still
+        // overrides this for tests and isolated environments.
+        let cache_dir = if let Ok(over) = std::env::var("POLYSCRIBE_CACHE_DIR")
+            && !over.is_empty()
+        {
+            PathBuf::from(over).join("models")
+        } else {
+            crate::models_dir_path()
+        };
         let config_path = default_config_path();
         Ok(Self {
             cache_dir,
             config_path,
         })
     }
-}
-
-fn default_cache_dir() -> PathBuf {
-    if let Ok(xdg) = std::env::var("XDG_CACHE_HOME")
-        && !xdg.is_empty()
-    {
-        return PathBuf::from(xdg).join("polyscribe").join("models");
-    }
-    if let Ok(home) = std::env::var("HOME")
-        && !home.is_empty()
-    {
-        return PathBuf::from(home)
-            .join(".cache")
-            .join("polyscribe")
-            .join("models");
-    }
-    PathBuf::from("models")
 }
 
 fn default_config_path() -> PathBuf {
@@ -282,7 +274,8 @@ impl<C: HttpClient + 'static> ModelManager<C> {
         if !p.exists() {
             return Ok(Manifest::default());
         }
-        let file = File::open(p).with_context(|| format!("open manifest {}", p.display()))?;
+        let file = File::open(p)
+            .with_context(|| format!("open manifest {}", crate::ui::terminal_safe_path(p)))?;
         let m: Manifest = serde_json::from_reader(file).context("parse manifest")?;
         Ok(m)
     }
@@ -290,8 +283,9 @@ impl<C: HttpClient + 'static> ModelManager<C> {
     fn save_manifest(&self, m: &Manifest) -> Result<()> {
         let p = &self.paths.config_path;
         if let Some(dir) = p.parent() {
-            fs::create_dir_all(dir)
-                .with_context(|| format!("create config dir {}", dir.display()))?;
+            fs::create_dir_all(dir).with_context(|| {
+                format!("create config dir {}", crate::ui::terminal_safe_path(dir))
+            })?;
         }
         let tmp = p.with_extension("json.tmp");
         let f = OpenOptions::new()
@@ -300,8 +294,13 @@ impl<C: HttpClient + 'static> ModelManager<C> {
             .truncate(true)
             .open(&tmp)?;
         serde_json::to_writer_pretty(f, m).context("serialize manifest")?;
-        fs::rename(&tmp, p)
-            .with_context(|| format!("atomic rename {} -> {}", tmp.display(), p.display()))?;
+        fs::rename(&tmp, p).with_context(|| {
+            format!(
+                "atomic rename {} -> {}",
+                crate::ui::terminal_safe_path(&tmp),
+                crate::ui::terminal_safe_path(p)
+            )
+        })?;
         Ok(())
     }
 
@@ -324,13 +323,173 @@ impl<C: HttpClient + 'static> ModelManager<C> {
     }
 
     pub fn ls(&self) -> Result<Vec<ModelRecord>> {
+        // Discover models that exist on disk but are not yet in the manifest,
+        // so locally present files are listed and persisted without a download.
+        let _ = self.discover_local_models();
         let m = self.load_manifest()?;
         Ok(m.models.values().cloned().collect())
     }
 
+    pub fn register_local_model(
+        &self,
+        alias: &str,
+        repo: &str,
+        file: &str,
+        revision: Option<String>,
+        size_bytes: Option<u64>,
+        sha256: Option<String>,
+    ) -> Result<ModelRecord> {
+        crate::model_manager::validate_model_file_name(file)?;
+        fs::create_dir_all(&self.paths.cache_dir).with_context(|| {
+            format!(
+                "create models dir {}",
+                crate::ui::terminal_safe_path(&self.paths.cache_dir)
+            )
+        })?;
+        let dest = self.model_path(file);
+        if !dest.is_file() {
+            return Err(anyhow!(
+                "model file not found: {}",
+                crate::ui::terminal_safe_path(&dest)
+            )
+            .into());
+        }
+
+        let size_bytes = size_bytes.or_else(|| fs::metadata(&dest).ok().map(|m| m.len()));
+        if let Some(expected) = &sha256 {
+            let actual = Self::compute_sha256(&dest)?;
+            if !actual.eq_ignore_ascii_case(expected) {
+                return Err(anyhow!(
+                    "checksum mismatch for {}: expected {}, got {}",
+                    crate::ui::terminal_safe_path(&dest),
+                    expected,
+                    actual
+                )
+                .into());
+            }
+        }
+
+        let record = ModelRecord {
+            alias: alias.to_string(),
+            repo: repo.to_string(),
+            file: file.to_string(),
+            revision,
+            sha256,
+            size_bytes,
+            quant: None,
+            installed_at: Some(Utc::now()),
+            last_used: None,
+        };
+        let mut manifest = self.load_manifest()?;
+        manifest.models.insert(alias.to_string(), record.clone());
+        self.save_manifest(&manifest)?;
+        Ok(record)
+    }
+
+    pub fn discover_local_models(&self) -> Result<usize> {
+        if !self.paths.cache_dir.exists() {
+            fs::create_dir_all(&self.paths.cache_dir).ok();
+            return Ok(0);
+        }
+
+        let mut manifest = self.load_manifest()?;
+        let mut registered_files: std::collections::BTreeSet<String> = manifest
+            .models
+            .values()
+            .map(|record| record.file.clone())
+            .collect();
+        let mut aliases: std::collections::BTreeSet<String> =
+            manifest.models.keys().cloned().collect();
+        let mut count = 0usize;
+
+        if let Ok(entries) = fs::read_dir(&self.paths.cache_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+                let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+                    continue;
+                };
+                if !file_name.to_ascii_lowercase().ends_with(".bin")
+                    && !file_name.to_ascii_lowercase().ends_with(".gguf")
+                {
+                    continue;
+                }
+                if validate_model_file_name(file_name).is_err()
+                    || registered_files.contains(file_name)
+                {
+                    continue;
+                }
+
+                let size_bytes = fs::metadata(&path).ok().map(|metadata| metadata.len());
+                let base_alias = path
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .filter(|stem| !stem.is_empty())
+                    .unwrap_or(file_name)
+                    .to_string();
+                let mut alias = base_alias.clone();
+                let mut suffix = 2usize;
+                while aliases.contains(&alias) {
+                    alias = format!("{base_alias}-{suffix}");
+                    suffix += 1;
+                }
+
+                let record = ModelRecord {
+                    alias: alias.clone(),
+                    repo: "local".to_string(),
+                    file: file_name.to_string(),
+                    revision: None,
+                    sha256: None,
+                    size_bytes,
+                    quant: None,
+                    installed_at: Some(Utc::now()),
+                    last_used: None,
+                };
+                manifest.models.insert(alias.clone(), record);
+                aliases.insert(alias);
+                registered_files.insert(file_name.to_string());
+                count += 1;
+            }
+        }
+
+        if count > 0 {
+            self.save_manifest(&manifest)?;
+        }
+        Ok(count)
+    }
+
+    fn resolve_alias_in(manifest: &Manifest, requested: &str) -> Option<String> {
+        if manifest.models.contains_key(requested) {
+            return Some(requested.to_string());
+        }
+        manifest
+            .models
+            .iter()
+            .find(|(_, record)| {
+                record.file.eq_ignore_ascii_case(requested)
+                    || Path::new(&record.file)
+                        .file_stem()
+                        .and_then(|stem| stem.to_str())
+                        .is_some_and(|stem| stem.eq_ignore_ascii_case(requested))
+            })
+            .map(|(alias, _)| alias.clone())
+    }
+
+    pub fn resolve_alias(&self, requested: &str) -> Result<Option<String>> {
+        let _ = self.discover_local_models();
+        let manifest = self.load_manifest()?;
+        Ok(Self::resolve_alias_in(&manifest, requested))
+    }
+
     pub fn rm(&self, alias: &str) -> Result<bool> {
+        let _ = self.discover_local_models();
         let mut m = self.load_manifest()?;
-        if let Some(rec) = m.models.remove(alias) {
+        let Some(key) = Self::resolve_alias_in(&m, alias) else {
+            return Ok(false);
+        };
+        if let Some(rec) = m.models.remove(&key) {
             let p = self.model_path(&rec.file);
             let _ = fs::remove_file(&p);
             self.save_manifest(&m)?;
@@ -341,7 +500,10 @@ impl<C: HttpClient + 'static> ModelManager<C> {
 
     pub fn verify(&self, alias: &str) -> Result<bool> {
         let m = self.load_manifest()?;
-        let Some(rec) = m.models.get(alias) else {
+        let Some(key) = Self::resolve_alias_in(&m, alias) else {
+            return Ok(false);
+        };
+        let Some(rec) = m.models.get(&key) else {
             return Ok(false);
         };
         let p = self.model_path(&rec.file);
@@ -390,8 +552,12 @@ impl<C: HttpClient + 'static> ModelManager<C> {
 
     pub fn add_or_update(&self, alias: &str, repo: &str, file: &str) -> Result<ModelRecord> {
         validate_model_file_name(file)?;
-        fs::create_dir_all(&self.paths.cache_dir)
-            .with_context(|| format!("create cache dir {}", self.paths.cache_dir.display()))?;
+        fs::create_dir_all(&self.paths.cache_dir).with_context(|| {
+            format!(
+                "create cache dir {}",
+                crate::ui::terminal_safe_path(&self.paths.cache_dir)
+            )
+        })?;
 
         let url = format!(
             "https://huggingface.co/{}/resolve/main/{}?download=true",
@@ -634,7 +800,11 @@ impl<C: HttpClient + 'static> ModelManager<C> {
         }
         // Atomic rename
         fs::rename(&dest_tmp, &dest_final).with_context(|| {
-            format!("rename {} -> {}", dest_tmp.display(), dest_final.display())
+            format!(
+                "rename {} -> {}",
+                crate::ui::terminal_safe_path(&dest_tmp),
+                crate::ui::terminal_safe_path(&dest_final)
+            )
         })?;
         // Disarm guard; .part has been moved or cleaned
         _tmp_guard.disarm();
@@ -1077,5 +1247,77 @@ mod tests {
         // rm
         assert!(mm.rm("tiny").unwrap());
         assert!(!mm.rm("tiny").unwrap());
+    }
+
+    #[test]
+    fn test_register_local_model_appears_in_ls_and_persists() {
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let cache = temp.path().join("cache");
+        let cfg_dir = temp.path().join("config");
+        let cfg = cfg_dir.join("models.json");
+        setup_env(&cache, &cfg);
+        fs::create_dir_all(&cache).unwrap();
+        let model_dir = cache.join("models");
+        fs::create_dir_all(&model_dir).unwrap();
+        let model = model_dir.join("ggml-small.bin");
+        fs::write(&model, vec![0u8; 128]).unwrap();
+
+        let mm: ModelManager<StubHttp> = ModelManager::new_with_client(
+            StubHttp {
+                data: Arc::new(vec![0u8; 16]),
+                etag: Arc::new(None),
+                accept_ranges: true,
+            },
+            Settings::default(),
+        )
+        .unwrap();
+        let rec = mm
+            .register_local_model("small", "local/source", "ggml-small.bin", None, None, None)
+            .unwrap();
+        assert_eq!(rec.alias, "small");
+        assert!(
+            mm.ls()
+                .unwrap()
+                .iter()
+                .any(|r| r.alias == "small" && r.file == "ggml-small.bin")
+        );
+
+        // Restart persistence: a fresh manager reads the same manifest.
+        let mm2: ModelManager<StubHttp> = ModelManager::new_with_client(
+            StubHttp {
+                data: Arc::new(vec![0u8; 16]),
+                etag: Arc::new(None),
+                accept_ranges: true,
+            },
+            Settings::default(),
+        )
+        .unwrap();
+        assert!(mm2.ls().unwrap().iter().any(|r| r.alias == "small"));
+    }
+
+    #[test]
+    fn test_discover_local_models_registers_existing_files() {
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let cache = temp.path().join("cache");
+        let cfg_dir = temp.path().join("config");
+        let cfg = cfg_dir.join("models.json");
+        setup_env(&cache, &cfg);
+        let model_dir = cache.join("models");
+        fs::create_dir_all(&model_dir).unwrap();
+        fs::write(model_dir.join("ggml-tiny.bin"), vec![0u8; 64]).unwrap();
+
+        let mm: ModelManager<StubHttp> = ModelManager::new_with_client(
+            StubHttp {
+                data: Arc::new(vec![0u8; 16]),
+                etag: Arc::new(None),
+                accept_ranges: true,
+            },
+            Settings::default(),
+        )
+        .unwrap();
+        assert_eq!(mm.discover_local_models().unwrap(), 1);
+        assert!(mm.ls().unwrap().iter().any(|r| r.file == "ggml-tiny.bin"));
     }
 }

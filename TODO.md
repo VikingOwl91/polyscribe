@@ -33,6 +33,7 @@ ideas** (directional, not scheduled).
   of the recording. See `docs/benchmarks/chunked-transcription.md`.
 
 ### D8. A transcript can be incomplete at a window boundary (P2, M)
+- Sprint 12 follow-up: the boundary recovery still decides whether a gap carries speech from signal level and the share of frames, not from a voice activity detector.
 - whisper does not always report a segment for the beginning of the audio it
   is given. The chunked pipeline decodes such a region again from a slightly
   different position, which recovers it in the recorded cases, but it cannot
@@ -76,8 +77,8 @@ ideas** (directional, not scheduled).
 ## Missing functionality
 
 ### F1. Automatic speaker diarization (P2, M)
-- Speaker labels are manual (`--set-speaker-names`). The downloader lists
-  `tinydiarize` models, but transcription never uses diarization.
+- Speaker labels are manual (`--set-speaker-names`). Transcription does not
+  perform automatic diarization.
 - AC: wire whisper.cpp diarization behind a `--diarize` flag; label segments
   by speaker turn; keep manual labels as the default; document that
   diarization is approximate.
@@ -153,11 +154,11 @@ ideas** (directional, not scheduled).
   engines (remote APIs, other local models) implement the trait and register
   in `select_backend`.
 
-### L3. Consolidation with the separate STT and YTT projects (L)
-- The STT and YTT projects are separate today. Consolidating them into this
-  repository would give one codebase, one release train and one plugin
-  protocol, instead of three.
-- The decisions are taken (2026-10-21):
+### L3. Remaining STT/YTT project integration (L)
+- As of 2026-10-23, this workspace implements local file transcription,
+  PipeWire live recording, and audio-only YouTube transcription. The older
+  `stt` and `ytt` command names are not compatibility commands here.
+- Decisions recorded on 2026-10-21:
   - **License**: MIT for PolyScribe, STT and YTT. Both Python repositories are
     the work of one author and hold no third-party code, so the license can be
     set on them; their code may then be used as the specification of a port.
@@ -170,14 +171,14 @@ ideas** (directional, not scheduled).
     override. The core detects the language once and pins it. `record` uses
     automatic detection by default; file transcription still requires
     `--language`.
-  - **Command line**: `polyscribe transcribe` and `polyscribe record` are
-    implemented workflows. The STT/YTT workflows are not yet migrated, and
-    no compatibility wrappers for `stt` or `ytt` are planned.
-  - **Home Assistant**: the YTT bridge is not migrated.
-- The STT/YTT consolidation is not implemented yet. PolyScribe's live record
-  workflow is already in place; decisions that remain include the shape of
-  the source adapters, whether the remote engine (Voxtral) is a first-class
-  engine, and the versioning of the combined project.
+  - **Command line**: `transcribe`, `record`, and audio-only `youtube` are
+    implemented. No compatibility wrappers for `stt` or `ytt` are planned.
+  - **Voxtral**: available only as an optional local YouTube wrapper; it is
+    not a general `TranscribeBackend` or a bundled engine.
+  - **Home Assistant**: the former YTT bridge is not part of this workspace.
+- Remaining work is cross-project integration, if requested. It does not mean
+  that the implemented `transcribe`, `record`, or `youtube` commands are
+  planned features.
 
 ### L4. ytt / STT-CLI integration (L)
 - Long-term direction: a reusable speech-processing foundation (file, mic,
