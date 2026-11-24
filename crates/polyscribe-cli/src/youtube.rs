@@ -12,10 +12,11 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use polyscribe_core::backend::{
-    BackendKind, ModelSession, select_backend, transcribe_with_decoder_timeout,
+    BackendKind, ModelSession, TranscribeBackend, select_backend, transcribe_with_decoder_timeout,
 };
 use polyscribe_core::find_model_file;
 use polyscribe_core::ui::progress::TranscriptProgress;
+use polyscribe_core::voxtral_cloud::{CloudVoxtralBackend, DEFAULT_VOXTRAL_CLOUD_MODEL};
 use polyscribe_core::youtube::{
     CaptionCue, NormalizationStats, TranscriptFrontmatter, VideoMetadata,
     YOUTUBE_NORMALIZATION_VERSION, build_frontmatter, canonical_file_name, iso_upload_date,
@@ -23,6 +24,8 @@ use polyscribe_core::youtube::{
 };
 use serde::Serialize;
 
+use crate::cli::Engine;
+use crate::transcribe::{ResolvedEngine, resolve_engine};
 use crate::youtube_cache::{
     CACHE_SCHEMA_VERSION, CacheIdentity, CacheRecord, ExecutableIdentity, Lookup, ModelStat,
     RequestKey, SourceIdentity, VideoSummary, YoutubeCache, file_stat, model_stat,
@@ -113,6 +116,7 @@ enum YouTubeErrorKind {
     AudioDownload,
     AudioDecode,
     Whisper,
+    Cloud,
 }
 
 #[derive(Debug)]
@@ -147,6 +151,7 @@ impl std::fmt::Display for YouTubeErrorKind {
             Self::AudioDownload => "audio_download",
             Self::AudioDecode => "audio_decode",
             Self::Whisper => "whisper",
+            Self::Cloud => "cloud",
         };
         formatter.write_str(name)
     }
@@ -204,6 +209,9 @@ pub fn run(
     captions_only: bool,
     _audio_only: bool,
     no_frontmatter: bool,
+    engine: Engine,
+    voxtral_model: Option<String>,
+    yes: bool,
 ) -> Result<()> {
     let yt_url = validate_youtube_url(&url)
         .map_err(|error| youtube_error(YouTubeErrorKind::InvalidUrl, error.to_string()))?;
@@ -224,6 +232,14 @@ pub fn run(
             "--captions-only is unsupported; YouTube transcription uses audio only",
         ));
     }
+    if yes {
+        polyscribe_core::voxtral_cloud::set_cloud_consent(true);
+    }
+    let resolved_engine = resolve_engine(engine);
+    if matches!(resolved_engine, ResolvedEngine::AutoCloud) {
+        polyscribe_core::voxtral_cloud::warn_auto_cloud_once();
+    }
+    polyscribe_core::dlog!(1, "Resolved engine: {resolved_engine:?}");
     let cookies = select_cookies(cookies.as_deref(), no_cookies)?
         .map(prepare_cookies)
         .transpose()?;
@@ -237,6 +253,8 @@ pub fn run(
         voxtral_executable: voxtral_config.path_bytes.clone(),
         voxtral_executable_identity: voxtral_config.executable_stat.clone(),
         cookie_file_identity: cookies.as_ref().map(|cookies| cookies.identity.clone()),
+        engine,
+        voxtral_model: voxtral_model.clone(),
     };
 
     // Unix file identity separates authenticated requests without retaining secrets.
@@ -313,6 +331,8 @@ pub fn run(
         language.as_deref(),
         &request,
         &voxtral_config,
+        resolved_engine,
+        voxtral_model,
     )?;
     write_transcript(
         &source_url,
@@ -747,6 +767,7 @@ fn wrap_audio_download_error(error: anyhow::Error) -> anyhow::Error {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn transcribe_audio(
     context: &DownloadContext<'_>,
     url: &str,
@@ -754,21 +775,29 @@ fn transcribe_audio(
     language: Option<&str>,
     request: &RequestKey,
     voxtral_config: &VoxtralConfigSnapshot,
+    engine: ResolvedEngine,
+    voxtral_model: Option<String>,
 ) -> Result<CacheRecord> {
     let audio_path = download_audio(context, url)?;
     polyscribe_core::ilog!("YouTube audio downloaded; starting transcription...");
-    let (source, cues) = transcribe_with_whisper_fallback(
-        language,
+    let (source, cues) = transcribe_with_selected_engine(
+        engine,
+        || transcribe_cloud(&audio_path, language, voxtral_model.clone()),
         || {
-            crate::youtube_voxtral::transcribe(
-                voxtral_config.executable.clone(),
-                &audio_path,
+            transcribe_with_whisper_fallback(
                 language,
-                context.directory,
-                &polyscribe_core::stream::CancellationToken::new(),
+                || {
+                    crate::youtube_voxtral::transcribe(
+                        voxtral_config.executable.clone(),
+                        &audio_path,
+                        language,
+                        context.directory,
+                        &polyscribe_core::stream::CancellationToken::new(),
+                    )
+                },
+                || transcribe_whisper(&audio_path, language),
             )
         },
-        || transcribe_whisper(&audio_path, language),
     )?;
     let record = CacheRecord {
         schema_version: CACHE_SCHEMA_VERSION,
@@ -792,6 +821,140 @@ fn transcribe_audio(
         store_cache(context.cache, &record);
     }
     Ok(record)
+}
+
+/// Run the engine selected for this run. `cloud` transcribes the downloaded
+/// audio with the Mistral cloud engine; `local` is the unchanged local path
+/// (the optional `POLYSCRIBE_VOXTRAL` wrapper, then local Whisper).
+///
+/// - `whisper`: only the local path runs, exactly as before.
+/// - `voxtral-cloud`: only the cloud runs; a cloud error aborts with
+///   `YouTubeErrorKind::Cloud` and there is no fallback.
+/// - `auto` (resolved to the cloud): the cloud runs first; on error a visible
+///   warning is printed and the local path runs once. The returned source
+///   identity is the one of the engine that actually produced the result, so
+///   a fallback result is cached under the engine that really ran.
+fn transcribe_with_selected_engine(
+    engine: ResolvedEngine,
+    cloud: impl FnOnce() -> Result<(SourceIdentity, Vec<CaptionCue>)>,
+    local: impl FnOnce() -> Result<(SourceIdentity, Vec<CaptionCue>)>,
+) -> Result<(SourceIdentity, Vec<CaptionCue>)> {
+    match engine {
+        ResolvedEngine::Whisper => local(),
+        ResolvedEngine::VoxtralCloud => cloud().map_err(|error| match failure_kind(&error) {
+            Some(_) => error,
+            None => youtube_error(
+                YouTubeErrorKind::Cloud,
+                format!("Mistral cloud transcription failed: {error:#}"),
+            ),
+        }),
+        ResolvedEngine::AutoCloud => match cloud() {
+            Ok(result) => Ok(result),
+            Err(cloud_error) => {
+                // The cloud error text is already scrubbed of the API key by
+                // the cloud backend, so it can be shown.
+                polyscribe_core::ui::warn(format!(
+                    "The Mistral cloud transcription failed ({cloud_error:#}); \
+                     falling back to the local engine."
+                ));
+                local().map_err(|local_error| {
+                    let kind = failure_kind(&local_error).unwrap_or(YouTubeErrorKind::Whisper);
+                    youtube_error(
+                        kind,
+                        format!(
+                            "Mistral cloud transcription failed ({cloud_error:#}); \
+                             local fallback failed: {local_error:#}"
+                        ),
+                    )
+                })
+            }
+        },
+    }
+}
+
+/// Transcribe the downloaded audio file with the Mistral cloud engine
+/// (`CloudVoxtralBackend`). Only the audio file is uploaded; no cookies, URL,
+/// or video metadata are sent. The API key never appears in any error
+/// message (the backend scrubs it). The cloud path attaches no speaker label.
+fn transcribe_cloud(
+    audio_path: &Path,
+    language: Option<&str>,
+    voxtral_model: Option<String>,
+) -> Result<(SourceIdentity, Vec<CaptionCue>)> {
+    let model = voxtral_model.unwrap_or_else(|| DEFAULT_VOXTRAL_CLOUD_MODEL.to_string());
+    polyscribe_core::ilog!("Transcribing with the Mistral cloud engine (model {model})...");
+    let mut backend = CloudVoxtralBackend::new(model.clone()).map_err(|error| {
+        youtube_error(
+            YouTubeErrorKind::Cloud,
+            format!("could not set up the Mistral cloud engine: {error:#}"),
+        )
+    })?;
+    let transcript_progress =
+        TranscriptProgress::start("Transcribing YouTube audio (Mistral cloud)");
+    let progress = |percent: i32| {
+        transcript_progress.update(percent);
+        if !transcript_progress.is_enabled() {
+            polyscribe_core::dlog!(1, "cloud YouTube transcription: {percent}%");
+        }
+    };
+    let result = backend.transcribe(
+        audio_path,
+        "",
+        language_for_whisper(language).as_deref(),
+        None,
+        Some(&progress),
+    );
+    transcript_progress.finish(if result.is_ok() {
+        "Transcript ready"
+    } else {
+        "Transcription failed"
+    });
+    let entries = result.map_err(|error| {
+        youtube_error(
+            YouTubeErrorKind::Cloud,
+            format!("Mistral cloud transcription failed: {error:#}"),
+        )
+    })?;
+    if entries.is_empty() {
+        return Err(youtube_error(
+            YouTubeErrorKind::Cloud,
+            "Mistral cloud produced no transcript cues",
+        ));
+    }
+    let cues = entries_to_cues(entries).map_err(|reason| {
+        youtube_error(
+            YouTubeErrorKind::Cloud,
+            format!("Mistral cloud produced invalid transcript cues: {reason}"),
+        )
+    })?;
+    Ok((
+        SourceIdentity::CloudVoxtral {
+            model,
+            language_hint: language.map(ToString::to_string),
+        },
+        cues,
+    ))
+}
+
+/// Convert backend output entries to validated caption cues, sorted by start
+/// time. An empty speaker label becomes `None` (no speaker). Shared by the
+/// local Whisper path and the cloud path.
+fn entries_to_cues(
+    entries: Vec<polyscribe_core::OutputEntry>,
+) -> std::result::Result<Vec<CaptionCue>, &'static str> {
+    let mut cues: Vec<CaptionCue> = entries
+        .into_iter()
+        .map(|entry| CaptionCue {
+            start_ms: seconds_to_milliseconds(entry.start),
+            end_ms: seconds_to_milliseconds(entry.end).max(seconds_to_milliseconds(entry.start)),
+            text: entry.text,
+            speaker: (!entry.speaker.is_empty()).then_some(entry.speaker),
+            speaker_marker: false,
+        })
+        .collect();
+    cues.sort_by_key(|cue| cue.start_ms);
+    crate::youtube_transcript::normalize_and_validate_cues(&mut cues)?;
+    Ok(cues)
 }
 
 fn transcribe_with_whisper_fallback(
@@ -874,7 +1037,9 @@ fn transcribe_whisper(
         .filter(|name| !name.is_empty())
         .unwrap_or("whisper-model")
         .to_string();
-    let speaker = "speaker1";
+    // No speaker label: there is no diarization for a single unknown speaker,
+    // and a fixed label would be misleading in the txt output. The empty
+    // label becomes `speaker: None` in the cues.
     let transcript_progress = TranscriptProgress::start("Transcribing YouTube audio");
     let progress = |percent| {
         transcript_progress.update(percent);
@@ -890,7 +1055,7 @@ fn transcribe_whisper(
         &mut session,
         backend,
         audio_path,
-        speaker,
+        "",
         language_for_whisper(language).as_deref(),
         Some(&progress),
         AUDIO_DECODER_TIMEOUT,
@@ -915,18 +1080,7 @@ fn transcribe_whisper(
             "local Whisper produced no transcript cues",
         ));
     }
-    let mut cues: Vec<CaptionCue> = entries
-        .into_iter()
-        .map(|entry| CaptionCue {
-            start_ms: seconds_to_milliseconds(entry.start),
-            end_ms: seconds_to_milliseconds(entry.end).max(seconds_to_milliseconds(entry.start)),
-            text: entry.text,
-            speaker: (!entry.speaker.is_empty()).then_some(entry.speaker),
-            speaker_marker: false,
-        })
-        .collect();
-    cues.sort_by_key(|cue| cue.start_ms);
-    crate::youtube_transcript::normalize_and_validate_cues(&mut cues).map_err(|reason| {
+    let cues = entries_to_cues(entries).map_err(|reason| {
         youtube_error(
             YouTubeErrorKind::Whisper,
             format!("local Whisper produced invalid transcript cues: {reason}"),
@@ -1216,6 +1370,21 @@ fn write_transcript(
             None,
             Some(backend.as_str()),
         ),
+        SourceIdentity::CloudVoxtral {
+            model,
+            language_hint,
+        } => (
+            "cloud-voxtral",
+            "voxtral-cloud",
+            model.as_str(),
+            // The language is the hint that was sent, never a detected or
+            // guessed value; without a hint it stays null.
+            language_hint.as_deref(),
+            None,
+            None,
+            None,
+            None,
+        ),
     };
     let rendered = match format {
         // srt cannot carry metadata; it stays plain cues in every mode.
@@ -1301,20 +1470,32 @@ fn write_transcript(
         }
         stdout.flush()?;
     }
+    eprintln!("{}", source_summary_line(source, video_id, cues.len()));
+    Ok(())
+}
+
+/// The short stderr summary line naming the source that produced the
+/// transcript.
+fn source_summary_line(source: &SourceIdentity, video_id: &str, cue_count: usize) -> String {
     match source {
         SourceIdentity::LocalVoxtral {
             model, language, ..
-        } => eprintln!(
-            "source: local-voxtral, video: {video_id}, model: {model}, language: {}, cues: {}",
-            language.as_deref().unwrap_or("unknown"),
-            cues.len()
+        } => format!(
+            "source: local-voxtral, video: {video_id}, model: {model}, language: {}, cues: {cue_count}",
+            language.as_deref().unwrap_or("unknown")
         ),
-        SourceIdentity::LocalWhisper { backend, .. } => eprintln!(
-            "source: local-whisper, video: {video_id}, backend: {backend}, cues: {}",
-            cues.len()
+        SourceIdentity::LocalWhisper { backend, .. } => format!(
+            "source: local-whisper, video: {video_id}, backend: {backend}, cues: {cue_count}"
+        ),
+        SourceIdentity::CloudVoxtral {
+            model,
+            language_hint,
+            ..
+        } => format!(
+            "source: cloud-voxtral, video: {video_id}, model: {model}, language: {}, cues: {cue_count}",
+            language_hint.as_deref().unwrap_or("unknown")
         ),
     }
-    Ok(())
 }
 
 fn validate_output_path(path: &Path) -> Result<()> {
@@ -1506,6 +1687,9 @@ mod tests {
             false,
             false,
             false,
+            Engine::Whisper,
+            None,
+            false,
         )
         .unwrap_err()
         .to_string();
@@ -1538,5 +1722,382 @@ mod tests {
         watcher.join().unwrap();
         assert!(exceeded.load(Ordering::Relaxed));
         assert!(cancellation.is_cancelled());
+    }
+
+    fn test_cue() -> CaptionCue {
+        CaptionCue {
+            start_ms: 0,
+            end_ms: 1200,
+            text: "hello".to_string(),
+            speaker: None,
+            speaker_marker: false,
+        }
+    }
+
+    fn test_record(source: SourceIdentity) -> CacheRecord {
+        CacheRecord {
+            schema_version: CACHE_SCHEMA_VERSION,
+            normalization_version: YOUTUBE_NORMALIZATION_VERSION,
+            identity: CacheIdentity {
+                request: RequestKey {
+                    cache_schema_version: CACHE_SCHEMA_VERSION,
+                    normalization_version: YOUTUBE_NORMALIZATION_VERSION,
+                    selection_policy_version: AUDIO_POLICY_VERSION,
+                    video_id: "dQw4w9WgXcQ".to_string(),
+                    requested_language: None,
+                    voxtral_executable: None,
+                    voxtral_executable_identity: None,
+                    cookie_file_identity: None,
+                    engine: Engine::Whisper,
+                    voxtral_model: None,
+                },
+                source,
+            },
+            acquired_at: "2026-01-02T03:04:05+00:00".to_string(),
+            metadata: VideoSummary::default(),
+            original_cues: vec![test_cue()],
+            cues: vec![test_cue()],
+            normalization: NormalizationStats::default(),
+        }
+    }
+
+    fn local_source() -> (SourceIdentity, Vec<CaptionCue>) {
+        (
+            SourceIdentity::LocalWhisper {
+                model_name: "ggml-base.bin".to_string(),
+                model_stat: ModelStat {
+                    device: 0,
+                    inode: 0,
+                    size: 1,
+                    modified_seconds: 0,
+                    modified_nanoseconds: 0,
+                    changed_seconds: 0,
+                    changed_nanoseconds: 0,
+                },
+                backend: "cpu".to_string(),
+                language_hint: None,
+            },
+            vec![test_cue()],
+        )
+    }
+
+    fn cloud_source() -> (SourceIdentity, Vec<CaptionCue>) {
+        (
+            SourceIdentity::CloudVoxtral {
+                model: "voxtral-mini-transcribe-3".to_string(),
+                language_hint: None,
+            },
+            vec![test_cue()],
+        )
+    }
+
+    #[test]
+    fn engine_whisper_runs_the_local_path_only() {
+        let mut cloud_calls = 0;
+        let (source, cues) = transcribe_with_selected_engine(
+            ResolvedEngine::Whisper,
+            || {
+                cloud_calls += 1;
+                Ok(cloud_source())
+            },
+            || Ok(local_source()),
+        )
+        .unwrap();
+        assert_eq!(cloud_calls, 0);
+        assert!(matches!(source, SourceIdentity::LocalWhisper { .. }));
+        assert_eq!(cues.len(), 1);
+    }
+
+    #[test]
+    fn engine_voxtral_cloud_success_keeps_the_cloud_identity_and_skips_local() {
+        let mut local_calls = 0;
+        let (source, _) = transcribe_with_selected_engine(
+            ResolvedEngine::VoxtralCloud,
+            || Ok(cloud_source()),
+            || {
+                local_calls += 1;
+                Ok(local_source())
+            },
+        )
+        .unwrap();
+        assert_eq!(local_calls, 0);
+        let SourceIdentity::CloudVoxtral {
+            model,
+            language_hint,
+        } = source
+        else {
+            panic!("expected the cloud source identity");
+        };
+        assert_eq!(model, "voxtral-mini-transcribe-3");
+        assert_eq!(language_hint, None);
+    }
+
+    #[test]
+    fn engine_voxtral_cloud_aborts_with_cloud_kind_and_no_fallback_on_error() {
+        let mut local_calls = 0;
+        let error = transcribe_with_selected_engine(
+            ResolvedEngine::VoxtralCloud,
+            || Err(anyhow!("mock cloud failure without any key material")),
+            || {
+                local_calls += 1;
+                Ok(local_source())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(local_calls, 0, "explicit voxtral-cloud must not fall back");
+        assert_eq!(failure_kind(&error), Some(YouTubeErrorKind::Cloud));
+        let message = format!("{error:#}");
+        assert!(message.contains("cloud"), "{message}");
+        assert!(message.contains("mock cloud failure"), "{message}");
+    }
+
+    #[test]
+    fn engine_auto_cloud_falls_back_to_local_and_keeps_the_real_source() {
+        let mut cloud_calls = 0;
+        let mut local_calls = 0;
+        let (source, cues) = transcribe_with_selected_engine(
+            ResolvedEngine::AutoCloud,
+            || {
+                cloud_calls += 1;
+                Err(youtube_error(YouTubeErrorKind::Cloud, "mock cloud failure"))
+            },
+            || {
+                local_calls += 1;
+                Ok(local_source())
+            },
+        )
+        .unwrap();
+        assert_eq!(cloud_calls, 1);
+        assert_eq!(local_calls, 1);
+        // The cached identity is the engine that really produced the result.
+        assert!(matches!(source, SourceIdentity::LocalWhisper { .. }));
+        assert_eq!(cues.len(), 1);
+    }
+
+    #[test]
+    fn engine_auto_cloud_reports_both_errors_when_the_fallback_fails_too() {
+        let error = transcribe_with_selected_engine(
+            ResolvedEngine::AutoCloud,
+            || Err(youtube_error(YouTubeErrorKind::Cloud, "cloud reason")),
+            || Err(youtube_error(YouTubeErrorKind::Whisper, "whisper reason")),
+        )
+        .unwrap_err();
+        assert_eq!(failure_kind(&error), Some(YouTubeErrorKind::Whisper));
+        let message = format!("{error:#}");
+        assert!(message.contains("cloud reason"), "{message}");
+        assert!(message.contains("whisper reason"), "{message}");
+    }
+
+    /// Serializes tests that mutate process environment variables.
+    static ENV_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+
+    #[test]
+    fn resolve_engine_auto_follows_only_the_token_file_and_selects_cloud_first() {
+        use polyscribe_core::voxtral_cloud::{ENV_API_KEY, ENV_TOKEN_FILE};
+        let _guard = ENV_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap();
+        let old_key = std::env::var(ENV_API_KEY).ok();
+        let old_file = std::env::var_os(ENV_TOKEN_FILE);
+        // Always point the override into the temp dir, so the real token
+        // file of this machine is never read.
+        let dir = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(ENV_TOKEN_FILE, dir.path().join("absent")) };
+        unsafe { std::env::remove_var(ENV_API_KEY) };
+        // No token file: auto is local, even with MISTRAL_API_KEY set.
+        assert_eq!(resolve_engine(Engine::Auto), ResolvedEngine::Whisper);
+        unsafe { std::env::set_var(ENV_API_KEY, "env-only-key") };
+        assert_eq!(resolve_engine(Engine::Auto), ResolvedEngine::Whisper);
+
+        let token = dir.path().join("mistral_token");
+        std::fs::write(&token, "file-key\n").unwrap();
+        unsafe { std::env::set_var(ENV_TOKEN_FILE, &token) };
+        assert_eq!(resolve_engine(Engine::Auto), ResolvedEngine::AutoCloud);
+        // With the token file configured, auto tries the cloud first and
+        // falls back to the local path on a cloud error.
+        let mut local_calls = 0;
+        let (source, _) = transcribe_with_selected_engine(
+            resolve_engine(Engine::Auto),
+            || Err(anyhow!("offline mock cloud failure")),
+            || {
+                local_calls += 1;
+                Ok(local_source())
+            },
+        )
+        .unwrap();
+        assert_eq!(local_calls, 1);
+        assert!(matches!(source, SourceIdentity::LocalWhisper { .. }));
+
+        match old_key {
+            Some(v) => unsafe { std::env::set_var(ENV_API_KEY, v) },
+            None => unsafe { std::env::remove_var(ENV_API_KEY) },
+        }
+        match old_file {
+            Some(v) => unsafe { std::env::set_var(ENV_TOKEN_FILE, v) },
+            None => unsafe { std::env::remove_var(ENV_TOKEN_FILE) },
+        }
+    }
+
+    #[test]
+    fn entries_to_cues_drops_the_empty_speaker_and_sorts_by_start() {
+        use polyscribe_core::OutputEntry;
+        let entries = vec![
+            OutputEntry {
+                id: 0,
+                speaker: String::new(),
+                start: 2.0,
+                end: 3.0,
+                text: "second".to_string(),
+            },
+            OutputEntry {
+                id: 0,
+                speaker: "alice".to_string(),
+                start: 0.5,
+                end: 1.0,
+                text: "first".to_string(),
+            },
+        ];
+        let cues = entries_to_cues(entries).unwrap();
+        assert_eq!(cues.len(), 2);
+        assert_eq!(cues[0].text, "first");
+        assert_eq!(cues[0].start_ms, 500);
+        assert_eq!(cues[0].speaker.as_deref(), Some("alice"));
+        assert_eq!(cues[1].text, "second");
+        assert_eq!(cues[1].speaker, None, "an empty label must become None");
+        let rendered = polyscribe_core::youtube::render_txt(&cues);
+        assert!(!rendered.contains("speaker1"), "{rendered}");
+
+        let invalid = vec![OutputEntry {
+            id: 0,
+            speaker: String::new(),
+            start: 0.0,
+            end: 1.0,
+            text: "   ".to_string(),
+        }];
+        assert!(entries_to_cues(invalid).is_err());
+    }
+
+    #[test]
+    fn write_transcript_renders_the_cloud_source_in_json_and_txt() {
+        let dir = tempfile::tempdir().unwrap();
+        let record = test_record(SourceIdentity::CloudVoxtral {
+            model: "voxtral-mini-transcribe-3".to_string(),
+            language_hint: None,
+        });
+
+        let json_path = dir.path().join("out.json");
+        write_transcript(
+            "https://youtu.be/dQw4w9WgXcQ",
+            "dQw4w9WgXcQ",
+            "json",
+            Some(&json_path),
+            &record,
+            false,
+        )
+        .unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&json_path).unwrap()).unwrap();
+        assert_eq!(json["source"], "cloud-voxtral");
+        assert_eq!(json["engine"], "voxtral-cloud");
+        assert_eq!(json["model"], "voxtral-mini-transcribe-3");
+        assert!(
+            json["language"].is_null(),
+            "no hint means null, never a guess"
+        );
+        assert!(json["cues"][0].get("speaker").is_none());
+
+        let txt_path = dir.path().join("out.txt");
+        write_transcript(
+            "https://youtu.be/dQw4w9WgXcQ",
+            "dQw4w9WgXcQ",
+            "txt",
+            Some(&txt_path),
+            &record,
+            false,
+        )
+        .unwrap();
+        let txt = std::fs::read_to_string(&txt_path).unwrap();
+        assert!(txt.contains("engine: \"voxtral-cloud\""), "{txt}");
+        assert!(
+            txt.contains("model: \"voxtral-mini-transcribe-3\""),
+            "{txt}"
+        );
+        assert!(txt.contains("language: null"), "{txt}");
+        assert!(txt.contains("hello"), "{txt}");
+        assert!(!txt.contains("speaker1"), "{txt}");
+    }
+
+    #[test]
+    fn write_transcript_cloud_language_is_the_hint_never_a_guess() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut record = test_record(SourceIdentity::CloudVoxtral {
+            model: "some-model".to_string(),
+            language_hint: Some("de".to_string()),
+        });
+        record.identity.request.requested_language = Some("de".to_string());
+        let json_path = dir.path().join("out.json");
+        write_transcript(
+            "https://youtu.be/dQw4w9WgXcQ",
+            "dQw4w9WgXcQ",
+            "json",
+            Some(&json_path),
+            &record,
+            false,
+        )
+        .unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&json_path).unwrap()).unwrap();
+        assert_eq!(json["language"], "de");
+        assert_eq!(json["requested_language"], "de");
+        assert_eq!(json["engine"], "voxtral-cloud");
+        assert_eq!(json["model"], "some-model");
+    }
+
+    #[test]
+    fn write_transcript_local_records_carry_no_speaker_label() {
+        let dir = tempfile::tempdir().unwrap();
+        let record = test_record(SourceIdentity::LocalWhisper {
+            model_name: "ggml-base.bin".to_string(),
+            model_stat: ModelStat {
+                device: 0,
+                inode: 0,
+                size: 1,
+                modified_seconds: 0,
+                modified_nanoseconds: 0,
+                changed_seconds: 0,
+                changed_nanoseconds: 0,
+            },
+            backend: "cpu".to_string(),
+            language_hint: Some("en".to_string()),
+        });
+        let txt_path = dir.path().join("out.txt");
+        write_transcript("u", "dQw4w9WgXcQ", "txt", Some(&txt_path), &record, false).unwrap();
+        let txt = std::fs::read_to_string(&txt_path).unwrap();
+        assert!(!txt.contains("speaker1"), "{txt}");
+        assert!(txt.contains("engine: \"whisper\""), "{txt}");
+
+        let json_path = dir.path().join("out.json");
+        write_transcript("u", "dQw4w9WgXcQ", "json", Some(&json_path), &record, false).unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&json_path).unwrap()).unwrap();
+        assert_eq!(json["source"], "local-whisper");
+        assert!(json["cues"][0].get("speaker").is_none());
+    }
+
+    #[test]
+    fn source_summary_line_names_each_source() {
+        let cloud = SourceIdentity::CloudVoxtral {
+            model: "some-model".to_string(),
+            language_hint: None,
+        };
+        let line = source_summary_line(&cloud, "vid", 3);
+        assert!(line.contains("source: cloud-voxtral"), "{line}");
+        assert!(line.contains("model: some-model"), "{line}");
+        assert!(line.contains("cues: 3"), "{line}");
+        let whisper = local_source().0;
+        let line = source_summary_line(&whisper, "vid", 2);
+        assert!(line.contains("source: local-whisper"), "{line}");
+        assert!(line.contains("backend: cpu"), "{line}");
     }
 }

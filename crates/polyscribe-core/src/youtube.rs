@@ -8,7 +8,11 @@
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 
-pub const YOUTUBE_NORMALIZATION_VERSION: u32 = 4;
+/// Version of the cue normalization. Bumped from 4 to 5 when the fixed
+/// `speaker1` label was removed from the local Whisper path: entries cached
+/// under version 4 may still carry that label in their cues, so they are
+/// discarded (never served) instead of being delivered as-is.
+pub const YOUTUBE_NORMALIZATION_VERSION: u32 = 5;
 
 /// A validated YouTube URL.
 #[derive(Debug, Clone, PartialEq, Eq)]

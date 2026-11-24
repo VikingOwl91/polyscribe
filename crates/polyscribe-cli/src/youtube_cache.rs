@@ -30,6 +30,17 @@ pub struct RequestKey {
     pub voxtral_executable_identity: Option<ExecutableIdentity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cookie_file_identity: Option<ModelStat>,
+    /// The engine requested on the command line (`whisper`, `voxtral-cloud`,
+    /// or `auto`). A cloud result is never served to a whisper request and
+    /// vice versa because the requested engine is part of the lookup key.
+    /// `auto` results are stored under the `auto` key; which engine actually
+    /// produced them is recorded in `SourceIdentity`.
+    #[serde(default)]
+    pub engine: crate::cli::Engine,
+    /// The `--voxtral-model` option as given (not the resolved default), so
+    /// cloud requests with different models never share a cache entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voxtral_model: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,6 +56,13 @@ pub enum SourceIdentity {
         model_name: String,
         model_stat: ModelStat,
         backend: String,
+        language_hint: Option<String>,
+    },
+    /// Produced by the Mistral cloud engine. Deliberately carries no API key
+    /// and no token-file path or content: only the model id and the language
+    /// hint that were sent with the request.
+    CloudVoxtral {
+        model: String,
         language_hint: Option<String>,
     },
 }
@@ -444,6 +462,14 @@ fn validate_source_identity(source: &SourceIdentity) -> Result<()> {
                 bail!("cache Whisper identity is invalid");
             }
         }
+        SourceIdentity::CloudVoxtral {
+            model,
+            language_hint,
+        } => {
+            if !valid_text(model, 256) || !valid_language(language_hint) {
+                bail!("cache cloud identity is invalid");
+            }
+        }
     }
     Ok(())
 }
@@ -718,18 +744,41 @@ mod tests {
     use polyscribe_core::youtube::CaptionCue;
 
     #[test]
-    fn anonymous_request_keeps_its_legacy_cache_key() {
+    fn legacy_requests_still_parse_but_never_match_a_current_lookup() {
+        // A cache key written before the engine fields existed and before the
+        // normalization version was raised to 5: it must still deserialize
+        // (missing fields take their defaults), but it must never equal or
+        // hash like a current request, so old entries are cleanly discarded
+        // instead of being served or mismatched.
         let legacy = r#"{"cache_schema_version":4,"normalization_version":4,"selection_policy_version":1,"video_id":"dQw4w9WgXcQ","requested_language":"de","voxtral_executable":null,"voxtral_executable_identity":null}"#;
-        let request = request("dQw4w9WgXcQ");
-        assert_eq!(serde_json::to_string(&request).unwrap(), legacy);
-        assert_eq!(serde_json::from_str::<RequestKey>(legacy).unwrap(), request);
+        let parsed: RequestKey = serde_json::from_str(legacy).unwrap();
+        assert_eq!(parsed.engine, crate::cli::Engine::Whisper);
+        assert_eq!(parsed.voxtral_model, None);
+        assert_eq!(parsed.normalization_version, 4);
+        let current = request("dQw4w9WgXcQ");
+        assert_ne!(parsed, current);
+        assert_ne!(
+            digest_json(&parsed).unwrap(),
+            digest_json(&current).unwrap()
+        );
+        // A current request round-trips and hashes its own serialization.
+        let serialized = serde_json::to_string(&current).unwrap();
+        assert!(serialized.contains(r#""engine":"whisper""#), "{serialized}");
         assert_eq!(
-            digest_json(&request).unwrap(),
-            format!("{:x}", Sha256::digest(legacy.as_bytes()))
+            serde_json::from_str::<RequestKey>(&serialized).unwrap(),
+            current
+        );
+        assert_eq!(
+            digest_json(&current).unwrap(),
+            format!("{:x}", Sha256::digest(serialized.as_bytes()))
         );
     }
 
     fn request(video_id: &str) -> RequestKey {
+        request_with_engine(video_id, crate::cli::Engine::Whisper)
+    }
+
+    fn request_with_engine(video_id: &str, engine: crate::cli::Engine) -> RequestKey {
         RequestKey {
             cache_schema_version: CACHE_SCHEMA_VERSION,
             normalization_version: YOUTUBE_NORMALIZATION_VERSION,
@@ -739,7 +788,25 @@ mod tests {
             voxtral_executable: None,
             voxtral_executable_identity: None,
             cookie_file_identity: None,
+            engine,
+            voxtral_model: None,
         }
+    }
+
+    fn cloud_record(request: RequestKey, model: &str) -> CacheRecord {
+        let mut record = record(&request.video_id);
+        record.identity.request = request;
+        record.identity.source = SourceIdentity::CloudVoxtral {
+            model: model.to_string(),
+            language_hint: Some("de".to_string()),
+        };
+        record
+    }
+
+    fn cloud_request(video_id: &str, model: &str) -> RequestKey {
+        let mut request = request_with_engine(video_id, crate::cli::Engine::VoxtralCloud);
+        request.voxtral_model = Some(model.to_string());
+        request
     }
 
     fn record(video_id: &str) -> CacheRecord {
@@ -1220,6 +1287,132 @@ mod tests {
             speaker_marker: false,
         });
         assert!(validate_record(&value).is_err());
+    }
+
+    #[test]
+    fn cloud_and_local_requests_for_the_same_video_never_collide() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = YoutubeCache::open_at(temp.path(), true).unwrap();
+        let whisper_request = request_with_engine("video-x", crate::cli::Engine::Whisper);
+        let cloud_request = cloud_request("video-x", "voxtral-mini-transcribe-3");
+        let auto_request = request_with_engine("video-x", crate::cli::Engine::Auto);
+        // The requested engine is part of the lookup key.
+        assert_ne!(
+            digest_json(&whisper_request).unwrap(),
+            digest_json(&cloud_request).unwrap()
+        );
+        assert_ne!(
+            digest_json(&whisper_request).unwrap(),
+            digest_json(&auto_request).unwrap()
+        );
+
+        // A local Whisper result under the whisper request and a cloud result
+        // under the voxtral-cloud request for the same video.
+        cache.store(&record("video-x")).unwrap();
+        cache
+            .store(&cloud_record(
+                cloud_request.clone(),
+                "voxtral-mini-transcribe-3",
+            ))
+            .unwrap();
+
+        let Lookup::Hit(hit) = cache.lookup(&whisper_request).unwrap() else {
+            panic!("the whisper request must hit its own entry");
+        };
+        assert!(matches!(
+            hit.identity.source,
+            SourceIdentity::LocalWhisper { .. }
+        ));
+        let Lookup::Hit(hit) = cache.lookup(&cloud_request).unwrap() else {
+            panic!("the cloud request must hit its own entry");
+        };
+        assert!(matches!(
+            hit.identity.source,
+            SourceIdentity::CloudVoxtral { .. }
+        ));
+
+        // An auto request is its own key: it sees neither the whisper nor the
+        // explicit-cloud entry, and a different cloud model misses as well.
+        assert!(matches!(cache.lookup(&auto_request).unwrap(), Lookup::Miss));
+        let mut other_model = cloud_request.clone();
+        other_model.voxtral_model = Some("other-model".to_string());
+        assert!(matches!(cache.lookup(&other_model).unwrap(), Lookup::Miss));
+
+        // An auto run that fell back to the local engine stores the local
+        // source under the auto key; the explicit whisper request still does
+        // not see it (different key), and the auto lookup does.
+        let mut fallback = record("video-x");
+        fallback.identity.request = auto_request.clone();
+        cache.store(&fallback).unwrap();
+        let Lookup::Hit(hit) = cache.lookup(&auto_request).unwrap() else {
+            panic!("the auto request must hit the fallback entry");
+        };
+        assert!(matches!(
+            hit.identity.source,
+            SourceIdentity::LocalWhisper { .. }
+        ));
+        assert!(matches!(
+            cache.lookup(&whisper_request).unwrap(),
+            Lookup::Hit(_)
+        ));
+    }
+
+    #[test]
+    fn cache_accepts_cloud_identity_but_rejects_unsafe_cloud_fields() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = YoutubeCache::open_at(temp.path(), true).unwrap();
+        let cloud_req = cloud_request("video-cloud", "voxtral-mini-transcribe-3");
+        let ok = cloud_record(cloud_req.clone(), "voxtral-mini-transcribe-3");
+        cache.store(&ok).unwrap();
+        assert!(matches!(cache.lookup(&cloud_req).unwrap(), Lookup::Hit(_)));
+
+        let mut bad_language = cloud_record(cloud_request("video-cloud-2", "m"), "m");
+        bad_language.identity.source = SourceIdentity::CloudVoxtral {
+            model: "m".to_string(),
+            language_hint: Some("en; rm".to_string()),
+        };
+        assert!(cache.store(&bad_language).is_err());
+        let blank_model = cloud_record(cloud_request("video-cloud-3", "  "), "  ");
+        assert!(cache.store(&blank_model).is_err());
+    }
+
+    #[test]
+    fn pre_speaker_removal_entries_are_never_served() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = YoutubeCache::open_at(temp.path(), true).unwrap();
+        // An entry as written under normalization version 4: its cues still
+        // carry the fixed speaker1 label and its request key has the old
+        // normalization version (and no engine fields).
+        let mut old_record = record("video-old");
+        old_record.normalization_version = YOUTUBE_NORMALIZATION_VERSION - 1;
+        old_record.identity.request.normalization_version = YOUTUBE_NORMALIZATION_VERSION - 1;
+        old_record.cues[0].speaker = Some("speaker1".to_string());
+        old_record.original_cues[0].speaker = Some("speaker1".to_string());
+        write_unvalidated_record(&cache, &old_record);
+        // The current lookup key (normalization version 5) hashes
+        // differently, so the old pointer is never even found.
+        assert!(matches!(
+            cache.lookup(&request("video-old")).unwrap(),
+            Lookup::Miss
+        ));
+        // Even a record whose request matches the current key is rejected by
+        // the normalization-version check instead of being served.
+        let mut mismatched = old_record.clone();
+        mismatched.identity.request = request("video-old");
+        write_unvalidated_record(&cache, &mismatched);
+        assert!(matches!(
+            cache.lookup(&request("video-old")).unwrap(),
+            Lookup::Invalid
+        ));
+        // Storing such a record is refused as well.
+        assert!(cache.store(&old_record).is_err());
+        // A fresh entry for the same video is stored and served normally.
+        cache.store(&record("video-old")).unwrap();
+        let Lookup::Hit(fresh) = cache.lookup(&request("video-old")).unwrap() else {
+            panic!("the fresh entry must be served");
+        };
+        assert_eq!(fresh.normalization_version, YOUTUBE_NORMALIZATION_VERSION);
+        assert!(fresh.cues.iter().all(|cue| cue.speaker.is_none()));
     }
 
     #[test]

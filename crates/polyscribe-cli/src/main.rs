@@ -703,6 +703,9 @@ fn main() -> Result<()> {
             captions_only,
             audio_only,
             no_frontmatter,
+            engine,
+            voxtral_model,
+            yes,
         } => youtube::run(
             url,
             language,
@@ -715,6 +718,9 @@ fn main() -> Result<()> {
             captions_only,
             audio_only,
             no_frontmatter,
+            engine,
+            voxtral_model,
+            yes,
         ),
     }
 }
