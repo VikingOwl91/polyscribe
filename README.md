@@ -1,12 +1,13 @@
 # PolyScribe
 
-PolyScribe is a command-line tool for transcribing local audio and video, recording live audio, merging JSON transcripts, and transcribing YouTube audio. Whisper inference runs on your machine. YouTube and model downloads use external network services.
+PolyScribe is a command-line tool for transcribing local audio and video, recording live audio, merging JSON transcripts, and transcribing YouTube audio. Whisper inference runs on your machine. YouTube and model downloads use external network services, and the optional Mistral cloud engine uploads audio to Mistral.
 
 ## Key capabilities
 
 - Transcribe audio and video with a local Whisper model.
 - Record from a PipeWire microphone and transcribe while recording.
-- Fetch YouTube audio without requesting subtitles, then transcribe it locally.
+- Fetch YouTube audio without requesting subtitles, then transcribe it locally; text output carries video metadata as YAML frontmatter.
+- Optionally transcribe files with Mistral's Voxtral through the cloud API (`--engine voxtral-cloud`).
 - Optionally run a locally installed Voxtral wrapper before the Whisper fallback.
 - Write JSON, TOML, and SRT files, or pipe JSON and transcript text through stdout.
 - Manage Whisper models and run plugins that implement the PolyScribe protocol.
@@ -76,11 +77,17 @@ polyscribe record
 
 `polyscribe youtube URL` checks its local transcript cache first. On a cache miss, `yt-dlp` fetches video metadata and the best available audio. PolyScribe never requests or downloads subtitles. The audio is transcribed locally and the transcript is cached independently of its output format. Use `--refresh` to bypass the cache and acquire a new transcript.
 
+`txt` output starts with a YAML frontmatter block (title, source URL, video ID, channel, upload date, duration, language, transcription time and engine); `--no-frontmatter` writes plain text, and `json` carries the same fields. See [YouTube output](docs/usage.md#output-and-errors).
+
 YouTube transcription needs network access to YouTube and a working `yt-dlp` installation. HTTP 403/429 responses and other download failures stop before transcription. See the [CLI usage guide](docs/usage.md#youtube) for cache identity, limits, errors, and options.
 
 If YouTube requests bot verification, install a Netscape-format export as `~/.config/polyscribe/youtube/cookies.txt` (or below `$XDG_CONFIG_HOME`). Use directory mode `0700` and file mode `0600`. PolyScribe automatically uses this file through a temporary copy. On Unix, transcripts are cached separately for each cookie-file version; repeat requests reuse the transcript without downloading or transcribing again. `--cookies /path/to/cookies.txt` overrides the stored file; `--no-cookies` selects the anonymous cache. See [cookie export and setup](docs/usage.md#set-up-youtube-cookies-once). PolyScribe never reads browser cookies automatically.
 
-## Optional Voxtral integration and Whisper fallback
+## Optional Mistral cloud engine
+
+`polyscribe transcribe --engine voxtral-cloud` sends the audio to Mistral's Voxtral transcription API. It is part of every build (CPU, CUDA, and HIP), needs no GPU, and is never used unless you select it. Audio leaves your machine, so PolyScribe prints a one-line notice before the first upload (silence it with `--yes`). The API key is read from `MISTRAL_API_KEY` or, if that is unset, from `~/.config/polyscribe/mistral_token` (keep it mode `0600`); it is never logged. See [transcription engines](docs/usage.md#transcription-engines) for options, retries, and the AMD note.
+
+## Optional Voxtral wrapper and Whisper fallback
 
 Voxtral is not bundled or installed by PolyScribe. To use it, set `POLYSCRIBE_VOXTRAL` to an absolute path to a local executable that implements PolyScribe's protocol-v1 wrapper contract. When configured, PolyScribe tries that executable first. If it is unset, times out, exits unsuccessfully, or returns invalid output, PolyScribe makes one local Whisper attempt with the same downloaded audio.
 
@@ -100,6 +107,7 @@ The commands have different output schemas. See [output behavior and piping](doc
 - `POLYSCRIBE_MODELS_DIR` overrides the transcription model directory.
 - `POLYSCRIBE_YTDLP` selects a specific `yt-dlp` file; otherwise it is found on `PATH`.
 - `POLYSCRIBE_VOXTRAL` selects the optional Voxtral wrapper executable.
+- `MISTRAL_API_KEY` or the `mistral_token` file in the config directory provides the key for `--engine voxtral-cloud`.
 - `XDG_DATA_HOME`, `XDG_CACHE_HOME`, and `XDG_CONFIG_HOME` determine default model, transcript-cache, and configuration locations.
 - `HF_TOKEN` is used for authenticated Hugging Face model requests when set.
 
@@ -121,7 +129,7 @@ The full environment-variable reference and defaults are in [usage](docs/usage.m
 
 PolyScribe is alpha software. Linux x86_64 is the CI-tested platform. The workspace does not compile on Windows yet; macOS is not covered by CI. CUDA and ROCm/HIP builds are optional and experimental, and CI does not verify GPU runtime behavior.
 
-There is no automatic speaker diarization. The live microphone command requires PipeWire. YouTube transcription is audio-only, and a failed download is not retried through a caption path. Available commands are listed in `polyscribe --help`; older `stt` and `ytt` command names are not provided.
+The Mistral cloud engine is covered by mock-server tests and one live run, not by CI. There is no automatic speaker diarization. The live microphone command requires PipeWire. YouTube transcription is audio-only, and a failed download is not retried through a caption path. Available commands are listed in `polyscribe --help`; older `stt` and `ytt` command names are not provided.
 
 ## License
 
