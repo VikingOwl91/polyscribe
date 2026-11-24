@@ -11,6 +11,11 @@ use std::process::{Command, Output};
 
 const URL: &str = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
 const METADATA_WITH_CAPTIONS: &str = r#"{"id":"dQw4w9WgXcQ","title":"Fixture video","uploader":"Offline","duration":3,"subtitles":{"en":[{"ext":"vtt","url":"https://example.test/en.vtt","name":"English"}]},"automatic_captions":{"de":[{"ext":"vtt","url":"https://example.test/de.vtt"} ]}}"#;
+const METADATA_FULL: &str = r#"{"id":"dQw4w9WgXcQ","title":"Full: \"Meta\" 🎉","uploader":"Uploader","channel":"Cool Channel","channel_url":"https://www.youtube.com/@cool","upload_date":"20240131","duration":83}"#;
+const METADATA_MINIMAL: &str = r#"{"id":"dQw4w9WgXcQ"}"#;
+const METADATA_FALLBACK: &str = r#"{"id":"dQw4w9WgXcQ","title":"Fallback","uploader":"Fallback Up","upload_date":"20241301","duration":"NA"}"#;
+const METADATA_HOSTILE: &str = r#"{"id":"dQw4w9WgXcQ","title":"A: \"quoted\" \\ line\nnext 🎉","channel":"Ch\u0001x","channel_url":"https://example.test/c","upload_date":"20240229","duration":3.6}"#;
+const METADATA_HOSTILE_NAME: &str = r#"{"id":"dQw4w9WgXcQ","title":"../etc/passwd\n💣","channel":"../../x","upload_date":"20240101"}"#;
 const VOXTRAL_RESPONSE: &str = r#"{"protocol_version":1,"engine":"voxtral","model":"fake-model","language":"en","cues":[{"start_ms":0,"end_ms":1200,"text":"hello"}]}"#;
 
 fn bin() -> &'static str {
@@ -610,7 +615,7 @@ fn authenticated_cache_invalidates_for_cookie_file_changes_and_refresh() {
     assert_eq!(downloader_calls(&log).len(), 10);
     run(&original, false);
     assert_eq!(downloader_calls(&log).len(), 10);
-    for entry in std::fs::read_dir(root.path().join("cache/polyscribe/youtube/v3")).unwrap() {
+    for entry in std::fs::read_dir(root.path().join("cache/polyscribe/youtube/v4")).unwrap() {
         let entry = entry.unwrap();
         let bytes = std::fs::read(entry.path()).unwrap();
         let text = String::from_utf8(bytes).unwrap();
@@ -876,7 +881,12 @@ fn cache_hit_reuses_transcript_across_formats_without_running_processes() {
         "first run failed: {}",
         String::from_utf8_lossy(&first.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&first.stdout).trim(), "hello");
+    let first_stdout = String::from_utf8_lossy(&first.stdout);
+    assert!(
+        first_stdout.starts_with("---\n"),
+        "txt output starts with the frontmatter: {first_stdout}"
+    );
+    assert!(first_stdout.ends_with("hello\n"));
     let audio_path = assert_metadata_then_audio(&downloader_calls(&downloader_log));
     assert!(
         !audio_path.exists(),
@@ -1175,7 +1185,7 @@ fn restored_parent_symlink_change_skips_cache_write() {
 }
 
 fn cache_json_count(root: &Path) -> usize {
-    std::fs::read_dir(root.join("cache/polyscribe/youtube/v3"))
+    std::fs::read_dir(root.join("cache/polyscribe/youtube/v4"))
         .unwrap()
         .filter_map(Result::ok)
         .filter(|entry| entry.path().extension() == Some(OsStr::new("json")))
@@ -1445,4 +1455,352 @@ fn youtube_bot_challenge_is_actionable_without_echoing_downloader_stderr() {
             assert!(log_records(&voxtral_log).is_empty());
         }
     }
+}
+
+fn frontmatter_field<'a>(head: &'a str, key: &str) -> Option<&'a str> {
+    head.lines().find_map(|line| {
+        line.trim_start()
+            .strip_prefix(key)
+            .and_then(|rest| rest.strip_prefix(": "))
+    })
+}
+
+fn unquote_yaml(value: &str) -> String {
+    assert!(value.starts_with('"') && value.ends_with('"'), "{value}");
+    serde_json::from_str(value).expect("frontmatter scalars are JSON-compatible quoted strings")
+}
+
+#[test]
+fn json_output_carries_full_video_metadata_and_transcribed_at() {
+    let root = tempfile::tempdir().unwrap();
+    let (downloader, _) = fake_downloader(root.path(), METADATA_FULL, None);
+    let (voxtral, _) = fake_voxtral(root.path(), true);
+
+    let result = run_with_voxtral(
+        root.path(),
+        &downloader,
+        &["--language", "en", "--format", "json"],
+        Some(&voxtral),
+    );
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let transcript: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(transcript["source"], "local-voxtral");
+    assert_eq!(transcript["source_url"], URL);
+    assert_eq!(transcript["video_id"], "dQw4w9WgXcQ");
+    assert_eq!(transcript["title"], "Full: \"Meta\" 🎉");
+    assert_eq!(transcript["uploader"], "Uploader");
+    assert_eq!(transcript["channel"], "Cool Channel");
+    assert_eq!(transcript["channel_url"], "https://www.youtube.com/@cool");
+    assert_eq!(transcript["upload_date"], "2024-01-31");
+    assert_eq!(transcript["duration_seconds"], 83.0);
+    assert_eq!(transcript["engine"], "voxtral");
+    assert_eq!(transcript["model"], "fake-model");
+    assert_eq!(transcript["language"], "en");
+    assert_eq!(transcript["requested_language"], "en");
+    let transcribed_at = transcript["transcribed_at"]
+        .as_str()
+        .expect("transcribed_at must be present");
+    assert!(
+        chrono::DateTime::parse_from_rfc3339(transcribed_at).is_ok(),
+        "transcribed_at must be ISO-8601 with a timezone offset: {transcribed_at}"
+    );
+}
+
+#[test]
+fn channel_falls_back_to_uploader_and_invalid_upload_date_is_null() {
+    let root = tempfile::tempdir().unwrap();
+    let (downloader, _) = fake_downloader(root.path(), METADATA_FALLBACK, None);
+    let (voxtral, _) = fake_voxtral(root.path(), true);
+
+    let result = run_with_voxtral(
+        root.path(),
+        &downloader,
+        &["--language", "en", "--format", "json"],
+        Some(&voxtral),
+    );
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let transcript: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(transcript["uploader"], "Fallback Up");
+    assert_eq!(transcript["channel"], "Fallback Up");
+    assert_eq!(transcript["channel_url"], serde_json::Value::Null);
+    assert_eq!(transcript["upload_date"], serde_json::Value::Null);
+    assert_eq!(transcript["duration_seconds"], serde_json::Value::Null);
+}
+
+#[test]
+fn missing_metadata_fields_are_null_not_placeholders() {
+    let root = tempfile::tempdir().unwrap();
+    let (downloader, _) = fake_downloader(root.path(), METADATA_MINIMAL, None);
+    let (voxtral, _) = fake_voxtral(root.path(), true);
+
+    let json = run_with_voxtral(
+        root.path(),
+        &downloader,
+        &["--language", "en", "--format", "json"],
+        Some(&voxtral),
+    );
+    assert!(json.status.success());
+    let transcript: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    for field in [
+        "title",
+        "uploader",
+        "channel",
+        "channel_url",
+        "upload_date",
+        "duration_seconds",
+    ] {
+        assert_eq!(
+            transcript[field],
+            serde_json::Value::Null,
+            "{field} must be null, not a placeholder"
+        );
+    }
+    assert!(transcript["transcribed_at"].is_string());
+
+    let txt = run_with_voxtral(
+        root.path(),
+        &downloader,
+        &["--language", "en", "--format", "txt"],
+        Some(&voxtral),
+    );
+    assert!(txt.status.success());
+    let stdout = String::from_utf8_lossy(&txt.stdout);
+    let (head, body) = stdout
+        .split_once("\n---\n")
+        .expect("txt output must contain a frontmatter block");
+    assert!(head.starts_with("---\n"));
+    assert_eq!(body, "hello\n");
+    for field in ["title", "channel", "channel_url", "upload_date"] {
+        assert_eq!(frontmatter_field(head, field), Some("null"), "{field}");
+    }
+    assert!(!head.contains("duration:"));
+    assert!(!stdout.contains("NA"));
+    assert!(!stdout.contains("unknown"));
+}
+
+#[test]
+fn txt_frontmatter_quotes_hostile_metadata_safely() {
+    let root = tempfile::tempdir().unwrap();
+    let (downloader, _) = fake_downloader(root.path(), METADATA_HOSTILE, None);
+    let (voxtral, _) = fake_voxtral(root.path(), true);
+
+    let result = run_with_voxtral(
+        root.path(),
+        &downloader,
+        &["--language", "en", "--format", "txt"],
+        Some(&voxtral),
+    );
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let (head, body) = stdout
+        .split_once("\n---\n")
+        .expect("txt output must contain a frontmatter block");
+    assert!(head.starts_with("---\n"));
+    assert_eq!(body, "hello\n");
+
+    // The hostile title stays on one quoted line and round-trips exactly.
+    let title = frontmatter_field(head, "title").unwrap();
+    assert_eq!(unquote_yaml(title), "A: \"quoted\" \\ line\nnext 🎉");
+    assert!(head.contains("🎉"), "non-ASCII stays literal: {head}");
+    assert!(!head.contains("line\nnext"), "raw newline leaked: {head}");
+
+    // A control character in the channel is escaped, not emitted raw.
+    let channel = frontmatter_field(head, "channel").unwrap();
+    assert_eq!(unquote_yaml(channel), "Ch\u{1}x");
+    assert!(channel.contains("\\u0001"));
+    assert!(!head.chars().any(|c| c == '\u{1}'));
+
+    assert_eq!(
+        frontmatter_field(head, "upload_date"),
+        Some("\"2024-02-29\"")
+    );
+    assert!(
+        head.contains("\nduration: 4\n"),
+        "duration rounds to whole seconds"
+    );
+    assert_eq!(
+        frontmatter_field(head, "source"),
+        Some("\"https://www.youtube.com/watch?v=dQw4w9WgXcQ\"")
+    );
+    assert_eq!(frontmatter_field(head, "video_id"), Some("\"dQw4w9WgXcQ\""));
+    assert!(head.contains("transcription:\n  engine: \"voxtral\"\n  model: \"fake-model\""));
+    assert!(frontmatter_field(head, "transcribed_at").is_some_and(|v| v.starts_with('"')));
+}
+
+#[test]
+fn no_frontmatter_omits_frontmatter_and_srt_stays_plain() {
+    let root = tempfile::tempdir().unwrap();
+    let (downloader, downloader_log) = fake_downloader(root.path(), METADATA_FULL, None);
+    let (voxtral, voxtral_log) = fake_voxtral(root.path(), true);
+
+    let plain = run_with_voxtral(
+        root.path(),
+        &downloader,
+        &["--language", "en", "--format", "txt", "--no-frontmatter"],
+        Some(&voxtral),
+    );
+    assert!(
+        plain.status.success(),
+        "{}",
+        String::from_utf8_lossy(&plain.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&plain.stdout), "hello\n");
+
+    let srt = run_with_voxtral(
+        root.path(),
+        &downloader,
+        &["--language", "en", "--format", "srt"],
+        Some(&voxtral),
+    );
+    assert!(srt.status.success());
+    let srt_text = String::from_utf8_lossy(&srt.stdout);
+    assert!(!srt_text.contains("---"), "srt never carries frontmatter");
+    assert!(srt_text.contains("00:00:00,000 --> 00:00:01,200"));
+    assert!(srt_text.contains("hello"));
+
+    let with_frontmatter = run_with_voxtral(
+        root.path(),
+        &downloader,
+        &["--language", "en", "--format", "txt"],
+        Some(&voxtral),
+    );
+    assert!(with_frontmatter.status.success());
+    let txt_text = String::from_utf8_lossy(&with_frontmatter.stdout);
+    assert!(txt_text.starts_with("---\n"));
+    assert!(txt_text.ends_with("hello\n"));
+
+    assert_eq!(downloader_calls(&downloader_log).len(), 2);
+    assert_eq!(log_records(&voxtral_log).len(), 1);
+}
+
+#[test]
+fn cache_hit_keeps_the_original_transcribed_at() {
+    let root = tempfile::tempdir().unwrap();
+    let (downloader, downloader_log) = fake_downloader(root.path(), METADATA_FULL, None);
+    let (voxtral, voxtral_log) = fake_voxtral(root.path(), true);
+
+    let first = run_with_voxtral(
+        root.path(),
+        &downloader,
+        &["--language", "en", "--format", "json"],
+        Some(&voxtral),
+    );
+    assert!(first.status.success());
+    let first_json: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
+    let first_transcribed_at = first_json["transcribed_at"].as_str().unwrap().to_string();
+
+    let second = run_with_voxtral(
+        root.path(),
+        &downloader,
+        &["--language", "en", "--format", "json"],
+        Some(&voxtral),
+    );
+    assert!(second.status.success());
+    let second_json: serde_json::Value = serde_json::from_slice(&second.stdout).unwrap();
+    assert_eq!(
+        second_json["transcribed_at"].as_str().unwrap(),
+        first_transcribed_at,
+        "a cache hit must report the original transcription time"
+    );
+
+    let txt = run_with_voxtral(
+        root.path(),
+        &downloader,
+        &["--language", "en", "--format", "txt"],
+        Some(&voxtral),
+    );
+    assert!(txt.status.success());
+    let stdout = String::from_utf8_lossy(&txt.stdout);
+    let (head, _) = stdout.split_once("\n---\n").unwrap();
+    assert_eq!(
+        unquote_yaml(frontmatter_field(head, "transcribed_at").unwrap()),
+        first_transcribed_at
+    );
+
+    assert_eq!(downloader_calls(&downloader_log).len(), 2);
+    assert_eq!(log_records(&voxtral_log).len(), 1);
+}
+
+#[test]
+fn output_directory_gets_the_canonical_file_name() {
+    let root = tempfile::tempdir().unwrap();
+    let (downloader, _) = fake_downloader(root.path(), METADATA_FULL, None);
+    let (voxtral, _) = fake_voxtral(root.path(), true);
+    let outdir = root.path().join("out");
+    std::fs::create_dir(&outdir).unwrap();
+    let out_arg = outdir.to_string_lossy().into_owned();
+
+    let result = run_with_voxtral(
+        root.path(),
+        &downloader,
+        &["--language", "en", "--format", "txt", "-o", &out_arg],
+        Some(&voxtral),
+    );
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(result.stdout.is_empty());
+
+    let entries = std::fs::read_dir(&outdir)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        entries[0].file_name().to_string_lossy(),
+        "2024-01-31_Cool_Channel_dQw4w9WgXcQ_full-meta.txt"
+    );
+    let content = std::fs::read_to_string(entries[0].path()).unwrap();
+    assert!(content.starts_with("---\n"));
+    assert!(content.ends_with("hello"));
+}
+
+#[test]
+fn canonical_output_name_is_fs_safe_for_hostile_metadata() {
+    let root = tempfile::tempdir().unwrap();
+    let (downloader, _) = fake_downloader(root.path(), METADATA_HOSTILE_NAME, None);
+    let (voxtral, _) = fake_voxtral(root.path(), true);
+    let outdir = root.path().join("out");
+    std::fs::create_dir(&outdir).unwrap();
+    let out_arg = outdir.to_string_lossy().into_owned();
+
+    let result = run_with_voxtral(
+        root.path(),
+        &downloader,
+        &["--language", "en", "--format", "json", "-o", &out_arg],
+        Some(&voxtral),
+    );
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+
+    let entries = std::fs::read_dir(&outdir)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(entries.len(), 1);
+    let name = entries[0].file_name().to_string_lossy().into_owned();
+    assert_eq!(entries[0].path().parent(), Some(outdir.as_path()));
+    assert!(name.starts_with("2024-01-01_"), "{name}");
+    assert!(name.ends_with(".json"), "{name}");
+    assert!(!name.contains('/'), "{name}");
+    assert!(!name.contains(".."), "{name}");
+    assert!(!name.chars().any(|c| c.is_control()), "{name}");
+    assert!(name.len() <= 200, "{name}");
 }

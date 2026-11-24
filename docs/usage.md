@@ -112,7 +112,8 @@ polyscribe youtube [OPTIONS] <URL>
 |---|---|---|
 | `--language <LANGUAGE>` | unset, meaning automatic selection | Hint passed to Voxtral and Whisper. Accepted values are at most 64 ASCII letters, digits, hyphens, or underscores. `auto` is not accepted; omit the option for automatic selection. |
 | `--format <FORMAT>` | `txt` | Select one output format: `txt`, `srt`, or `json` (lowercase). |
-| `-o`, `--output <OUTPUT>` | stdout | Write the selected format to this file instead of stdout. |
+| `-o`, `--output <OUTPUT>` | stdout | Write the selected format to this file instead of stdout. If the path is an existing directory, the file is written there under the canonical name `YYYY-MM-DD_<channel>_<video-id>_<title-slug>.<ext>`. |
+| `--no-frontmatter` | off | Omit the YAML metadata frontmatter from `txt` output and write plain transcript text. `srt` and `json` are unchanged. |
 | `--refresh` | off | Ignore a cached transcript, fetch audio, and transcribe again. The new result is cached when caching is available. |
 | `--cookies <FILE>` | auto-discover `youtube/cookies.txt` in the app config directory | Override the stored Netscape-format YouTube cookie file. On Unix, cached transcripts are scoped to the selected file version. |
 | `--no-cookies` | off | Skip cookie discovery and run anonymously with ordinary caching. Conflicts with `--cookies`. |
@@ -168,7 +169,7 @@ Treat `cookies.txt` as a session credential: keep it out of repositories, shared
 
 ### Output and errors
 
-When no output file is given, the selected transcript is written to stdout with a trailing newline. `txt` contains cue text, `srt` contains numbered timed cues, and `json` contains the source URL, video ID, available title/uploader/duration, requested language, Voxtral-reported language when available (or the Whisper hint), engine/model, cue count, normalization statistics, and timed cues. The audio-only JSON also retains `caption_language`, `is_automatic`, and `is_translated` fields as `null`. The command writes a short source summary to stderr, including when stdout is JSON or `--quiet` is used. `-o` writes the transcript file and reports the destination on stderr.
+When no output file is given, the selected transcript is written to stdout with a trailing newline. `txt` starts with a YAML frontmatter block (`---` ... `---`) holding `title`, `source` (the canonical watch URL), `video_id`, `channel`, `channel_url`, `upload_date` (ISO `YYYY-MM-DD`), `duration` (whole seconds, omitted when unknown), `language`, `transcribed_at` (ISO-8601 with timezone, the time of the original transcription), and a `transcription:` block with the `engine`, `model`, and, for Whisper, the `backend` actually used; after the closing `---` comes the cue text. String values are double-quoted YAML scalars (JSON-style escapes), so titles with colons, quotes, newlines, or emoji stay intact; missing metadata fields are written as `null`, never as placeholders. `--no-frontmatter` writes the plain cue text without this block. `srt` contains numbered timed cues only; the SRT format cannot carry metadata, so `srt` output is identical with and without frontmatter. `json` contains the source URL, video ID, available title/uploader/channel/channel_url/upload_date/duration, `transcribed_at`, requested language, Voxtral-reported language when available (or the Whisper hint), engine/model, cue count, normalization statistics, and timed cues; missing metadata fields are `null`. The audio-only JSON also retains `caption_language`, `is_automatic`, and `is_translated` fields as `null`. The command writes a short source summary to stderr, including when stdout is JSON or `--quiet` is used. `-o` writes the transcript file and reports the destination on stderr.
 
 Common failures are reported on stderr with a category such as `invalid_url`, `invalid_language`, `unsupported_format`, `tool_unavailable`, `rate_limited`, `forbidden`, `network`, `audio_download`, or `whisper`:
 
@@ -189,7 +190,7 @@ Authenticated transcripts, including any account-restricted content, are stored 
 
 On a cache miss, PolyScribe gives yt-dlp a private temporary copy of the captured cookie bytes, shared by the metadata and audio requests. The original is never modified, and PolyScribe does not automatically access browser cookies or load yt-dlp configuration. The temporary copy is removed on normal completion and handled errors; the signal-cleanup limitation below also applies to cookies. Transcripts can still be explicitly saved with `-o`.
 
-YouTube transcripts are stored under `$XDG_CACHE_HOME/polyscribe/youtube/v3/`, or `~/.cache/polyscribe/youtube/v3/` when `XDG_CACHE_HOME` is unset and `HOME` is available. The cached cues are reused across TXT, SRT, and JSON renders.
+YouTube transcripts are stored under `$XDG_CACHE_HOME/polyscribe/youtube/v4/`, or `~/.cache/polyscribe/youtube/v4/` when `XDG_CACHE_HOME` is unset and `HOME` is available. The cached cues are reused across TXT, SRT, and JSON renders. The cache moved from schema/path v3 to v4 with the richer video metadata, so old v3 entries (which lack `channel`, `channel_url`, and `upload_date`) are never served with empty fields; they stay in their old directory untouched. `transcribed_at` is the time of the original transcription recorded in the cache entry; a cache hit reports that original time, not the time of the hit.
 
 Cache identity includes the cache/schema, normalization and audio-policy versions, video ID, requested language, and configured Voxtral executable identity. Voxtral identity includes its configured path and resolved executable/symlink metadata. A Whisper-backed result also records the model identity and is rejected when the selected model's file metadata changes. Changing the language, Voxtral executable, relevant version, or Whisper model invalidates the matching entry. Unsafe, unreadable, invalid, or unavailable cache storage is ignored and the command continues without caching. `--refresh` bypasses lookup; there is no separate YouTube cache-clear subcommand.
 
@@ -334,7 +335,7 @@ An English-only model can only be used with English. A multilingual model can us
 | `POLYSCRIBE_MANIFEST_CACHE_FILENAME` | Manifest cache filename; default `hf_manifest_whisper_cpp.json`. |
 | `POLYSCRIBE_WINDOW_TRACE` | Set to `1` to emit detailed transcription window diagnostics to stderr. |
 
-The model-download cache and transcript cache are different locations. YouTube transcripts use `$XDG_CACHE_HOME/polyscribe/youtube/v3/`; there is no separate environment-variable override for that path.
+The model-download cache and transcript cache are different locations. YouTube transcripts use `$XDG_CACHE_HOME/polyscribe/youtube/v4/`; there is no separate environment-variable override for that path.
 
 ## Network and local processing
 
