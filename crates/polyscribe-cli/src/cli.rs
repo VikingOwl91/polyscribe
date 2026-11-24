@@ -217,6 +217,10 @@ pub enum Commands {
         /// Compatibility alias. Audio transcription is the default.
         #[arg(long, conflicts_with = "captions_only")]
         audio_only: bool,
+
+        /// Omit the YAML metadata frontmatter from txt output. srt and json are unchanged.
+        #[arg(long)]
+        no_frontmatter: bool,
     },
 }
 

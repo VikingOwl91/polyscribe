@@ -17,8 +17,9 @@ use polyscribe_core::backend::{
 use polyscribe_core::find_model_file;
 use polyscribe_core::ui::progress::TranscriptProgress;
 use polyscribe_core::youtube::{
-    CaptionCue, NormalizationStats, VideoMetadata, YOUTUBE_NORMALIZATION_VERSION, render_srt,
-    render_txt, validate_youtube_url,
+    CaptionCue, NormalizationStats, TranscriptFrontmatter, VideoMetadata,
+    YOUTUBE_NORMALIZATION_VERSION, build_frontmatter, canonical_file_name, iso_upload_date,
+    render_srt, render_txt, validate_youtube_url,
 };
 use serde::Serialize;
 
@@ -172,7 +173,11 @@ struct JsonTranscript<'a> {
     video_id: &'a str,
     title: &'a Option<String>,
     uploader: &'a Option<String>,
+    channel: &'a Option<String>,
+    channel_url: &'a Option<String>,
+    upload_date: &'a Option<String>,
     duration_seconds: Option<f64>,
+    transcribed_at: &'a str,
     requested_language: Option<&'a str>,
     language: Option<&'a str>,
     engine: &'a str,
@@ -198,6 +203,7 @@ pub fn run(
     no_cookies: bool,
     captions_only: bool,
     _audio_only: bool,
+    no_frontmatter: bool,
 ) -> Result<()> {
     let yt_url = validate_youtube_url(&url)
         .map_err(|error| youtube_error(YouTubeErrorKind::InvalidUrl, error.to_string()))?;
@@ -258,6 +264,7 @@ pub fn run(
                     &format,
                     output.as_deref(),
                     &record,
+                    no_frontmatter,
                 );
             }
             Ok(Lookup::Hit(_)) | Ok(Lookup::Invalid) => {
@@ -313,6 +320,7 @@ pub fn run(
         &format,
         output.as_deref(),
         &record,
+        no_frontmatter,
     )
 }
 
@@ -378,6 +386,9 @@ fn summarize_metadata(metadata: &VideoMetadata) -> VideoSummary {
     VideoSummary {
         title: metadata.title.clone(),
         uploader: metadata.uploader.clone(),
+        channel: metadata.channel.clone(),
+        channel_url: metadata.channel_url.clone(),
+        upload_date: metadata.upload_date.clone(),
         duration_seconds: metadata.duration,
     }
 }
@@ -646,10 +657,21 @@ fn fetch_metadata(
             ),
         ));
     }
+    let uploader = non_empty_string(value.get("uploader"));
+    // yt-dlp's `channel` falls back to `uploader` when absent.
+    let channel = non_empty_string(value.get("channel")).or_else(|| uploader.clone());
+    let channel_url = non_empty_string(value.get("channel_url"));
+    let upload_date = value
+        .get("upload_date")
+        .and_then(serde_json::Value::as_str)
+        .and_then(iso_upload_date);
     Ok(VideoMetadata {
         id: id.to_string(),
         title: non_empty_string(value.get("title")),
-        uploader: non_empty_string(value.get("uploader")),
+        uploader,
+        channel,
+        channel_url,
+        upload_date,
         duration: value.get("duration").and_then(serde_json::Value::as_f64),
     })
 }
@@ -1150,40 +1172,69 @@ fn write_transcript(
     format: &str,
     output_path: Option<&Path>,
     record: &CacheRecord,
+    no_frontmatter: bool,
 ) -> Result<()> {
     let request = &record.identity.request;
     let metadata = &record.metadata;
     let source = &record.identity.source;
     let cues = &record.cues;
     let normalization = &record.normalization;
-    let (source_name, engine, model, language, caption_language, is_automatic, is_translated) =
-        match source {
-            SourceIdentity::LocalVoxtral {
-                model, language, ..
-            } => (
-                "local-voxtral",
-                "voxtral",
-                model.as_str(),
-                language.as_deref(),
-                None,
-                None,
-                None,
-            ),
-            SourceIdentity::LocalWhisper {
-                model_name,
-                language_hint,
-                ..
-            } => (
-                "local-whisper",
-                "whisper",
-                model_name.as_str(),
-                language_hint.as_deref(),
-                None,
-                None,
-                None,
-            ),
-        };
+    let (
+        source_name,
+        engine,
+        model,
+        language,
+        caption_language,
+        is_automatic,
+        is_translated,
+        backend,
+    ) = match source {
+        SourceIdentity::LocalVoxtral {
+            model, language, ..
+        } => (
+            "local-voxtral",
+            "voxtral",
+            model.as_str(),
+            language.as_deref(),
+            None,
+            None,
+            None,
+            None,
+        ),
+        SourceIdentity::LocalWhisper {
+            model_name,
+            language_hint,
+            backend,
+            ..
+        } => (
+            "local-whisper",
+            "whisper",
+            model_name.as_str(),
+            language_hint.as_deref(),
+            None,
+            None,
+            None,
+            Some(backend.as_str()),
+        ),
+    };
     let rendered = match format {
+        // srt cannot carry metadata; it stays plain cues in every mode.
+        "txt" if !no_frontmatter => {
+            let head = build_frontmatter(&TranscriptFrontmatter {
+                title: metadata.title.as_deref(),
+                video_id,
+                channel: metadata.channel.as_deref(),
+                channel_url: metadata.channel_url.as_deref(),
+                upload_date: metadata.upload_date.as_deref(),
+                duration_seconds: metadata.duration_seconds,
+                language,
+                transcribed_at: &record.acquired_at,
+                engine,
+                model,
+                backend,
+            });
+            format!("{head}{}", render_txt(cues))
+        }
         "txt" => render_txt(cues),
         "srt" => render_srt(cues),
         "json" => serde_json::to_string_pretty(&JsonTranscript {
@@ -1192,7 +1243,11 @@ fn write_transcript(
             video_id,
             title: &metadata.title,
             uploader: &metadata.uploader,
+            channel: &metadata.channel,
+            channel_url: &metadata.channel_url,
+            upload_date: &metadata.upload_date,
             duration_seconds: metadata.duration_seconds,
+            transcribed_at: &record.acquired_at,
             requested_language: request.requested_language.as_deref(),
             language,
             engine,
@@ -1213,16 +1268,30 @@ fn write_transcript(
         }
     };
     if let Some(path) = output_path {
-        std::fs::write(path, &rendered).with_context(|| {
+        // An existing directory gets the canonical file name built from the
+        // cached metadata; every component is fs-safe (no '..', '/', or
+        // control characters).
+        let target = if path.is_dir() {
+            path.join(canonical_file_name(
+                metadata.upload_date.as_deref(),
+                metadata.channel.as_deref(),
+                video_id,
+                metadata.title.as_deref(),
+                format,
+            ))
+        } else {
+            path.to_path_buf()
+        };
+        std::fs::write(&target, &rendered).with_context(|| {
             format!(
                 "failed to write transcript to {}",
-                polyscribe_core::ui::terminal_safe_path(path)
+                polyscribe_core::ui::terminal_safe_path(&target)
             )
         })?;
         eprintln!(
             "Wrote {} cues to {}",
             cues.len(),
-            polyscribe_core::ui::terminal_safe_path(path)
+            polyscribe_core::ui::terminal_safe_path(&target)
         );
     } else {
         let mut stdout = std::io::stdout();
@@ -1433,6 +1502,7 @@ mod tests {
             true,
             false,
             None,
+            false,
             false,
             false,
             false,
