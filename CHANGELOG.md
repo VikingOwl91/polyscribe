@@ -4,12 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
-## Unreleased
-
-### Changed
-- YouTube: the fixed `speaker1` label is removed from the local Whisper path (there is no diarization for a single unknown speaker), so txt output no longer contains `speaker1: ...` prefixes and JSON cues omit the `speaker` field. The cue normalization version is raised to 5 (`YOUTUBE_NORMALIZATION_VERSION`), so cache entries written under version 4, whose cues may still carry the label, are discarded instead of served; the cache schema and directory stay at v4.
-- Tests: the plugin integration tests build the `example` plugin themselves when its binary is missing (for example with `cargo test -p polyscribe-cli`) and fail when that does not work, instead of skipping with a note and reporting `ok`.
-- Plugins: the reference plugin `polyscribe-plugin-tubescribe` is now `polyscribe-plugin-example` (`polyscribe plugins run example generate_metadata`). It never did YouTube work; it returns canned data and exists as the PSP/1 reference and test fixture. A plugin installed under the old name must be renamed.
+## v0.2.0-alpha.1 - 2026-11-24
 
 ### Added
 - YouTube: `--engine whisper|voxtral-cloud|auto` (default `whisper`, the shared `DEFAULT_ENGINE`), `--voxtral-model <id>`, and `--yes` on the `youtube` command, with the same semantics as `transcribe`. `whisper` is the unchanged local path (optional `POLYSCRIBE_VOXTRAL` wrapper, then local Whisper). `voxtral-cloud` uploads the downloaded audio file to the Mistral Audio Transcriptions API via `CloudVoxtralBackend` and aborts with the new `cloud` error category on failure (no fallback; the API key never appears in messages). `auto` uses the cloud only when the `mistral_token` file is configured (never on `MISTRAL_API_KEY` alone) and falls back to the local path with a visible warning; the one-time upload notice is suppressed by `--yes`/`POLYSCRIBE_CLOUD_OK=1`, and only the audio file is uploaded, never cookies, the URL, or metadata. The requested engine and the model are part of the cache request key, cloud results are stored as `cloud_voxtral` source identity (model and language hint only, no key or token-file path), and an `auto` fallback result is cached under the `auto` key with the source identity of the engine that really produced it. Outputs show `source: cloud-voxtral` / `engine: voxtral-cloud` with the model; `language` is the hint or `null`, never guessed.
@@ -31,9 +26,13 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Docs: initial live-window quality and HIP latency measurements, including the limits of the fixture set, in `docs/benchmarks/live-transcription.md`.
 - Core: the live path drops a segment when Whisper reports a no-speech probability above 0.6. This extra filter is limited to live transcription; the file path keeps the segments Whisper reports, matching its pre-Sprint-12 behavior.
 - Core: a streaming input for the transcription pipeline. A source delivers decoded 16 kHz mono samples in blocks while the transcription runs; the pipeline turns them into the same windows the file path produces, so the window handling, the reconciliation of the segments and the recovery of a region that whisper did not report are shared. A source error ends the run with that error, and a cancellation token stops the run before the next window is submitted. The finalized segments are the ones the file path reports; the segments that may still change are reported separately as provisional and are never presented as final. The command line is unchanged.
-
-### Added
 - Transcribe/YouTube: a stderr progress bar for terminal sessions with the current stage, elapsed time, and an ETA derived from completed inference windows. `--quiet` and `--no-progress` disable it, and stdout remains transcript-only.
+
+### Changed
+- YouTube: `txt` output now starts with a YAML frontmatter block by default (`---` ... `---`). Scripts that read the text from stdout must skip it or pass `--no-frontmatter`; `srt` and the cue text of `json` are unchanged.
+- YouTube: the fixed `speaker1` label is removed from the local Whisper path (there is no diarization for a single unknown speaker), so txt output no longer contains `speaker1: ...` prefixes and JSON cues omit the `speaker` field. The cue normalization version is raised to 5 (`YOUTUBE_NORMALIZATION_VERSION`), so cache entries written under version 4, whose cues may still carry the label, are discarded instead of served; the cache schema and directory stay at v4.
+- Tests: the plugin integration tests build the `example` plugin themselves when its binary is missing (for example with `cargo test -p polyscribe-cli`) and fail when that does not work, instead of skipping with a note and reporting `ok`.
+- Plugins: the reference plugin `polyscribe-plugin-tubescribe` is now `polyscribe-plugin-example` (`polyscribe plugins run example generate_metadata`). It never did YouTube work; it returns canned data and exists as the PSP/1 reference and test fixture. A plugin installed under the old name must be renamed.
 
 ### Fixed
 - Audio decoding: ffmpeg now receives a null stdin. It runs in its own process group, so inheriting an interactive terminal let it stop with SIGTTIN/SIGTTOU and hang transcription at 0% until interrupted.
