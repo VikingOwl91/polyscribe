@@ -85,7 +85,7 @@ If YouTube requests bot verification, install a Netscape-format export as `~/.co
 
 ## Optional Mistral cloud engine
 
-`polyscribe transcribe --engine voxtral-cloud` sends the audio to Mistral's Voxtral transcription API. It is part of every build (CPU, CUDA, and HIP), needs no GPU, and is never used unless you select it. Audio leaves your machine, so PolyScribe prints a one-line notice before the first upload (silence it with `--yes`). The API key is read from `MISTRAL_API_KEY` or, if that is unset, from `~/.config/polyscribe/mistral_token` (keep it mode `0600`); it is never logged. See [transcription engines](docs/usage.md#transcription-engines) for options, retries, and the AMD note.
+`polyscribe transcribe --engine voxtral-cloud` sends the audio to Mistral's Voxtral transcription API. It is part of every build (CPU, CUDA, and HIP), needs no GPU, and is only used when you select it. `--engine auto` uses it only if the `mistral_token` file exists (a bare `MISTRAL_API_KEY` does not count) and falls back to local Whisper with a warning if the cloud fails; the default engine stays `whisper`. Audio leaves your machine, so PolyScribe prints a one-line notice before the first upload (silence it with `--yes`). The API key is read from `MISTRAL_API_KEY` or, if that is unset, from `~/.config/polyscribe/mistral_token` (keep it mode `0600`); it is never logged. See [transcription engines](docs/usage.md#transcription-engines) for options, retries, and the AMD note.
 
 ## Optional Voxtral wrapper and Whisper fallback
 
