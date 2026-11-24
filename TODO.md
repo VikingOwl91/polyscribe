@@ -77,11 +77,23 @@ ideas** (directional, not scheduled).
 ## Missing functionality
 
 ### F1. Automatic speaker diarization (P2, M)
-- Speaker labels are manual (`--set-speaker-names`). Transcription does not
-  perform automatic diarization.
-- AC: wire whisper.cpp diarization behind a `--diarize` flag; label segments
-  by speaker turn; keep manual labels as the default; document that
-  diarization is approximate.
+- Speaker labels are manual (`--set-speaker-names`). Neither engine performs
+  diarization today. Whisper itself does not detect speakers; whisper.cpp has
+  only the experimental `tdrz` (tinydiarize), which needs special English
+  models and marks speaker turns, not speakers. PolyScribe does not use it.
+- Cloud first (S): per the Mistral Audio Transcriptions docs (read on
+  2026-11-24, not tried yet), `diarize` is a boolean that needs
+  `timestamp_granularities=segment`, and the segments then carry a
+  `speaker_id`. `voxtral_cloud.rs` does not send `diarize` and drops
+  `speaker_id`. The docs do not say which models support it.
+  - AC: `--diarize` for `--engine voxtral-cloud` (and `youtube`); carry the
+    `speaker_id` into the entries/cues and show it in txt, srt, and json;
+    check live which models accept it and how well it separates a recording
+    with two speakers; tests against the mock server; document that the
+    labels are the service's and approximate.
+- Local (M): a separate diarization step (for example pyannote or
+  sherpa-onnx) or whisper.cpp `tdrz`; keep manual labels as the default and
+  document that diarization is approximate.
 
 ### F2. Live microphone ingestion (done in sprint 12, partly)
 - `polyscribe record` captures the microphone through PipeWire and
@@ -150,9 +162,15 @@ ideas** (directional, not scheduled).
   CLI. Do not split crates further before there is a second consumer.
 
 ### L2. Additional STT engines (L)
-- `TranscribeBackend` (core `backend.rs`) is the extension point. Future
-  engines (remote APIs, other local models) implement the trait and register
-  in `select_backend`.
+- `TranscribeBackend` (core `backend.rs`) is the extension point. The Mistral
+  cloud engine (`voxtral_cloud.rs`) is the first remote engine and plugs in
+  next to whisper. Other remote APIs and local models implement the same trait.
+  A local Voxtral through `mistralrs` was tried and dropped on 2026-11-24:
+  `mistralrs` 0.8.x has no HIP/ROCm/Vulkan feature (AMD would run on the CPU)
+  and it pins `regex` below 1.13. Revisit if that changes.
+- The live `record` path is Whisper-only (`transcribe_stream`, `ModelSession`);
+  a cloud engine there would need a streaming abstraction with window uploads,
+  and it would send the live microphone to the cloud. Postponed.
 
 ### L3. Remaining STT/YTT project integration (L)
 - As of 2026-10-23, this workspace implements local file transcription,
