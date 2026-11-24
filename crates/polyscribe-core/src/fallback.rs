@@ -28,6 +28,9 @@ pub struct FallbackBackend {
     primary: Box<dyn TranscribeBackend + Send + Sync>,
     fallback_factory: Option<FallbackFactory>,
     fallback: Option<Box<dyn TranscribeBackend + Send + Sync>>,
+    /// Set when the fallback could not be started: later calls report this
+    /// error again instead of trying the failed primary once more.
+    fallback_error: Option<String>,
     /// Receives the fallback warning (stderr in production, a recorder in
     /// tests).
     on_fallback: Box<dyn Fn(&str) + Send + Sync>,
@@ -72,6 +75,7 @@ impl FallbackBackend {
             primary,
             fallback_factory: Some(Box::new(fallback_factory)),
             fallback: None,
+            fallback_error: None,
             on_fallback: Box::new(on_fallback),
         }
     }
@@ -103,16 +107,18 @@ impl TranscribeBackend for FallbackBackend {
             // fallback and the primary is not tried again.
             return fallback.transcribe(audio_path, speaker, language, gpu_layers, progress);
         }
+        if let Some(message) = &self.fallback_error {
+            return Err(anyhow!("{message}").into());
+        }
         match self
             .primary
             .transcribe(audio_path, speaker, language, gpu_layers, progress)
         {
             Ok(entries) => Ok(entries),
             Err(err) => {
-                let factory = self
-                    .fallback_factory
-                    .take()
-                    .expect("the fallback factory is present until the first fallback");
+                let Some(factory) = self.fallback_factory.take() else {
+                    return Err(err);
+                };
                 // The primary's error text is already key-scrubbed, so it can
                 // be shown.
                 let message = format!(
@@ -123,10 +129,11 @@ impl TranscribeBackend for FallbackBackend {
                 let mut fallback = match factory() {
                     Ok(fallback) => fallback,
                     Err(factory_err) => {
-                        return Err(anyhow!(
+                        let combined = format!(
                             "{message} The local fallback could not be started either: {factory_err:#}"
-                        )
-                        .into());
+                        );
+                        self.fallback_error = Some(combined.clone());
+                        return Err(anyhow!(combined).into());
                     }
                 };
                 let result =
@@ -281,6 +288,29 @@ mod tests {
         assert!(!backend.fell_back());
         // The warning was still emitted before the factory ran.
         assert_eq!(warnings.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_second_call_after_a_failed_factory_errors_instead_of_panicking() {
+        let primary_calls = Arc::new(Mutex::new(0usize));
+        let mut backend = FallbackBackend::with_notifier(
+            Box::new(FakeBackend::failing(primary_calls.clone())),
+            || -> Result<Box<dyn TranscribeBackend + Send + Sync>> {
+                Err(anyhow!("no whisper model found").into())
+            },
+            |_| {},
+        );
+        let path = Path::new("a.wav");
+        assert!(backend.transcribe(path, "s", None, None, None).is_err());
+        let err = backend
+            .transcribe(path, "s", None, None, None)
+            .expect_err("the second call must be an error, not a panic");
+        assert!(
+            format!("{err:#}").contains("no whisper model found"),
+            "{err:#}"
+        );
+        // The cloud is not tried again after the fallback could not start.
+        assert_eq!(*primary_calls.lock().unwrap(), 1);
     }
 
     #[test]
