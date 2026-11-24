@@ -6,6 +6,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## Unreleased
 
+### Changed
+- Plugins: the reference plugin `polyscribe-plugin-tubescribe` is now `polyscribe-plugin-example` (`polyscribe plugins run example generate_metadata`). It never did YouTube work; it returns canned data and exists as the PSP/1 reference and test fixture. A plugin installed under the old name must be renamed.
+
 ### Added
 - Transcribe: new `--engine [whisper|voxtral-cloud]` (default `whisper`, behavior unchanged) with `--voxtral-model <id>` and `--yes`. `voxtral-cloud` sends audio to the Mistral Audio Transcriptions API; it is part of every build (CPU, CUDA and HIP), opt-in only, reads the key from `MISTRAL_API_KEY` or the `mistral_token` file in the config directory, never logs it, retries only on 429/5xx, and warns once per run before uploading (silence with `--yes` or `POLYSCRIBE_CLOUD_OK=1`). Covered by mock-server tests and one live run; whisper with `gpu-hip` remains the local AMD GPU path.
 - YouTube: `polyscribe youtube` now uses an audio-first, cache-first pipeline and never requests or downloads subtitles. It tries an optional local Voxtral executable first, then makes one local Whisper attempt with the same audio when Voxtral is unavailable or fails. `--captions-only` fails before network access, `--prefer-manual` is a no-op, and `--audio-only` aliases the default.

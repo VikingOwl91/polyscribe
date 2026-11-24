@@ -3,7 +3,7 @@
 
 //! End-to-end tests for the plugin system (`polyscribe plugins ...`).
 //!
-//! These tests run the built `polyscribe-plugin-tubescribe` reference plugin
+//! These tests run the built `polyscribe-plugin-example` reference plugin
 //! through the CLI's plugin host. They need no network. If the plugin binary
 //! is not built (e.g. when testing only this crate with `-p polyscribe-cli`),
 //! the tests are skipped with a note; run `cargo test --workspace` to include
@@ -21,7 +21,7 @@ fn bin() -> &'static str {
 fn plugin_bin() -> Option<PathBuf> {
     let polyscribe = PathBuf::from(bin());
     let dir = polyscribe.parent()?;
-    let candidate = dir.join("polyscribe-plugin-tubescribe");
+    let candidate = dir.join("polyscribe-plugin-example");
     candidate.is_file().then_some(candidate)
 }
 
@@ -30,7 +30,7 @@ fn skip_if_no_plugin() -> Option<PathBuf> {
         Some(p) => Some(p),
         None => {
             eprintln!(
-                "NOT RUN: polyscribe-plugin-tubescribe binary not found next to polyscribe; \
+                "NOT RUN: polyscribe-plugin-example binary not found next to polyscribe; \
                  run `cargo test --workspace` to include plugin tests"
             );
             None
@@ -58,7 +58,7 @@ fn run_with_plugin(plugin: &Path, args: &[&str]) -> std::process::Output {
 }
 
 #[test]
-fn plugins_list_finds_tubescribe() {
+fn plugins_list_finds_example() {
     let Some(plugin) = skip_if_no_plugin() else {
         return;
     };
@@ -70,8 +70,8 @@ fn plugins_list_finds_tubescribe() {
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("tubescribe"),
-        "expected tubescribe in plugins list output, got: {stdout}"
+        stdout.contains("example"),
+        "expected example in plugins list output, got: {stdout}"
     );
 }
 
@@ -80,7 +80,7 @@ fn plugins_info_shows_capabilities() {
     let Some(plugin) = skip_if_no_plugin() else {
         return;
     };
-    let out = run_with_plugin(&plugin, &["plugins", "info", "tubescribe"]);
+    let out = run_with_plugin(&plugin, &["plugins", "info", "example"]);
     assert!(
         out.status.success(),
         "plugins info failed: {}",
@@ -89,7 +89,7 @@ fn plugins_info_shows_capabilities() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let caps: serde_json::Value =
         serde_json::from_str(stdout.trim()).expect("info output is not capabilities JSON");
-    assert_eq!(caps["name"], "tubescribe");
+    assert_eq!(caps["name"], "example");
     assert_eq!(caps["protocol"], "psp/1");
     assert!(
         caps["commands"]
@@ -105,10 +105,7 @@ fn plugins_run_streams_progress_and_result() {
     let Some(plugin) = skip_if_no_plugin() else {
         return;
     };
-    let out = run_with_plugin(
-        &plugin,
-        &["plugins", "run", "tubescribe", "generate_metadata"],
-    );
+    let out = run_with_plugin(&plugin, &["plugins", "run", "example", "generate_metadata"]);
     assert!(
         out.status.success(),
         "plugins run failed: {}",
@@ -148,7 +145,7 @@ fn plugins_run_unknown_method_reports_error_item() {
     let Some(plugin) = skip_if_no_plugin() else {
         return;
     };
-    let out = run_with_plugin(&plugin, &["plugins", "run", "tubescribe", "does_not_exist"]);
+    let out = run_with_plugin(&plugin, &["plugins", "run", "example", "does_not_exist"]);
     assert!(
         out.status.success(),
         "plugins run failed: {}",
@@ -166,7 +163,7 @@ fn plugins_info_unknown_plugin_fails() {
     let Some(plugin) = skip_if_no_plugin() else {
         return;
     };
-    // The plugin dir contains only tubescribe.
+    // The plugin dir contains only example.
     let out = run_with_plugin(&plugin, &["plugins", "info", "nope"]);
     assert!(!out.status.success(), "expected failure for unknown plugin");
 }

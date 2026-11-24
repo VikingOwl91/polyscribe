@@ -283,8 +283,8 @@ Discover and run local plugin executables. PolyScribe searches `PATH` and the pl
 | Syntax | Output and example |
 |---|---|
 | `plugins list` | Print discovered plugin names, one per line: `polyscribe plugins list` |
-| `plugins info <NAME>` | Run the plugin's `info` operation and print its capabilities JSON: `polyscribe plugins info tubescribe` |
-| `plugins run <NAME> <COMMAND> [--payload <JSON>]` | Send one request and forward the plugin's output stream: `polyscribe plugins run tubescribe generate_metadata --payload '{"url":"https://example.com"}'` |
+| `plugins info <NAME>` | Run the plugin's `info` operation and print its capabilities JSON: `polyscribe plugins info example` |
+| `plugins run <NAME> <COMMAND> [--payload <JSON>]` | Send one request and forward the plugin's output stream: `polyscribe plugins run example generate_metadata --payload '{"url":"https://example.com"}'` |
 
 If omitted, `--payload` defaults to `{}`. Valid JSON text is sent as a JSON value; non-JSON text is sent as a JSON string. Child stderr is inherited by the terminal. A missing plugin, invalid JSON from `info`, or nonzero `run` exit is an error. `plugins run` forwards stdout lines and does not validate their contents. The `--payload` option avoids a name collision with global `--json`.
 

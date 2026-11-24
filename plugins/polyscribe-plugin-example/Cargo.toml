@@ -1,5 +1,5 @@
 [package]
-name = "polyscribe-plugin-tubescribe"
+name = "polyscribe-plugin-example"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,7 +9,7 @@ license.workspace = true
 workspace = true
 
 [[bin]]
-name = "polyscribe-plugin-tubescribe"
+name = "polyscribe-plugin-example"
 path = "src/main.rs"
 
 [dependencies]
