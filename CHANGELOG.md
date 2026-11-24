@@ -7,6 +7,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 ## Unreleased
 
 ### Changed
+- Tests: the plugin integration tests build the `example` plugin themselves when its binary is missing (for example with `cargo test -p polyscribe-cli`) and fail when that does not work, instead of skipping with a note and reporting `ok`.
 - Plugins: the reference plugin `polyscribe-plugin-tubescribe` is now `polyscribe-plugin-example` (`polyscribe plugins run example generate_metadata`). It never did YouTube work; it returns canned data and exists as the PSP/1 reference and test fixture. A plugin installed under the old name must be renamed.
 
 ### Added
