@@ -11,12 +11,19 @@ pub enum GpuBackend {
 
 /// The transcription engine. `whisper` is the local default; the `voxtral-*`
 /// engine transcribes with Mistral's Voxtral models through the Mistral cloud
-/// API (`voxtral-cloud`, needs a Mistral API key).
+/// API (`voxtral-cloud`, needs a Mistral API key). `auto` uses the cloud only
+/// when the `mistral_token` file is configured (the `MISTRAL_API_KEY` env var
+/// alone does not activate it), otherwise the local whisper engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Engine {
     Whisper,
     VoxtralCloud,
+    Auto,
 }
+
+/// The default of `--engine`. To make `auto` the default later, change this
+/// one constant.
+pub const DEFAULT_ENGINE: Engine = Engine::Whisper;
 
 #[derive(Debug, Clone, Args)]
 pub struct OutputOpts {
@@ -81,9 +88,11 @@ pub enum Commands {
         #[arg(long, default_value_t = false)]
         set_speaker_names: bool,
 
-        /// Transcription engine: whisper (local, default), voxtral-cloud
-        /// (Mistral cloud API, uploads the audio, needs a Mistral API key).
-        #[arg(long, value_enum, default_value_t = Engine::Whisper)]
+        /// Transcription engine: whisper (local), voxtral-cloud (Mistral
+        /// cloud API, uploads the audio, needs a Mistral API key), or auto
+        /// (voxtral-cloud only when the mistral_token file is configured,
+        /// else local whisper; cloud failures fall back to local whisper).
+        #[arg(long, value_enum, default_value_t = DEFAULT_ENGINE)]
         engine: Engine,
 
         /// Voxtral model id for voxtral-cloud (default:
@@ -315,7 +324,8 @@ mod tests {
             panic!("expected transcribe command");
         };
         assert!(matches!(gpu_backend, GpuBackend::Auto));
-        // The default engine is whisper
+        // The default engine is the one named by DEFAULT_ENGINE (whisper today)
+        assert!(engine == DEFAULT_ENGINE);
         assert!(matches!(engine, Engine::Whisper));
         // Supported values parse
         for value in ["auto", "cpu", "cuda", "hip"] {
@@ -340,7 +350,7 @@ mod tests {
 
     #[test]
     fn test_engine_values() {
-        for value in ["whisper", "voxtral-cloud"] {
+        for value in ["whisper", "voxtral-cloud", "auto"] {
             let cli = Cli::try_parse_from([
                 "polyscribe",
                 "transcribe",
@@ -366,6 +376,7 @@ mod tests {
             match value {
                 "whisper" => assert!(matches!(engine, Engine::Whisper)),
                 "voxtral-cloud" => assert!(matches!(engine, Engine::VoxtralCloud)),
+                "auto" => assert!(matches!(engine, Engine::Auto)),
                 _ => unreachable!(),
             }
         }

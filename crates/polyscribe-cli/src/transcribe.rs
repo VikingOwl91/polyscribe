@@ -12,6 +12,7 @@ use anyhow::{Context, Result, anyhow};
 use polyscribe_core::backend::{
     BackendKind, TranscribeBackend, collect_entries_for_input, select_backend,
 };
+use polyscribe_core::fallback::FallbackBackend;
 use polyscribe_core::output::{
     OutputRoot, is_audio_file, sort_and_reindex, write_json_stdout, write_output_files,
 };
@@ -34,6 +35,38 @@ pub struct TranscribeArgs {
     pub gpu_backend: GpuBackend,
     pub gpu_layers: usize,
     pub inputs: Vec<PathBuf>,
+}
+
+/// The engine a run actually uses after `auto` is resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolvedEngine {
+    /// Local whisper.
+    Whisper,
+    /// Explicit `--engine voxtral-cloud`: no fallback, a cloud error aborts
+    /// the run as before.
+    VoxtralCloud,
+    /// `--engine auto` resolved to the cloud: cloud first, and after the
+    /// first cloud error the rest of the run falls back to local whisper.
+    AutoCloud,
+}
+
+/// Resolve the requested engine. `auto` selects the Mistral cloud only when
+/// the token FILE is configured (`voxtral_cloud::token_file_configured`);
+/// the `MISTRAL_API_KEY` env var alone does not activate it, because other
+/// tools set it too. Without the token file, `auto` is the local whisper
+/// engine.
+pub fn resolve_engine(engine: Engine) -> ResolvedEngine {
+    match engine {
+        Engine::Whisper => ResolvedEngine::Whisper,
+        Engine::VoxtralCloud => ResolvedEngine::VoxtralCloud,
+        Engine::Auto => {
+            if polyscribe_core::voxtral_cloud::token_file_configured() {
+                ResolvedEngine::AutoCloud
+            } else {
+                ResolvedEngine::Whisper
+            }
+        }
+    }
 }
 
 pub fn run(args: TranscribeArgs) -> Result<()> {
@@ -76,15 +109,18 @@ pub fn run(args: TranscribeArgs) -> Result<()> {
     }
 
     progress.step("Selecting engine");
-    let mut backend: Box<dyn TranscribeBackend + Send + Sync> = match args.engine {
-        Engine::Whisper => {
-            let requested = match args.gpu_backend {
-                GpuBackend::Auto => BackendKind::Auto,
-                GpuBackend::Cpu => BackendKind::Cpu,
-                GpuBackend::Cuda => BackendKind::Cuda,
-                GpuBackend::Hip => BackendKind::Hip,
-            };
-            let sel = select_backend(requested, polyscribe_core::verbose_level() > 0)?;
+    let resolved = resolve_engine(args.engine);
+    polyscribe_core::dlog!(1, "Resolved engine: {resolved:?}");
+    let requested = match args.gpu_backend {
+        GpuBackend::Auto => BackendKind::Auto,
+        GpuBackend::Cpu => BackendKind::Cpu,
+        GpuBackend::Cuda => BackendKind::Cuda,
+        GpuBackend::Hip => BackendKind::Hip,
+    };
+    let verbose = polyscribe_core::verbose_level() > 0;
+    let mut backend: Box<dyn TranscribeBackend + Send + Sync> = match resolved {
+        ResolvedEngine::Whisper => {
+            let sel = select_backend(requested, verbose)?;
             polyscribe_core::dlog!(1, "Using backend: {:?}", sel.chosen);
             if matches!(args.gpu_backend, GpuBackend::Auto)
                 && sel.chosen == BackendKind::Cpu
@@ -96,13 +132,29 @@ pub fn run(args: TranscribeArgs) -> Result<()> {
             }
             sel.backend
         }
-        Engine::VoxtralCloud => {
+        ResolvedEngine::VoxtralCloud => {
             let model = args
                 .voxtral_model
                 .clone()
                 .unwrap_or_else(|| DEFAULT_VOXTRAL_CLOUD_MODEL.to_string());
             polyscribe_core::dlog!(1, "Using engine voxtral-cloud with model {model}");
             Box::new(CloudVoxtralBackend::new(model)?)
+        }
+        ResolvedEngine::AutoCloud => {
+            polyscribe_core::voxtral_cloud::warn_auto_cloud_once();
+            let model = args
+                .voxtral_model
+                .clone()
+                .unwrap_or_else(|| DEFAULT_VOXTRAL_CLOUD_MODEL.to_string());
+            polyscribe_core::dlog!(
+                1,
+                "Engine auto: token file configured, using voxtral-cloud (model {model}) with a local whisper fallback"
+            );
+            Box::new(FallbackBackend::with_local_whisper_fallback(
+                Box::new(CloudVoxtralBackend::new(model)?),
+                requested,
+                verbose,
+            ))
         }
     };
     let gpu_layers = if args.gpu_layers > 0 {
@@ -386,5 +438,61 @@ mod tests {
             resolve_speaker_name(Path::new("input/2-vikingowl.json"), false),
             "vikingowl"
         );
+    }
+
+    /// Serializes tests that mutate process environment variables.
+    static ENV_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+
+    #[test]
+    fn test_resolve_engine_explicit_values_pass_through_without_fallback() {
+        // Explicit whisper stays whisper; explicit voxtral-cloud stays
+        // voxtral-cloud and is NOT wrapped in a fallback (only `auto` gets
+        // one).
+        assert_eq!(resolve_engine(Engine::Whisper), ResolvedEngine::Whisper);
+        assert_eq!(
+            resolve_engine(Engine::VoxtralCloud),
+            ResolvedEngine::VoxtralCloud
+        );
+    }
+
+    #[test]
+    fn test_resolve_engine_auto() {
+        use polyscribe_core::voxtral_cloud::{ENV_API_KEY, ENV_TOKEN_FILE};
+        let _guard = ENV_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap();
+        let old_key = std::env::var(ENV_API_KEY).ok();
+        let old_file = std::env::var_os(ENV_TOKEN_FILE);
+        // Always point the override into the temp dir, so the real token
+        // file of this machine is never read.
+        let dir = tempfile::tempdir().unwrap();
+        let token = dir.path().join("mistral_token");
+
+        // No token file -> local whisper.
+        unsafe { std::env::set_var(ENV_TOKEN_FILE, dir.path().join("absent")) };
+        assert_eq!(resolve_engine(Engine::Auto), ResolvedEngine::Whisper);
+
+        // MISTRAL_API_KEY set but no token file -> still local whisper.
+        unsafe { std::env::set_var(ENV_API_KEY, "env-only-key") };
+        assert_eq!(resolve_engine(Engine::Auto), ResolvedEngine::Whisper);
+
+        // Empty token file -> local whisper.
+        std::fs::write(&token, "  \n").unwrap();
+        unsafe { std::env::set_var(ENV_TOKEN_FILE, &token) };
+        assert_eq!(resolve_engine(Engine::Auto), ResolvedEngine::Whisper);
+
+        // Token file with a key -> cloud, with the local fallback.
+        std::fs::write(&token, "some-key\n").unwrap();
+        assert_eq!(resolve_engine(Engine::Auto), ResolvedEngine::AutoCloud);
+
+        match old_key {
+            Some(v) => unsafe { std::env::set_var(ENV_API_KEY, v) },
+            None => unsafe { std::env::remove_var(ENV_API_KEY) },
+        }
+        match old_file {
+            Some(v) => unsafe { std::env::set_var(ENV_TOKEN_FILE, v) },
+            None => unsafe { std::env::remove_var(ENV_TOKEN_FILE) },
+        }
     }
 }

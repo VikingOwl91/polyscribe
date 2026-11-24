@@ -275,9 +275,29 @@ fn token_file_path() -> Option<PathBuf> {
     crate::config::ConfigService::project_dirs().map(|d| d.config_dir().join(TOKEN_FILE_NAME))
 }
 
+/// Warn once per process when the token file is readable by group/others.
+/// Shared by every token-file read, so the warning is never printed twice
+/// (for example when `token_file_configured` and `api_key` both look).
+#[cfg(unix)]
+fn warn_if_loose_token_file_permissions(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Ok(meta) = std::fs::metadata(path)
+        && meta.permissions().mode() & 0o077 != 0
+        && !LOOSE_TOKEN_FILE_WARNED.swap(true, Ordering::SeqCst)
+    {
+        eprintln!(
+            "warning: {} is readable by other users; restrict it with `chmod 600`.",
+            path.display()
+        );
+    }
+}
+
+#[cfg(unix)]
+static LOOSE_TOKEN_FILE_WARNED: AtomicBool = AtomicBool::new(false);
+
 /// Read the key from the token file. A missing file is `Ok(None)`; an
 /// unreadable file is an error that names the path but never the content.
-/// On Unix a file readable by group or others is reported on stderr.
+/// On Unix a file readable by group or others is reported on stderr once.
 fn read_token_file(path: &Path) -> Result<Option<String>> {
     let raw = match std::fs::read_to_string(path) {
         Ok(raw) => raw,
@@ -292,19 +312,22 @@ fn read_token_file(path: &Path) -> Result<Option<String>> {
         }
     };
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Ok(meta) = std::fs::metadata(path)
-            && meta.permissions().mode() & 0o077 != 0
-        {
-            eprintln!(
-                "warning: {} is readable by other users; restrict it with `chmod 600`.",
-                path.display()
-            );
-        }
-    }
+    warn_if_loose_token_file_permissions(path);
     let key = raw.trim();
     Ok((!key.is_empty()).then(|| key.to_string()))
+}
+
+/// Whether a token file is configured: the file at the token-file path
+/// (including the `POLYSCRIBE_MISTRAL_TOKEN_FILE` override) exists, is
+/// readable, and holds a non-empty key after trimming. The content is never
+/// logged or returned. `MISTRAL_API_KEY` alone does NOT count here: other
+/// tools set it too, and `--engine auto` must not upload audio because of
+/// it.
+pub fn token_file_configured() -> bool {
+    match token_file_path() {
+        Some(path) => matches!(read_token_file(&path), Ok(Some(_))),
+        None => false,
+    }
 }
 
 /// Whether the user already consented to cloud uploads (`--yes` or
@@ -334,6 +357,29 @@ fn warn_cloud_upload_once() {
         "Uploading audio to the Mistral cloud API (api.mistral.ai) for transcription. \
          Suppress this warning with --yes or POLYSCRIBE_CLOUD_OK=1.",
     );
+}
+
+static AUTO_CLOUD_WARNED: AtomicBool = AtomicBool::new(false);
+
+/// One-line notice for `--engine auto` when it resolved to the cloud: the
+/// token file was found and audio will be uploaded; `--engine whisper`
+/// stays local. Suppressed by the same consent as the upload warning
+/// (`--yes` or `POLYSCRIBE_CLOUD_OK=1`), shown at most once per run.
+pub fn warn_auto_cloud_once() {
+    if cloud_consent_given() {
+        return;
+    }
+    if AUTO_CLOUD_WARNED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let shown = token_file_path()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "<config dir>/mistral_token".to_string());
+    crate::ui::warn(format!(
+        "--engine auto: found the Mistral token file {shown}; audio will be uploaded to the \
+         Mistral cloud API (api.mistral.ai). Use --engine whisper to transcribe locally. \
+         Suppress this warning with --yes or {ENV_CLOUD_OK}=1."
+    ));
 }
 
 /// The response of `POST /v1/audio/transcriptions`. Only the fields PolyScribe
@@ -761,6 +807,57 @@ mod tests {
         let msg = format!("{:#}", CloudVoxtralBackend::api_key().unwrap_err());
         assert!(msg.contains("No Mistral API key"), "{msg}");
         match old {
+            Some(v) => unsafe { env::set_var(ENV_API_KEY, v) },
+            None => unsafe { env::remove_var(ENV_API_KEY) },
+        }
+        match old_file {
+            Some(v) => unsafe { env::set_var(ENV_TOKEN_FILE, v) },
+            None => unsafe { env::remove_var(ENV_TOKEN_FILE) },
+        }
+    }
+
+    #[test]
+    fn test_token_file_configured() {
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let old_key = env::var(ENV_API_KEY).ok();
+        let old_file = env::var_os(ENV_TOKEN_FILE);
+        // Always point the override at the temp dir, so the real token file
+        // of this machine is never read.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("mistral_token");
+
+        // No file at all -> false.
+        unsafe { env::set_var(ENV_TOKEN_FILE, dir.path().join("absent")) };
+        assert!(!token_file_configured());
+
+        // MISTRAL_API_KEY set but no token file -> still false: the env var
+        // alone must not activate the cloud in `auto`.
+        unsafe { env::set_var(ENV_API_KEY, "env-only-key") };
+        assert!(!token_file_configured());
+
+        // Empty / whitespace-only file -> false.
+        std::fs::write(&file, "  \n\t ").unwrap();
+        unsafe { env::set_var(ENV_TOKEN_FILE, &file) };
+        assert!(!token_file_configured());
+
+        // Unreadable file -> false (skipped as root, where mode bits are not
+        // enforced).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if unsafe { libc::geteuid() } != 0 {
+                std::fs::write(&file, "some-key").unwrap();
+                std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+                assert!(!token_file_configured());
+                std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+            }
+        }
+
+        // A non-empty key -> true.
+        std::fs::write(&file, "  file-key \n").unwrap();
+        assert!(token_file_configured());
+
+        match old_key {
             Some(v) => unsafe { env::set_var(ENV_API_KEY, v) },
             None => unsafe { env::remove_var(ENV_API_KEY) },
         }
