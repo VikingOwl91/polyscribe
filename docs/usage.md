@@ -50,8 +50,17 @@ Accepted media extensions are `mp3`, `wav`, `m4a`, `mp4`, `aac`, `flac`, `ogg`, 
 | `--merge-and-separate` | off | Write one merged transcript and a separate transcript for each input. Requires `-o OUTPUT_DIR`. |
 | `--language <LANGUAGE>` | unset | Required if any input is audio/video. Pass a Whisper language hint such as `en` or `de`. JSON-only input does not need it. File transcription does not auto-detect language. |
 | `--set-speaker-names` | off | Prompt for one manual speaker label per input. This is labeling, not diarization. |
-| `--gpu-backend <GPU_BACKEND>` | `auto` | Choose `auto`, `cpu`, `cuda`, or `hip`. GPU values require a matching compiled backend and available device. |
+| `--engine <ENGINE>` | `whisper` | Choose `whisper` (local) or `voxtral-cloud` (Mistral API, uploads audio). See [Transcription engines](#transcription-engines). |
+| `--voxtral-model <ID>` | engine default | Model id for `voxtral-cloud`. Default: `voxtral-mini-transcribe-3` (per the Mistral API docs; `voxtral-small-transcribe-3` is the other documented model). |
+| `--yes` | off | Acknowledge that `voxtral-cloud` uploads audio to Mistral and suppress the one-time warning. `POLYSCRIBE_CLOUD_OK=1` does the same. |
+| `--gpu-backend <GPU_BACKEND>` | `auto` | Choose `auto`, `cpu`, `cuda`, or `hip`. GPU values require a matching compiled backend and available device. Only used with `--engine whisper`. |
 | `--gpu-layers <GPU_LAYERS>` | `0` | Hidden and reserved. It currently has no supported effect; omit it. |
+
+### Transcription engines
+
+- `whisper` (default) is the local whisper.cpp engine described above, including the `cuda` and `hip` backends. It is unchanged.
+- `voxtral-cloud` sends audio to the Mistral Audio Transcriptions API (`POST https://api.mistral.ai/v1/audio/transcriptions`). It is part of every build, needs no GPU and therefore works the same in the CPU, CUDA and HIP builds. It is opt-in with no automatic fallback from a local engine. Before the first upload of a run a one-line warning goes to stderr. The API key is read from `MISTRAL_API_KEY`, or when that is unset from the file `mistral_token` in the polyscribe config directory (`~/.config/polyscribe/mistral_token` on Linux, `POLYSCRIBE_MISTRAL_TOKEN_FILE` overrides the path; keep it `chmod 600`). It is never logged or written to files. Long audio is decoded locally in 30 s windows and uploaded as small WAV chunks; segment timestamps from the API are shifted to the window position, and when the API returns none, the chunk bounds are used. Retries happen only on HTTP 429 and 5xx. It is covered by tests against a local mock server and was exercised once against the live API with a 3-minute English clip.
+- AMD GPUs: whisper with `gpu-hip` stays the GPU path. `voxtral-cloud` is the AMD-friendly Voxtral route, because the compute happens at Mistral. A local Voxtral engine is not part of this build.
 
 ### Examples and output
 
@@ -310,6 +319,9 @@ An English-only model can only be used with English. A multilingual model can us
 | `WHISPER_MODEL` | Select one exact local Whisper model file. |
 | `POLYSCRIBE_YTDLP` | Select the `yt-dlp` executable file instead of searching `PATH`. |
 | `POLYSCRIBE_VOXTRAL` | Absolute path to the optional local Voxtral wrapper. Unset by default. |
+| `MISTRAL_API_KEY` | Mistral API key, read only by `--engine voxtral-cloud`; falls back to the `mistral_token` file in the config directory. Never logged or written to files. |
+| `POLYSCRIBE_MISTRAL_TOKEN_FILE` | Override the path of the Mistral token file. |
+| `POLYSCRIBE_CLOUD_OK` | Set to `1` to suppress the one-time upload warning of `voxtral-cloud` (same as `--yes`). |
 | `XDG_DATA_HOME`, `XDG_CACHE_HOME`, `XDG_CONFIG_HOME`, `HOME` | Resolve model, cache, config, and plugin paths. |
 | `POLYSCRIBE_CACHE_DIR` | Override the model-download cache base; model files are stored below its `models/` child. |
 | `POLYSCRIBE_CONFIG_DIR` | Override the model manifest config directory when `POLYSCRIBE_CACHE_DIR` is also set. Otherwise the XDG/HOME default is used. |
@@ -326,7 +338,7 @@ The model-download cache and transcript cache are different locations. YouTube t
 
 ## Network and local processing
 
-- `transcribe` and `record` use local Whisper inference and do not contact remote services. `record` needs PipeWire and `pw-record`; `transcribe` needs `ffmpeg` for media decoding.
+- `transcribe` with the default `whisper` engine and `record` use local Whisper inference and do not contact remote services. `transcribe --engine voxtral-cloud` uploads the audio to the Mistral API. `record` needs PipeWire and `pw-record`; `transcribe` needs `ffmpeg` for media decoding.
 - `youtube` contacts YouTube through `yt-dlp` to fetch metadata and audio. Voxtral and Whisper processing then happen locally.
 - `models add`, `update`, `search`, and the interactive downloader contact Hugging Face. Other model commands work on the local manifest and files.
 - `plugins`, `completions`, and `man` have no built-in network activity. A plugin may make its own requests.

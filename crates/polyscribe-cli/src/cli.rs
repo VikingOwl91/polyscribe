@@ -9,6 +9,15 @@ pub enum GpuBackend {
     Hip,
 }
 
+/// The transcription engine. `whisper` is the local default; the `voxtral-*`
+/// engine transcribes with Mistral's Voxtral models through the Mistral cloud
+/// API (`voxtral-cloud`, needs a Mistral API key).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum Engine {
+    Whisper,
+    VoxtralCloud,
+}
+
 #[derive(Debug, Clone, Args)]
 pub struct OutputOpts {
     /// Request structured JSON where supported; suppress decorative logs
@@ -72,9 +81,24 @@ pub enum Commands {
         #[arg(long, default_value_t = false)]
         set_speaker_names: bool,
 
+        /// Transcription engine: whisper (local, default), voxtral-cloud
+        /// (Mistral cloud API, uploads the audio, needs a Mistral API key).
+        #[arg(long, value_enum, default_value_t = Engine::Whisper)]
+        engine: Engine,
+
+        /// Voxtral model id for voxtral-cloud (default:
+        /// voxtral-mini-transcribe-3).
+        #[arg(long)]
+        voxtral_model: Option<String>,
+
+        /// Acknowledge that voxtral-cloud uploads audio to the Mistral API;
+        /// suppresses the one-time warning (or set POLYSCRIBE_CLOUD_OK=1).
+        #[arg(long, default_value_t = false)]
+        yes: bool,
+
         /// Transcription backend among those compiled in (auto|cpu|cuda|hip).
         /// GPU backends require a build with the matching cargo feature
-        /// (gpu-cuda, gpu-hip). Default: auto.
+        /// (gpu-cuda, gpu-hip). Default: auto. Only used with --engine whisper.
         #[arg(long, value_enum, default_value_t = GpuBackend::Auto)]
         gpu_backend: GpuBackend,
 
@@ -282,10 +306,17 @@ mod tests {
     fn test_gpu_backend_values() {
         // Default is auto
         let cli = Cli::try_parse_from(["polyscribe", "transcribe", "a.json"]).unwrap();
-        let Commands::Transcribe { gpu_backend, .. } = cli.command else {
+        let Commands::Transcribe {
+            gpu_backend,
+            engine,
+            ..
+        } = cli.command
+        else {
             panic!("expected transcribe command");
         };
         assert!(matches!(gpu_backend, GpuBackend::Auto));
+        // The default engine is whisper
+        assert!(matches!(engine, Engine::Whisper));
         // Supported values parse
         for value in ["auto", "cpu", "cuda", "hip"] {
             Cli::try_parse_from(["polyscribe", "transcribe", "--gpu-backend", value, "a.json"])
@@ -303,6 +334,46 @@ mod tests {
         let msg = err.to_string();
         assert!(
             msg.contains("invalid value") && msg.contains("cuda"),
+            "error should explain valid values, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_engine_values() {
+        for value in ["whisper", "voxtral-cloud"] {
+            let cli = Cli::try_parse_from([
+                "polyscribe",
+                "transcribe",
+                "--engine",
+                value,
+                "--voxtral-model",
+                "some-model",
+                "--yes",
+                "a.json",
+            ])
+            .unwrap();
+            let Commands::Transcribe {
+                engine,
+                voxtral_model,
+                yes,
+                ..
+            } = cli.command
+            else {
+                panic!("expected transcribe command");
+            };
+            assert!(voxtral_model.as_deref() == Some("some-model"));
+            assert!(yes);
+            match value {
+                "whisper" => assert!(matches!(engine, Engine::Whisper)),
+                "voxtral-cloud" => assert!(matches!(engine, Engine::VoxtralCloud)),
+                _ => unreachable!(),
+            }
+        }
+        let err = Cli::try_parse_from(["polyscribe", "transcribe", "--engine", "gpt", "a.json"])
+            .expect_err("unknown engine must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invalid value") && msg.contains("voxtral-cloud"),
             "error should explain valid values, got: {msg}"
         );
     }

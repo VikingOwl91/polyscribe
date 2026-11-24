@@ -48,6 +48,8 @@ reqwest = { version = "0.12.7", default-features = false, features = [
     "charset",
     "http2",
     "system-proxy",
+    # multipart upload of audio chunks to the Mistral transcription API
+    "multipart",
 ] }
 hex = "0.4.3"
 tempfile = "3.12.0"
