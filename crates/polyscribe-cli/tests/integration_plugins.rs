@@ -3,39 +3,69 @@
 
 //! End-to-end tests for the plugin system (`polyscribe plugins ...`).
 //!
-//! These tests run the built `polyscribe-plugin-example` reference plugin
-//! through the CLI's plugin host. They need no network. If the plugin binary
-//! is not built (e.g. when testing only this crate with `-p polyscribe-cli`),
-//! the tests are skipped with a note; run `cargo test --workspace` to include
-//! them.
+//! These tests run the `polyscribe-plugin-example` reference plugin through
+//! the CLI's plugin host. They need no network. The plugin binary is a
+//! different package than the CLI, so `cargo test -p polyscribe-cli` does not
+//! build it; the tests then build it themselves (once) instead of skipping, and
+//! fail with a clear message if that does not work.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_polyscribe")
 }
 
 /// Locate the reference plugin binary next to the `polyscribe` binary
-/// (same target dir, both are workspace members).
-fn plugin_bin() -> Option<PathBuf> {
-    let polyscribe = PathBuf::from(bin());
-    let dir = polyscribe.parent()?;
+/// (same target dir and profile, both are workspace members).
+fn find_plugin_bin() -> Option<PathBuf> {
+    let dir = PathBuf::from(bin()).parent()?.to_path_buf();
     let candidate = dir.join("polyscribe-plugin-example");
     candidate.is_file().then_some(candidate)
 }
 
-fn skip_if_no_plugin() -> Option<PathBuf> {
-    match plugin_bin() {
-        Some(p) => Some(p),
-        None => {
-            eprintln!(
-                "NOT RUN: polyscribe-plugin-example binary not found next to polyscribe; \
-                 run `cargo test --workspace` to include plugin tests"
-            );
-            None
-        }
+/// Build the plugin into the same target dir and profile as this test run.
+fn build_plugin() {
+    let polyscribe = PathBuf::from(bin());
+    let profile_dir = polyscribe.parent().expect("binary has a directory");
+    let target_dir = profile_dir.parent().expect("profile dir has a target dir");
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let mut cmd = Command::new(cargo);
+    cmd.args(["build", "--locked", "-p", "polyscribe-plugin-example"])
+        .arg("--target-dir")
+        .arg(target_dir);
+    if profile_dir
+        .file_name()
+        .is_some_and(|name| name == "release")
+    {
+        cmd.arg("--release");
     }
+    let output = cmd
+        .output()
+        .expect("failed to start cargo to build the plugin");
+    assert!(
+        output.status.success(),
+        "building polyscribe-plugin-example failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// The reference plugin binary. Built on first use if it is missing; a
+/// missing plugin fails the test run instead of silently skipping it.
+fn require_plugin() -> PathBuf {
+    static PLUGIN: OnceLock<PathBuf> = OnceLock::new();
+    PLUGIN
+        .get_or_init(|| {
+            if let Some(path) = find_plugin_bin() {
+                return path;
+            }
+            build_plugin();
+            find_plugin_bin().expect(
+                "polyscribe-plugin-example was built but is not next to the polyscribe binary",
+            )
+        })
+        .clone()
 }
 
 /// Run the CLI with an isolated PATH (containing the plugin) and XDG dirs.
@@ -59,9 +89,7 @@ fn run_with_plugin(plugin: &Path, args: &[&str]) -> std::process::Output {
 
 #[test]
 fn plugins_list_finds_example() {
-    let Some(plugin) = skip_if_no_plugin() else {
-        return;
-    };
+    let plugin = require_plugin();
     let out = run_with_plugin(&plugin, &["plugins", "list"]);
     assert!(
         out.status.success(),
@@ -77,9 +105,7 @@ fn plugins_list_finds_example() {
 
 #[test]
 fn plugins_info_shows_capabilities() {
-    let Some(plugin) = skip_if_no_plugin() else {
-        return;
-    };
+    let plugin = require_plugin();
     let out = run_with_plugin(&plugin, &["plugins", "info", "example"]);
     assert!(
         out.status.success(),
@@ -102,9 +128,7 @@ fn plugins_info_shows_capabilities() {
 
 #[test]
 fn plugins_run_streams_progress_and_result() {
-    let Some(plugin) = skip_if_no_plugin() else {
-        return;
-    };
+    let plugin = require_plugin();
     let out = run_with_plugin(&plugin, &["plugins", "run", "example", "generate_metadata"]);
     assert!(
         out.status.success(),
@@ -142,9 +166,7 @@ fn plugins_run_streams_progress_and_result() {
 
 #[test]
 fn plugins_run_unknown_method_reports_error_item() {
-    let Some(plugin) = skip_if_no_plugin() else {
-        return;
-    };
+    let plugin = require_plugin();
     let out = run_with_plugin(&plugin, &["plugins", "run", "example", "does_not_exist"]);
     assert!(
         out.status.success(),
@@ -160,9 +182,7 @@ fn plugins_run_unknown_method_reports_error_item() {
 
 #[test]
 fn plugins_info_unknown_plugin_fails() {
-    let Some(plugin) = skip_if_no_plugin() else {
-        return;
-    };
+    let plugin = require_plugin();
     // The plugin dir contains only example.
     let out = run_with_plugin(&plugin, &["plugins", "info", "nope"]);
     assert!(!out.status.success(), "expected failure for unknown plugin");
