@@ -16,9 +16,10 @@ use polyscribe_core::output::{
     OutputRoot, is_audio_file, sort_and_reindex, write_json_stdout, write_output_files,
 };
 use polyscribe_core::ui::progress::{ProgressReporter, TranscriptProgress};
+use polyscribe_core::voxtral_cloud::{CloudVoxtralBackend, DEFAULT_VOXTRAL_CLOUD_MODEL};
 use polyscribe_core::{date_prefix, normalize_lang_code};
 
-use crate::cli::GpuBackend;
+use crate::cli::{Engine, GpuBackend};
 
 /// Arguments for the `transcribe` subcommand.
 pub struct TranscribeArgs {
@@ -27,6 +28,9 @@ pub struct TranscribeArgs {
     pub merge_and_separate: bool,
     pub language: Option<String>,
     pub set_speaker_names: bool,
+    pub engine: Engine,
+    pub voxtral_model: Option<String>,
+    pub yes: bool,
     pub gpu_backend: GpuBackend,
     pub gpu_layers: usize,
     pub inputs: Vec<PathBuf>,
@@ -67,23 +71,40 @@ pub fn run(args: TranscribeArgs) -> Result<()> {
         ));
     }
 
-    progress.step("Selecting backend");
-    let requested = match args.gpu_backend {
-        GpuBackend::Auto => BackendKind::Auto,
-        GpuBackend::Cpu => BackendKind::Cpu,
-        GpuBackend::Cuda => BackendKind::Cuda,
-        GpuBackend::Hip => BackendKind::Hip,
-    };
-    let mut sel = select_backend(requested, polyscribe_core::verbose_level() > 0)?;
-    polyscribe_core::dlog!(1, "Using backend: {:?}", sel.chosen);
-    if matches!(args.gpu_backend, GpuBackend::Auto)
-        && sel.chosen == BackendKind::Cpu
-        && sel.compiled.is_empty()
-    {
-        polyscribe_core::ilog!(
-            "No GPU backend is compiled into this binary; using the CPU backend. Build with --features gpu-hip for AMD ROCm or --features gpu-cuda for NVIDIA."
-        );
+    if args.yes {
+        polyscribe_core::voxtral_cloud::set_cloud_consent(true);
     }
+
+    progress.step("Selecting engine");
+    let mut backend: Box<dyn TranscribeBackend + Send + Sync> = match args.engine {
+        Engine::Whisper => {
+            let requested = match args.gpu_backend {
+                GpuBackend::Auto => BackendKind::Auto,
+                GpuBackend::Cpu => BackendKind::Cpu,
+                GpuBackend::Cuda => BackendKind::Cuda,
+                GpuBackend::Hip => BackendKind::Hip,
+            };
+            let sel = select_backend(requested, polyscribe_core::verbose_level() > 0)?;
+            polyscribe_core::dlog!(1, "Using backend: {:?}", sel.chosen);
+            if matches!(args.gpu_backend, GpuBackend::Auto)
+                && sel.chosen == BackendKind::Cpu
+                && sel.compiled.is_empty()
+            {
+                polyscribe_core::ilog!(
+                    "No GPU backend is compiled into this binary; using the CPU backend. Build with --features gpu-hip for AMD ROCm or --features gpu-cuda for NVIDIA."
+                );
+            }
+            sel.backend
+        }
+        Engine::VoxtralCloud => {
+            let model = args
+                .voxtral_model
+                .clone()
+                .unwrap_or_else(|| DEFAULT_VOXTRAL_CLOUD_MODEL.to_string());
+            polyscribe_core::dlog!(1, "Using engine voxtral-cloud with model {model}");
+            Box::new(CloudVoxtralBackend::new(model)?)
+        }
+    };
     let gpu_layers = if args.gpu_layers > 0 {
         Some(args.gpu_layers as u32)
     } else {
@@ -110,7 +131,7 @@ pub fn run(args: TranscribeArgs) -> Result<()> {
         for input_path in &inputs {
             let speaker = resolve_speaker_name(input_path, args.set_speaker_names);
             let mut entries = collect_entries_with_progress(
-                sel.backend.as_mut(),
+                backend.as_mut(),
                 input_path,
                 &speaker,
                 lang_hint.as_deref(),
@@ -149,7 +170,7 @@ pub fn run(args: TranscribeArgs) -> Result<()> {
         for input_path in &inputs {
             let speaker = resolve_speaker_name(input_path, args.set_speaker_names);
             entries.extend(collect_entries_with_progress(
-                sel.backend.as_mut(),
+                backend.as_mut(),
                 input_path,
                 &speaker,
                 lang_hint.as_deref(),
@@ -208,7 +229,7 @@ pub fn run(args: TranscribeArgs) -> Result<()> {
         for input_path in &inputs {
             let speaker = resolve_speaker_name(input_path, args.set_speaker_names);
             let mut entries = collect_entries_with_progress(
-                sel.backend.as_mut(),
+                backend.as_mut(),
                 input_path,
                 &speaker,
                 lang_hint.as_deref(),
