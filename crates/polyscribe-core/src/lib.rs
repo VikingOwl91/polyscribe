@@ -164,6 +164,7 @@ pub mod capture;
 pub mod chunked;
 pub mod config;
 pub mod error;
+pub mod fallback;
 pub mod gpu;
 pub mod models;
 pub mod output;
