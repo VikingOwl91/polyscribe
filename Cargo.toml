@@ -4,7 +4,7 @@ members = [
     "crates/polyscribe-protocol",
     "crates/polyscribe-host",
     "crates/polyscribe-cli",
-    "plugins/polyscribe-plugin-tubescribe",
+    "plugins/polyscribe-plugin-example",
 ]
 resolver = "3"
 

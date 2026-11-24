@@ -285,7 +285,7 @@ pub enum PluginsCmd {
     List,
     /// Show a plugin's capabilities (as JSON)
     Info {
-        /// Plugin short name, e.g., "tubescribe"
+        /// Plugin short name, e.g., "example"
         name: String,
     },
     /// Run a plugin command (JSON-RPC over NDJSON via stdio)
@@ -405,8 +405,8 @@ mod tests {
     fn test_plugins_subcommands_parse() {
         for args in [
             &["plugins", "list"][..],
-            &["plugins", "info", "tubescribe"][..],
-            &["plugins", "run", "tubescribe", "generate_metadata"][..],
+            &["plugins", "info", "example"][..],
+            &["plugins", "run", "example", "generate_metadata"][..],
         ] {
             let mut full = vec!["polyscribe"];
             full.extend_from_slice(args);

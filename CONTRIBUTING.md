@@ -2,7 +2,7 @@
 
 Thanks for your interest in contributing! This guide explains the workflow and the checklist to follow before opening a Pull Request.
 
-The repository is a Cargo workspace: `polyscribe-core` (engine), `polyscribe-cli` (the `polyscribe` binary), `polyscribe-host` / `polyscribe-protocol` (plugin system), and `plugins/polyscribe-plugin-tubescribe` (reference plugin).
+The repository is a Cargo workspace: `polyscribe-core` (engine), `polyscribe-cli` (the `polyscribe` binary), `polyscribe-host` / `polyscribe-protocol` (plugin system), and `plugins/polyscribe-plugin-example` (reference plugin).
 
 Workflow (fork → branch → PR)
 1) Fork the repository to your account.

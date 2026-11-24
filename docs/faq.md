@@ -46,4 +46,4 @@ Why does building require cmake/libclang?
 - The `whisper-rs-sys` crate compiles whisper.cpp from source and generates Rust bindings with bindgen, which needs libclang. Install `cmake`, a C/C++ toolchain, and `libclang` (e.g. `libclang-dev`).
 
 How do I write a plugin?
-- See `docs/development.md` ("Plugin development") and the reference plugin `plugins/polyscribe-plugin-tubescribe`. A plugin is a `polyscribe-plugin-<name>` executable implementing `info` (capabilities JSON) and `run` (one JSON-RPC request on stdin, NDJSON stream on stdout).
+- See `docs/development.md` ("Plugin development") and the reference plugin `plugins/polyscribe-plugin-example`. A plugin is a `polyscribe-plugin-<name>` executable implementing `info` (capabilities JSON) and `run` (one JSON-RPC request on stdin, NDJSON stream on stdout).

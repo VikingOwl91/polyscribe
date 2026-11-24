@@ -11,9 +11,9 @@ use std::io::{BufRead, BufReader, Write};
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "polyscribe-plugin-tubescribe",
+    name = "polyscribe-plugin-example",
     version,
-    about = "Reference tubescribe plugin for PolyScribe (PSP/1)"
+    about = "Reference example plugin for PolyScribe (PSP/1)"
 )]
 struct Args {
     #[command(subcommand)]
@@ -30,7 +30,7 @@ enum PluginCmd {
 
 fn capabilities() -> psp::Capabilities {
     psp::Capabilities {
-        name: "tubescribe".to_string(),
+        name: "example".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         protocol: "psp/1".to_string(),
         role: "pipeline".to_string(),
@@ -88,7 +88,7 @@ fn serve_once() -> Result<()> {
         "generate_metadata" => {
             let title = "Canned title";
             let description = "Canned description for demonstration";
-            let tags = vec!["demo", "tubescribe", "polyscribe"];
+            let tags = vec!["demo", "example", "polyscribe"];
             json!({
                 "title": title,
                 "description": description,
