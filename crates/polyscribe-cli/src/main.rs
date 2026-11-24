@@ -702,6 +702,7 @@ fn main() -> Result<()> {
             no_cookies,
             captions_only,
             audio_only,
+            no_frontmatter,
         } => youtube::run(
             url,
             language,
@@ -713,6 +714,7 @@ fn main() -> Result<()> {
             no_cookies,
             captions_only,
             audio_only,
+            no_frontmatter,
         ),
     }
 }

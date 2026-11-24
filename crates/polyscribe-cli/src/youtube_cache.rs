@@ -11,7 +11,11 @@ use polyscribe_core::youtube::{CaptionCue, NormalizationStats, YOUTUBE_NORMALIZA
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub const CACHE_SCHEMA_VERSION: u32 = 3;
+pub const CACHE_SCHEMA_VERSION: u32 = 4;
+/// Cache directory name matching the schema version. Entries of older schema
+/// versions stay in their own directory and are never read, so a v3 record
+/// without the newer metadata fields cannot be served with empty fields.
+const CACHE_DIRECTORY_NAME: &str = "v4";
 const MAX_CACHE_ENTRY_BYTES: usize = 32 * 1024 * 1024;
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -75,10 +79,17 @@ pub struct CacheIdentity {
     pub source: SourceIdentity,
 }
 
+/// Video metadata stored with a cache record. Records from older schema
+/// versions (which lack these fields) are rejected by the schema-version
+/// checks and live in their own cache directory, so they are never served
+/// with empty metadata fields.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct VideoSummary {
     pub title: Option<String>,
     pub uploader: Option<String>,
+    pub channel: Option<String>,
+    pub channel_url: Option<String>,
+    pub upload_date: Option<String>,
     pub duration_seconds: Option<f64>,
 }
 
@@ -357,6 +368,21 @@ fn validate_record(record: &CacheRecord) -> Result<()> {
             .is_some_and(|s| s.len() > 16 * 1024)
         || record
             .metadata
+            .channel
+            .as_ref()
+            .is_some_and(|s| s.len() > 16 * 1024)
+        || record
+            .metadata
+            .channel_url
+            .as_ref()
+            .is_some_and(|s| s.len() > 16 * 1024)
+        || record
+            .metadata
+            .upload_date
+            .as_ref()
+            .is_some_and(|s| s.len() > 10)
+        || record
+            .metadata
             .duration_seconds
             .is_some_and(|duration| !duration.is_finite() || duration < 0.0)
     {
@@ -469,7 +495,7 @@ impl Directory {
         for component in base.components().chain([
             Component::Normal(OsStr::new("polyscribe")),
             Component::Normal(OsStr::new("youtube")),
-            Component::Normal(OsStr::new("v3")),
+            Component::Normal(OsStr::new(CACHE_DIRECTORY_NAME)),
         ]) {
             let Component::Normal(name) = component else {
                 continue;
@@ -693,7 +719,7 @@ mod tests {
 
     #[test]
     fn anonymous_request_keeps_its_legacy_cache_key() {
-        let legacy = r#"{"cache_schema_version":3,"normalization_version":4,"selection_policy_version":1,"video_id":"dQw4w9WgXcQ","requested_language":"de","voxtral_executable":null,"voxtral_executable_identity":null}"#;
+        let legacy = r#"{"cache_schema_version":4,"normalization_version":4,"selection_policy_version":1,"video_id":"dQw4w9WgXcQ","requested_language":"de","voxtral_executable":null,"voxtral_executable_identity":null}"#;
         let request = request("dQw4w9WgXcQ");
         assert_eq!(serde_json::to_string(&request).unwrap(), legacy);
         assert_eq!(serde_json::from_str::<RequestKey>(legacy).unwrap(), request);
@@ -806,6 +832,48 @@ mod tests {
         assert!(matches!(
             cache.lookup(&request("video-two")).unwrap(),
             Lookup::Miss
+        ));
+    }
+
+    #[test]
+    fn cache_rejects_v3_records_that_lack_the_v4_metadata_fields() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = YoutubeCache::open_at(temp.path(), true).unwrap();
+        let mut record = record("video-old-shape");
+        // Simulate a v3 entry: old schema version and no channel/channel_url/
+        // upload_date in the stored metadata. The request key itself stays
+        // v4-shaped so the pointer is found and the schema check decides.
+        record.schema_version = 3;
+        let mut value = serde_json::to_value(&record).unwrap();
+        let metadata = value.get_mut("metadata").unwrap().as_object_mut().unwrap();
+        metadata.remove("channel");
+        metadata.remove("channel_url");
+        metadata.remove("upload_date");
+        let identity_hash = digest_json(&record.identity).unwrap();
+        cache
+            .directory
+            .write_atomic(
+                &format!("{identity_hash}.json"),
+                &serde_json::to_vec(&value).unwrap(),
+            )
+            .unwrap();
+        let pointer = CachePointer {
+            schema_version: 3,
+            identity_hash,
+        };
+        cache
+            .directory
+            .write_atomic(
+                &format!(
+                    "request-{}.json",
+                    digest_json(&request("video-old-shape")).unwrap()
+                ),
+                &serde_json::to_vec(&pointer).unwrap(),
+            )
+            .unwrap();
+        assert!(matches!(
+            cache.lookup(&request("video-old-shape")).unwrap(),
+            Lookup::Invalid
         ));
     }
 
@@ -1108,7 +1176,9 @@ mod tests {
             "{}.json",
             digest_json(&record("video-corrupt").identity).unwrap()
         );
-        let directory = temp.path().join("polyscribe/youtube/v3");
+        let directory = temp
+            .path()
+            .join(format!("polyscribe/youtube/{CACHE_DIRECTORY_NAME}"));
         std::fs::write(directory.join(&pointer_name), "not json").unwrap();
         assert!(matches!(cache.lookup(&request).unwrap(), Lookup::Invalid));
         std::fs::remove_file(directory.join(&pointer_name)).unwrap();
