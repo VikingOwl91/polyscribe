@@ -17,7 +17,7 @@ PolyScribe is a Cargo workspace CLI that orchestrates:
   - `ui.rs` / `ui/progress.rs`: cliclack-based interactive UI (prompts, spinners, progress bars),
   - `config.rs` / `error.rs`: env-var configuration and the core error type.
 - `polyscribe-host` / `polyscribe-protocol` (`crates/`): plugin discovery/process management and the PSP/1 protocol types.
-- `plugins/polyscribe-plugin-tubescribe`: reference plugin.
+- `plugins/polyscribe-plugin-example`: reference plugin.
 
 The executable entry point is `crates/polyscribe-cli/src/main.rs`; the command and option definitions are in `cli.rs`. Network orchestration for YouTube and model management lives at the CLI boundary. Core owns transcription, model discovery, stream handling, and serialization helpers.
 
@@ -411,7 +411,7 @@ ggml reported and the backend whisper.cpp selected.
 - New transcription engines: implement `TranscribeBackend` and register them in `select_backend` (`backend.rs`).
 - New output formats: extend `output.rs` (`render_srt` is the pattern for text formats).
 - New model sources: extend `models.rs` / `model_manager.rs` (the `HttpClient` trait makes the manager testable with stub clients).
-- New plugins: implement the PSP/1 interface (`info` + `run`); see `plugins/polyscribe-plugin-tubescribe`.
+- New plugins: implement the PSP/1 interface (`info` + `run`); see `plugins/polyscribe-plugin-example`.
 - Packaging: respect XDG dirs; allow `POLYSCRIBE_*` overrides; avoid hard-coding system paths.
 
 ## Binary naming and CLI surface

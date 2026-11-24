@@ -6,7 +6,7 @@ The repository is a Cargo workspace. Package the CLI crate; the engine and plugi
 
 - CLI crate: `crates/polyscribe-cli` (binary `polyscribe`)
 - Install from source: `cargo install --path crates/polyscribe-cli`
-- Reference plugin: `plugins/polyscribe-plugin-tubescribe` (binary `polyscribe-plugin-tubescribe`); ship it on `PATH` or document installing it into `$XDG_DATA_HOME/polyscribe/plugins`.
+- Reference plugin: `plugins/polyscribe-plugin-example` (binary `polyscribe-plugin-example`); ship it on `PATH` or document installing it into `$XDG_DATA_HOME/polyscribe/plugins`.
 
 ## Build requirements
 
@@ -26,7 +26,7 @@ The repository is a Cargo workspace. Package the CLI crate; the engine and plugi
 ## Binary naming
 
 - Install the CLI binary as `polyscribe`.
-- Install the reference plugin as `polyscribe-plugin-tubescribe`.
+- Install the reference plugin as `polyscribe-plugin-example`.
 
 ## Linux distribution tips (Arch example)
 

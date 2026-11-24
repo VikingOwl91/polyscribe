@@ -3,7 +3,7 @@
 #   make build
 #   make link
 
-PLUGIN := polyscribe-plugin-tubescribe
+PLUGIN := polyscribe-plugin-example
 BIN := ../../target/release/$(PLUGIN)
 
 .PHONY: build link

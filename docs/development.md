@@ -15,7 +15,7 @@ This document describes how to build, test, and run PolyScribe locally, and how 
 - `crates/polyscribe-cli`: the `polyscribe` binary with CLI parsing (`cli.rs`), command orchestration (`main.rs`), the `transcribe` pipeline (`transcribe.rs`), the `record` pipeline (`record.rs`), and stdout modes (`output.rs`).
 - `crates/polyscribe-host`: plugin discovery and process management.
 - `crates/polyscribe-protocol`: PSP/1 plugin protocol types.
-- `plugins/polyscribe-plugin-tubescribe`: reference plugin (workspace member; built and tested with the workspace).
+- `plugins/polyscribe-plugin-example`: reference plugin (workspace member; built and tested with the workspace).
 - `crates/polyscribe-cli/tests/fixtures/`: deterministic fixtures for the integration tests.
 
 ## Build
@@ -127,7 +127,7 @@ This document describes how to build, test, and run PolyScribe locally, and how 
 
 - A plugin is an executable named `polyscribe-plugin-<name>` on `PATH` or in `$XDG_DATA_HOME/polyscribe/plugins`.
 - Interface: `<plugin> info` prints capabilities JSON (`polyscribe_protocol::Capabilities`); `<plugin> run` reads one JSON-RPC request line from stdin and writes NDJSON `StreamItem`s (progress/result/error) to stdout.
-- `plugins/polyscribe-plugin-tubescribe` is the reference implementation; `crates/polyscribe-cli/tests/integration_plugins.rs` exercises it end to end.
+- `plugins/polyscribe-plugin-example` is the reference implementation; `crates/polyscribe-cli/tests/integration_plugins.rs` exercises it end to end.
 
 ## Env var examples for local testing
 
